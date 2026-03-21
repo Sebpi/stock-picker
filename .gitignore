@@ -1,0 +1,7 @@
+backend/.env
+backend/watchlist.json
+backend/predictions.json
+backend/alerts.json
+__pycache__/
+*.pyc
+*.pyo

@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+yfinance
+anthropic
+python-dotenv
+httpx
+apscheduler
+twilio

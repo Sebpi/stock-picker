@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock Picker</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header>
+    <h1>📈 Stock Picker</h1>
+    <nav>
+      <button class="tab-btn active" data-tab="screener">Screener</button>
+      <button class="tab-btn" data-tab="watchlist">Watchlist</button>
+      <button class="tab-btn" data-tab="ai">AI Advisor</button>
+      <button class="tab-btn" data-tab="predictions">Predictions</button>
+      <button class="tab-btn" data-tab="alerts">Alerts</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Screener Tab -->
+    <section id="tab-screener" class="tab active">
+      <div class="filters">
+        <div class="filter-group">
+          <label>Sector</label>
+          <select id="filter-sector">
+            <option value="">All Sectors</option>
+            <option>Technology</option>
+            <option>Healthcare</option>
+            <option>Financial Services</option>
+            <option>Consumer Cyclical</option>
+            <option>Consumer Defensive</option>
+            <option>Energy</option>
+            <option>Industrials</option>
+            <option>Communication Services</option>
+            <option>Basic Materials</option>
+            <option>Utilities</option>
+            <option>Real Estate</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Max P/E</label>
+          <input type="number" id="filter-pe" placeholder="e.g. 25" min="0" />
+        </div>
+        <div class="filter-group">
+          <label>Max PEG</label>
+          <input type="number" id="filter-peg" placeholder="e.g. 1.5" min="0" step="0.1" />
+        </div>
+        <div class="filter-group">
+          <label>Max P/B</label>
+          <input type="number" id="filter-pb" placeholder="e.g. 3" min="0" step="0.1" />
+        </div>
+        <div class="filter-group">
+          <label>Max EV/EBITDA</label>
+          <input type="number" id="filter-ev" placeholder="e.g. 15" min="0" />
+        </div>
+        <div class="filter-group">
+          <label>Min FCF Yield %</label>
+          <input type="number" id="filter-fcf" placeholder="e.g. 4" min="0" step="0.5" />
+        </div>
+        <div class="filter-group">
+          <label>Min Market Cap ($B)</label>
+          <input type="number" id="filter-cap" placeholder="e.g. 10" min="0" />
+        </div>
+        <div class="filter-group">
+          <label>Min Avg Volume (M)</label>
+          <input type="number" id="filter-vol" placeholder="e.g. 1" min="0" />
+        </div>
+        <button id="btn-screen" class="btn-primary">Run Screen</button>
+      </div>
+
+      <div id="screen-status" class="status-msg"></div>
+
+      <div class="table-wrap">
+        <table id="screen-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Name</th>
+              <th>Sector</th>
+              <th>Price</th>
+              <th>P/E</th>
+              <th>PEG</th>
+              <th>P/B</th>
+              <th>EV/EBITDA</th>
+              <th>FCF Yield</th>
+              <th>Mkt Cap</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="screen-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Watchlist Tab -->
+    <section id="tab-watchlist" class="tab">
+      <div class="tab-header">
+        <h2>My Watchlist</h2>
+        <button id="btn-refresh-watchlist" class="btn-secondary">↻ Refresh</button>
+      </div>
+      <div id="watchlist-status" class="status-msg"></div>
+      <div class="table-wrap">
+        <table id="watchlist-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Name</th>
+              <th>Price</th>
+              <th>Change</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="watchlist-body"></tbody>
+        </table>
+      </div>
+      <p id="watchlist-empty" class="empty-msg">Your watchlist is empty. Add stocks from the Screener.</p>
+    </section>
+
+    <!-- AI Advisor Tab -->
+    <section id="tab-ai" class="tab">
+      <div class="ai-container">
+        <h2>AI Stock Advisor</h2>
+        <p class="ai-subtitle">Describe what you're looking for and Claude will suggest stocks with analysis.</p>
+        <textarea id="ai-query" rows="4" placeholder="e.g. I'm looking for dividend-paying tech stocks with stable earnings and moderate growth..."></textarea>
+        <button id="btn-ask" class="btn-primary">Ask Claude</button>
+        <div id="ai-status" class="status-msg"></div>
+        <div id="ai-response" class="ai-response"></div>
+      </div>
+    </section>
+  </main>
+
+    <!-- Predictions Tab -->
+    <section id="tab-predictions" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>Daily Predictions</h2>
+          <p class="pred-subtitle">Claude analyses macro trends, news (Yahoo Finance, MarketWatch) and stock fundamentals to predict next-day moves. Learns from past accuracy.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-generate" class="btn-primary">Generate Today's Predictions</button>
+          <button id="btn-refresh-preds" class="btn-secondary">↻ Refresh Actuals</button>
+        </div>
+      </div>
+
+      <div id="pred-status" class="status-msg"></div>
+
+      <!-- Accuracy summary -->
+      <div id="accuracy-bar" class="accuracy-bar hidden">
+        <div class="acc-item"><span class="acc-label">Directional Accuracy</span><span id="acc-pct" class="acc-value">—</span></div>
+        <div class="acc-item"><span class="acc-label">Total Predictions</span><span id="acc-total" class="acc-value">—</span></div>
+        <div class="acc-item"><span class="acc-label">Avg Predicted</span><span id="acc-avg-pred" class="acc-value">—</span></div>
+        <div class="acc-item"><span class="acc-label">Avg Actual</span><span id="acc-avg-actual" class="acc-value">—</span></div>
+      </div>
+
+      <div class="table-wrap">
+        <table id="pred-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Ticker</th>
+              <th>Predicted %</th>
+              <th>Actual %</th>
+              <th>Result</th>
+              <th>Confidence</th>
+              <th>Reasoning</th>
+            </tr>
+          </thead>
+          <tbody id="pred-body"></tbody>
+        </table>
+      </div>
+      <p id="pred-empty" class="empty-msg">No predictions yet. Click "Generate Today's Predictions" to start.</p>
+    </section>
+
+    <!-- Alerts Tab -->
+    <section id="tab-alerts" class="tab">
+      <div class="alerts-header">
+        <div>
+          <h2>Swing Alerts</h2>
+          <p class="alerts-subtitle">Watchlist stocks are checked every 5 minutes. Alerts fire on daily swings, rapid momentum moves, or volume surges.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-test-alert" class="btn-secondary">Send Test Alert</button>
+          <button id="btn-refresh-alerts" class="btn-secondary">↻ Refresh</button>
+          <button id="btn-clear-alerts" class="btn-secondary" style="color:var(--red);border-color:var(--red)">Clear History</button>
+        </div>
+      </div>
+
+      <!-- Monitor status bar -->
+      <div id="monitor-status-bar" class="monitor-bar">
+        <div class="mon-item">
+          <span class="mon-label">Monitor</span>
+          <span id="mon-active" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Last Check</span>
+          <span id="mon-last" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Watching</span>
+          <span id="mon-watching" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Email</span>
+          <span id="mon-email" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">SMS</span>
+          <span id="mon-sms" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Swing Threshold</span>
+          <span id="mon-swing" class="mon-value">—</span>
+        </div>
+      </div>
+
+      <div id="alerts-status" class="status-msg"></div>
+
+      <!-- Alert history table -->
+      <div class="table-wrap">
+        <table id="alerts-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Ticker</th>
+              <th>Price</th>
+              <th>Signal</th>
+              <th>Type</th>
+              <th>Email</th>
+              <th>SMS</th>
+            </tr>
+          </thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+      </div>
+      <p id="alerts-empty" class="empty-msg">No alerts yet. Add stocks to your Watchlist — they'll be monitored every 5 minutes.</p>
+
+      <!-- Setup guide -->
+      <div class="setup-guide">
+        <h3>Setup Guide</h3>
+        <div class="setup-steps">
+          <div class="setup-step">
+            <span class="step-num">1</span>
+            <div>
+              <strong>Add stocks to your Watchlist</strong>
+              <p>Only watchlist stocks are monitored. Use the Screener tab to find and add stocks.</p>
+            </div>
+          </div>
+          <div class="setup-step">
+            <span class="step-num">2</span>
+            <div>
+              <strong>Configure Email (Gmail)</strong>
+              <p>In your <code>.env</code> file set <code>SMTP_USER</code>, <code>SMTP_PASS</code> (Gmail App Password), and <code>ALERT_EMAIL</code>. Get an App Password at <strong>myaccount.google.com/apppasswords</strong>.</p>
+            </div>
+          </div>
+          <div class="setup-step">
+            <span class="step-num">3</span>
+            <div>
+              <strong>Configure SMS via Twilio (optional)</strong>
+              <p>Sign up free at <strong>twilio.com</strong>, then set <code>TWILIO_ACCOUNT_SID</code>, <code>TWILIO_AUTH_TOKEN</code>, <code>TWILIO_FROM_NUMBER</code>, <code>TWILIO_TO_NUMBER</code> in your <code>.env</code> file.</p>
+            </div>
+          </div>
+          <div class="setup-step">
+            <span class="step-num">4</span>
+            <div>
+              <strong>Restart the backend</strong>
+              <p>After editing <code>.env</code>, restart uvicorn. Then click <strong>Send Test Alert</strong> to verify.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  <!-- Stock Detail Panel -->
+  <div id="detail-overlay" class="overlay hidden">
+    <div class="detail-panel">
+      <button id="detail-close" class="close-btn">✕</button>
+      <div id="detail-header">
+        <div>
+          <h2 id="detail-name"></h2>
+          <span id="detail-ticker" class="ticker-badge"></span>
+          <span id="detail-sector" class="sector-badge"></span>
+        </div>
+        <div class="detail-price-block">
+          <span id="detail-price" class="detail-price"></span>
+          <span id="detail-change" class="detail-change"></span>
+        </div>
+      </div>
+
+      <div class="detail-stats">
+        <div class="stat"><span class="stat-label">P/E Ratio</span><span id="stat-pe">—</span></div>
+        <div class="stat"><span class="stat-label">PEG Ratio</span><span id="stat-peg">—</span></div>
+        <div class="stat"><span class="stat-label">P/B Ratio</span><span id="stat-pb">—</span></div>
+        <div class="stat"><span class="stat-label">EV/EBITDA</span><span id="stat-ev">—</span></div>
+        <div class="stat"><span class="stat-label">FCF Yield</span><span id="stat-fcf">—</span></div>
+        <div class="stat"><span class="stat-label">Profit Margin</span><span id="stat-margin">—</span></div>
+        <div class="stat"><span class="stat-label">52W High</span><span id="stat-high">—</span></div>
+        <div class="stat"><span class="stat-label">52W Low</span><span id="stat-low">—</span></div>
+        <div class="stat"><span class="stat-label">Market Cap</span><span id="stat-cap">—</span></div>
+        <div class="stat"><span class="stat-label">Beta</span><span id="stat-beta">—</span></div>
+        <div class="stat"><span class="stat-label">EPS Growth</span><span id="stat-eps">—</span></div>
+        <div class="stat"><span class="stat-label">Rev Growth</span><span id="stat-rev">—</span></div>
+      </div>
+
+      <div class="chart-container">
+        <canvas id="price-chart"></canvas>
+      </div>
+
+      <p id="detail-desc" class="detail-desc"></p>
+
+      <button id="detail-watchlist-btn" class="btn-primary full-width"></button>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
