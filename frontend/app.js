@@ -78,21 +78,55 @@ async function runScreen() {
 
     status.textContent = `${data.length} stock${data.length !== 1 ? "s" : ""} found.`;
 
-    body.innerHTML = data.map(s => `
+    // Compute sector medians from screener results for inline arrows
+    const sectorGroups = {};
+    for (const s of data) {
+      const sec = s.sector || "Unknown";
+      if (!sectorGroups[sec]) sectorGroups[sec] = [];
+      sectorGroups[sec].push(s);
+    }
+    function calcMedian(stocks, key) {
+      const vals = stocks.map(s => s[key]).filter(v => v != null).sort((a, b) => a - b);
+      if (!vals.length) return null;
+      const mid = Math.floor(vals.length / 2);
+      return vals.length % 2 === 0 ? (vals[mid - 1] + vals[mid]) / 2 : vals[mid];
+    }
+    const sectorMedians = {};
+    for (const [sec, stocks] of Object.entries(sectorGroups)) {
+      if (stocks.length < 2) continue; // need peers to compare
+      sectorMedians[sec] = {
+        pe:        calcMedian(stocks, 'pe'),
+        peg:       calcMedian(stocks, 'peg'),
+        pb:        calcMedian(stocks, 'pb'),
+        ev_ebitda: calcMedian(stocks, 'ev_ebitda'),
+        fcf_yield: calcMedian(stocks, 'fcf_yield'),
+      };
+    }
+    function sArrow(val, median, higherIsBetter = false) {
+      if (val == null || median == null) return '';
+      const under = higherIsBetter ? val > median : val < median;
+      return under
+        ? '<span class="val-arrow arrow-undervalued" title="Undervalued vs sector peers">▲</span>'
+        : '<span class="val-arrow arrow-overvalued" title="Overvalued vs sector peers">▼</span>';
+    }
+
+    body.innerHTML = data.map(s => {
+      const m = sectorMedians[s.sector] || {};
+      return `
       <tr data-ticker="${s.ticker}">
         <td><strong>${s.ticker}</strong></td>
         <td>${s.name}</td>
         <td>${s.sector || "—"}</td>
         <td>${s.price != null ? "$" + s.price : "—"}</td>
-        <td>${s.pe ?? "—"}</td>
-        <td>${s.peg ?? "—"}</td>
-        <td>${s.pb ?? "—"}</td>
-        <td>${s.ev_ebitda ?? "—"}</td>
-        <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}</td>
+        <td>${s.pe ?? "—"}${sArrow(s.pe, m.pe)}</td>
+        <td>${s.peg ?? "—"}${sArrow(s.peg, m.peg)}</td>
+        <td>${s.pb ?? "—"}${sArrow(s.pb, m.pb)}</td>
+        <td>${s.ev_ebitda ?? "—"}${sArrow(s.ev_ebitda, m.ev_ebitda)}</td>
+        <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true)}</td>
         <td>${fmt(s.market_cap)}</td>
         <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
       </tr>
-    `).join("");
+    `}).join("");
 
     body.querySelectorAll("tr").forEach(row => {
       row.addEventListener("click", e => {
