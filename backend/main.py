@@ -196,6 +196,8 @@ async def monitor_stocks():
 
     results = await asyncio.gather(*[fetch_info(t) for t in watchlist], return_exceptions=True)
 
+    pending_alerts = []  # collect all alerts before sending
+
     for result in results:
         if isinstance(result, Exception):
             continue
@@ -259,37 +261,58 @@ async def monitor_stocks():
 
             alert_cooldown[ticker] = now
 
-            # Build alert record
-            signals_text = "\n".join(f"  • {t['signal']}" for t in triggered)
-            subject = f"Stock Alert: {ticker} — {triggered[0]['signal']} [{now.astimezone(ET).strftime('%H:%M ET')}]"
-            body = (
-                f"Stock Picker Alert\n"
-                f"{'='*40}\n"
-                f"Ticker:  {ticker} ({name})\n"
-                f"Price:   ${current_price:.2f}\n"
-                f"Time:    {now.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                f"Signals detected:\n{signals_text}\n\n"
-                f"⚠️  This is not financial advice. Always do your own research.\n"
-            )
-
-            emailed = send_email(subject, body)
-            texted  = send_sms(f"StockPicker 📈 {ticker} ${current_price:.2f}\n{signals_text}")
-
-            record = {
-                "id": str(uuid.uuid4()),
-                "timestamp": now.isoformat(),
+            pending_alerts.append({
                 "ticker": ticker,
                 "name": name,
                 "price": current_price,
-                "signals": triggered,
-                "notified_email": emailed,
-                "notified_sms": texted,
-            }
-            append_alert(record)
+                "triggered": triggered,
+            })
             print(f"[Monitor] Alert fired for {ticker}: {[t['signal'] for t in triggered]}")
 
         except Exception as e:
             print(f"[Monitor] Error checking {ticker}: {e}")
+
+    # Send one batched email for all alerts in this check cycle
+    if pending_alerts:
+        time_str = now.astimezone(ET).strftime('%Y-%m-%d %H:%M ET')
+        subject = f"Stock Alerts ({len(pending_alerts)} ticker{'s' if len(pending_alerts) > 1 else ''}) — {time_str}"
+
+        body_lines = [
+            f"Stock Picker Alerts — {time_str}",
+            "=" * 40,
+            "",
+        ]
+        sms_lines = [f"StockPicker Alerts {time_str}"]
+
+        for alert in pending_alerts:
+            signals_text = "\n".join(f"    • {t['signal']}" for t in alert["triggered"])
+            body_lines += [
+                f"Ticker:  {alert['ticker']} ({alert['name']})",
+                f"Price:   ${alert['price']:.2f}",
+                f"Signals:\n{signals_text}",
+                "",
+            ]
+            sms_lines.append(f"{alert['ticker']} ${alert['price']:.2f}: {alert['triggered'][0]['signal']}")
+
+        body_lines.append("⚠️  This is not financial advice. Always do your own research.")
+        body = "\n".join(body_lines)
+        sms_body = "\n".join(sms_lines)
+
+        emailed = send_email(subject, body)
+        texted  = send_sms(sms_body[:1600])
+
+        for alert in pending_alerts:
+            record = {
+                "id": str(uuid.uuid4()),
+                "timestamp": now.isoformat(),
+                "ticker": alert["ticker"],
+                "name": alert["name"],
+                "price": alert["price"],
+                "signals": alert["triggered"],
+                "notified_email": emailed,
+                "notified_sms": texted,
+            }
+            append_alert(record)
 
     monitor_status["active"] = True
 
