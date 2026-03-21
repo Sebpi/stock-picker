@@ -291,7 +291,8 @@ textarea:focus { border-color: var(--accent); }
 .stat { display: flex; flex-direction: column; gap: 0.2rem; }
 .stat-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
 .stat-val { font-size: 1rem; font-weight: 600; }
-.val-arrow { font-size: 0.72rem; font-weight: 700; margin-left: 3px; vertical-align: middle; }
+.stat-value-row { display: flex; align-items: center; gap: 5px; }
+.val-arrow { font-size: 0.72rem; font-weight: 700; line-height: 1; }
 .arrow-undervalued { color: var(--green); }
 .arrow-overvalued  { color: var(--red); }
 
