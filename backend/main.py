@@ -655,8 +655,11 @@ async def generate_predictions():
 
     already_predicted = {p["ticker"] for p in predictions if p["date"] == today}
     watchlist_tickers = load_watchlist()
-    candidates = list(dict.fromkeys(watchlist_tickers + UNIVERSE[:20]))
-    to_analyze = [t for t in candidates if t not in already_predicted][:15]
+
+    # Watchlist stocks always get a prediction; UNIVERSE fills remaining slots
+    watchlist_missing = [t for t in watchlist_tickers if t not in already_predicted]
+    universe_fill = [t for t in UNIVERSE[:20] if t not in already_predicted and t not in watchlist_tickers]
+    to_analyze = list(dict.fromkeys(watchlist_missing + universe_fill))[:20]
 
     if not to_analyze:
         if updated:
@@ -724,6 +727,10 @@ async def generate_predictions():
                 f"actual {p['actual_pct']:+.2f}% [{direction}]\n"
             )
 
+    watchlist_set = set(watchlist_tickers)
+    must_predict = [s["ticker"] for s in stocks_data if s["ticker"] in watchlist_set]
+    also_consider = [s["ticker"] for s in stocks_data if s["ticker"] not in watchlist_set]
+
     prompt = f"""You are a quantitative stock analyst with one goal: identify stocks with potential for >10% monthly returns (~0.5%+ per day).
 
 Today: {today}
@@ -759,7 +766,8 @@ CATALYSTS (why would it move NOW?):
 - Beta (high beta = amplified moves)
 - Recent 5-day momentum
 
-Flag the 2-3 stocks with the strongest combination of cheap valuation + quality + near-term catalyst.
+IMPORTANT: You MUST return a prediction for EVERY stock in the watchlist: {must_predict}.
+For any remaining stocks {also_consider}, only include the 2-3 with the strongest outlook.
 
 Return ONLY a valid JSON array, no explanation, no markdown:
 [
