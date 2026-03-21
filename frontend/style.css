@@ -290,7 +290,10 @@ textarea:focus { border-color: var(--accent); }
 
 .stat { display: flex; flex-direction: column; gap: 0.2rem; }
 .stat-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-.stat span:last-child { font-size: 1rem; font-weight: 600; }
+.stat-val { font-size: 1rem; font-weight: 600; }
+.val-arrow { font-size: 0.72rem; font-weight: 700; margin-left: 3px; vertical-align: middle; }
+.arrow-undervalued { color: var(--green); }
+.arrow-overvalued  { color: var(--red); }
 
 .chart-container { position: relative; height: 220px; margin-bottom: 1.25rem; }
 

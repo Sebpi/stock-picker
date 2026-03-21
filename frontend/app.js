@@ -185,6 +185,24 @@ function refreshWatchButtons() {
 }
 
 // ── Detail Panel ─────────────────────────────────────────────
+function setValArrow(arrowId, comparison) {
+  const el = document.getElementById(arrowId);
+  if (!el) return;
+  if (comparison === "undervalued") {
+    el.textContent = "▲";
+    el.className = "val-arrow arrow-undervalued";
+    el.title = "Undervalued vs sector peers";
+  } else if (comparison === "overvalued") {
+    el.textContent = "▼";
+    el.className = "val-arrow arrow-overvalued";
+    el.title = "Overvalued vs sector peers";
+  } else {
+    el.textContent = "";
+    el.className = "val-arrow";
+    el.title = "";
+  }
+}
+
 async function openDetail(ticker) {
   const overlay = document.getElementById("detail-overlay");
   overlay.classList.remove("hidden");
@@ -199,12 +217,17 @@ async function openDetail(ticker) {
   document.getElementById("stat-high").textContent = "—";
   document.getElementById("stat-low").textContent = "—";
   document.getElementById("detail-desc").textContent = "";
+  ["arrow-pe", "arrow-peg", "arrow-pb", "arrow-ev", "arrow-fcf"].forEach(id => setValArrow(id, null));
 
   destroyChart();
 
   try {
-    const res = await fetch(`${API}/api/stock/${ticker}`);
-    const d = await res.json();
+    const [stockRes, peersRes] = await Promise.all([
+      fetch(`${API}/api/stock/${ticker}`),
+      fetch(`${API}/api/stock/${ticker}/peers`),
+    ]);
+    const d = await stockRes.json();
+    const peers = peersRes.ok ? await peersRes.json() : null;
 
     document.getElementById("detail-name").textContent = d.name;
     document.getElementById("detail-ticker").textContent = d.ticker;
@@ -224,6 +247,14 @@ async function openDetail(ticker) {
     document.getElementById("stat-high").textContent   = d.week_52_high != null ? "$" + d.week_52_high.toFixed(2) : "—";
     document.getElementById("stat-low").textContent    = d.week_52_low != null ? "$" + d.week_52_low.toFixed(2) : "—";
     document.getElementById("detail-desc").textContent = d.description || "";
+
+    if (peers && peers.comparison) {
+      setValArrow("arrow-pe",  peers.comparison.pe);
+      setValArrow("arrow-peg", peers.comparison.peg);
+      setValArrow("arrow-pb",  peers.comparison.pb);
+      setValArrow("arrow-ev",  peers.comparison.ev_ebitda);
+      setValArrow("arrow-fcf", peers.comparison.fcf_yield);
+    }
 
     // Chart
     const labels = d.history.map(h => h.date);

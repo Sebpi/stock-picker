@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import smtplib
+import statistics
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, time, timezone
@@ -442,6 +443,78 @@ def get_stock(ticker: str):
         }
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/stock/{ticker}/peers")
+async def get_peer_valuation(ticker: str):
+    ticker = ticker.upper()
+    try:
+        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    sector = info.get("sector", "")
+    target = {
+        "pe":        info.get("trailingPE"),
+        "peg":       info.get("pegRatio"),
+        "pb":        info.get("priceToBook"),
+        "ev_ebitda": info.get("enterpriseToEbitda"),
+        "fcf_yield": calc_fcf_yield(info.get("freeCashflow"), info.get("marketCap")),
+    }
+
+    if not sector:
+        return {"peers_count": 0, "sector": None, "comparison": {}}
+
+    peer_candidates = [t for t in UNIVERSE if t != ticker]
+
+    async def fetch_peer(t):
+        return t, await asyncio.to_thread(lambda: yf.Ticker(t).info)
+
+    results = await asyncio.gather(*[fetch_peer(t) for t in peer_candidates], return_exceptions=True)
+
+    peer_data = []
+    for result in results:
+        if isinstance(result, Exception):
+            continue
+        t, pinfo = result
+        if pinfo.get("sector", "") != sector:
+            continue
+        mc = pinfo.get("marketCap")
+        peer_data.append({
+            "pe":        pinfo.get("trailingPE"),
+            "peg":       pinfo.get("pegRatio"),
+            "pb":        pinfo.get("priceToBook"),
+            "ev_ebitda": pinfo.get("enterpriseToEbitda"),
+            "fcf_yield": calc_fcf_yield(pinfo.get("freeCashflow"), mc),
+        })
+
+    if not peer_data:
+        return {"peers_count": 0, "sector": sector, "comparison": {}}
+
+    def peer_median(key):
+        vals = [p[key] for p in peer_data if p.get(key) is not None]
+        return statistics.median(vals) if vals else None
+
+    medians = {k: peer_median(k) for k in ["pe", "peg", "pb", "ev_ebitda", "fcf_yield"]}
+
+    comparison = {}
+    for key in ["pe", "peg", "pb", "ev_ebitda"]:
+        if target[key] is not None and medians[key] is not None:
+            comparison[key] = "undervalued" if target[key] < medians[key] else "overvalued"
+        else:
+            comparison[key] = None
+
+    if target["fcf_yield"] is not None and medians["fcf_yield"] is not None:
+        comparison["fcf_yield"] = "undervalued" if target["fcf_yield"] > medians["fcf_yield"] else "overvalued"
+    else:
+        comparison["fcf_yield"] = None
+
+    return {
+        "peers_count": len(peer_data),
+        "sector": sector,
+        "medians": {k: round(v, 2) if v is not None else None for k, v in medians.items()},
+        "comparison": comparison,
+    }
 
 
 @app.get("/api/watchlist")
