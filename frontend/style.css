@@ -815,19 +815,6 @@ body.login-active { overflow: hidden; }
 .btn-secondary:hover { border-color: var(--accent); color: var(--text); }
 
 /* ── Backtest ─────────────────────────────────────────────────── */
-.backtest-section {
-  margin-top: 2.5rem;
-  border-top: 1px solid var(--border);
-  padding-top: 1.5rem;
-}
-.backtest-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 1rem;
-}
-.backtest-header h3 { font-size: 1.1rem; margin-bottom: 0.2rem; }
-.backtest-header .btn-secondary { flex: none; white-space: nowrap; }
 .backtest-summary {
   display: flex;
   flex-wrap: wrap;

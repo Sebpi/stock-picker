@@ -161,7 +161,7 @@ document.getElementById("btn-cp-save").onclick = async () => {
 let priceChart = null;
 let watchlist = [];
 
-const TAB_LOADERS = { watchlist: () => loadWatchlist(), predictions: () => loadPredictions(), alerts: () => loadAlerts(), portfolio: () => loadPortfolio() };
+const TAB_LOADERS = { watchlist: () => loadWatchlist(), predictions: () => loadPredictions(), alerts: () => loadAlerts(), portfolio: () => loadPortfolio(), backtest: () => {} };
 const SIGNAL_LABELS = { daily_swing: "Daily Swing", momentum: "Momentum", volume_surge: "Vol Surge" };
 
 document.querySelectorAll(".tab-btn").forEach(btn => {

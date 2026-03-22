@@ -49,6 +49,7 @@
       <button class="tab-btn" data-tab="watchlist">Watchlist</button>
       <button class="tab-btn" data-tab="ai">AI Advisor</button>
       <button class="tab-btn" data-tab="predictions">Predictions</button>
+      <button class="tab-btn" data-tab="backtest">Backtest</button>
       <button class="tab-btn" data-tab="alerts">Alerts</button>
       <button class="tab-btn" data-tab="portfolio">Portfolio</button>
     </nav>
@@ -211,37 +212,40 @@
       </div>
       <p id="pred-empty" class="empty-msg">No predictions yet. Click "Generate Today's Predictions" to start.</p>
 
-      <!-- Backtest -->
-      <div class="backtest-section">
-        <div class="backtest-header">
-          <div>
-            <h3>4-Week Backtest</h3>
-            <p class="pred-subtitle">Replays the sentiment scoring model against historical data to measure directional accuracy.</p>
-          </div>
-          <button id="btn-backtest" class="btn-secondary">▶ Run Backtest</button>
+    </section>
+
+    <!-- Backtest Tab -->
+    <section id="tab-backtest" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>4-Week Backtest</h2>
+          <p class="pred-subtitle">Replays the sentiment scoring model against 4 weeks of historical data to measure directional accuracy. Uses VIX, S&P momentum, beta, and fundamentals (news excluded — historical headlines unavailable).</p>
         </div>
-        <div id="backtest-status" class="status-msg"></div>
-        <div id="backtest-summary" class="backtest-summary hidden"></div>
-        <div id="backtest-by-ticker" class="backtest-by-ticker hidden"></div>
-        <div id="backtest-table-wrap" class="table-wrap hidden">
-          <table id="backtest-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Ticker</th>
-                <th>VIX</th>
-                <th>S&P 5d</th>
-                <th>Sentiment</th>
-                <th>Fund Adj</th>
-                <th>Predicted %</th>
-                <th>Actual %</th>
-                <th>Variance</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody id="backtest-body"></tbody>
-          </table>
+        <div class="pred-actions">
+          <button id="btn-backtest" class="btn-primary">▶ Run Backtest</button>
         </div>
+      </div>
+      <div id="backtest-status" class="status-msg"></div>
+      <div id="backtest-summary" class="backtest-summary hidden"></div>
+      <div id="backtest-by-ticker" class="backtest-by-ticker hidden"></div>
+      <div id="backtest-table-wrap" class="table-wrap hidden">
+        <table id="backtest-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Ticker</th>
+              <th>VIX</th>
+              <th>S&P 5d</th>
+              <th>Sentiment</th>
+              <th>Fund Adj</th>
+              <th>Predicted %</th>
+              <th>Actual %</th>
+              <th>Variance</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody id="backtest-body"></tbody>
+        </table>
       </div>
     </section>
 
