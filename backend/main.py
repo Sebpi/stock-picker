@@ -96,6 +96,20 @@ price_cache: dict[str, float] = {}       # ticker -> last seen price
 alert_cooldown: dict[str, datetime] = {} # ticker -> last alert time
 monitor_status = {"last_check": None, "active": False, "checks_run": 0}
 
+# yfinance info cache — 5 minute TTL to avoid redundant network calls
+_info_cache: dict[str, tuple[dict, datetime]] = {}
+_INFO_TTL = 300  # seconds
+
+async def get_info(ticker: str) -> dict:
+    now = datetime.now(timezone.utc)
+    if ticker in _info_cache:
+        cached, ts = _info_cache[ticker]
+        if (now - ts).total_seconds() < _INFO_TTL:
+            return cached
+    info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+    _info_cache[ticker] = (info, now)
+    return info
+
 
 # ── File helpers ──────────────────────────────────────────────────────────────
 
@@ -367,7 +381,7 @@ async def shutdown():
 # ── Existing endpoints ────────────────────────────────────────────────────────
 
 @app.get("/api/screen")
-def screen_stocks(
+async def screen_stocks(
     sector: Optional[str] = None,
     min_market_cap: Optional[float] = None,
     max_pe: Optional[float] = None,
@@ -377,10 +391,13 @@ def screen_stocks(
     min_fcf_yield: Optional[float] = None,
     min_volume: Optional[float] = None,
 ):
+    infos = await asyncio.gather(*[get_info(t) for t in UNIVERSE], return_exceptions=True)
+
     results = []
-    for ticker in UNIVERSE:
+    for ticker, info in zip(UNIVERSE, infos):
+        if isinstance(info, Exception):
+            continue
         try:
-            info = yf.Ticker(ticker).info
             stock_sector = info.get("sector", "")
             market_cap   = info.get("marketCap")
             pe           = info.get("trailingPE")
@@ -391,8 +408,7 @@ def screen_stocks(
             volume       = info.get("averageVolume")
             price        = info.get("currentPrice") or info.get("regularMarketPrice")
             name         = info.get("shortName", ticker)
-
-            fcf_yield = calc_fcf_yield(fcf, market_cap)
+            fcf_yield    = calc_fcf_yield(fcf, market_cap)
 
             if sector and sector.lower() not in stock_sector.lower():
                 continue
@@ -469,7 +485,7 @@ def get_stock(ticker: str):
 async def get_peer_valuation(ticker: str):
     ticker = ticker.upper()
     try:
-        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+        info = await get_info(ticker)
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -486,17 +502,13 @@ async def get_peer_valuation(ticker: str):
         return {"peers_count": 0, "sector": None, "comparison": {}}
 
     peer_candidates = [t for t in UNIVERSE if t != ticker]
-
-    async def fetch_peer(t):
-        return t, await asyncio.to_thread(lambda: yf.Ticker(t).info)
-
-    results = await asyncio.gather(*[fetch_peer(t) for t in peer_candidates], return_exceptions=True)
+    peer_infos = await asyncio.gather(*[get_info(t) for t in peer_candidates], return_exceptions=True)
+    results = list(zip(peer_candidates, peer_infos))
 
     peer_data = []
-    for result in results:
-        if isinstance(result, Exception):
+    for t, pinfo in results:
+        if isinstance(pinfo, Exception):
             continue
-        t, pinfo = result
         if pinfo.get("sector", "") != sector:
             continue
         mc = pinfo.get("marketCap")
@@ -538,22 +550,22 @@ async def get_peer_valuation(ticker: str):
 
 
 @app.get("/api/watchlist")
-def get_watchlist():
+async def get_watchlist():
     tickers = load_watchlist()
+    infos = await asyncio.gather(*[get_info(t) for t in tickers], return_exceptions=True)
     results = []
-    for ticker in tickers:
-        try:
-            info = yf.Ticker(ticker).info
-            price = info.get("currentPrice") or info.get("regularMarketPrice")
-            change_pct = info.get("regularMarketChangePercent")
-            results.append({
-                "ticker": ticker,
-                "name": info.get("shortName", ticker),
-                "price": round(price, 2) if price else None,
-                "change_pct": round(change_pct, 2) if change_pct else None,
-            })
-        except Exception:
+    for ticker, info in zip(tickers, infos):
+        if isinstance(info, Exception):
             results.append({"ticker": ticker, "name": ticker, "price": None, "change_pct": None})
+            continue
+        price      = info.get("currentPrice") or info.get("regularMarketPrice")
+        change_pct = info.get("regularMarketChangePercent")
+        results.append({
+            "ticker": ticker,
+            "name": info.get("shortName", ticker),
+            "price": round(price, 2) if price else None,
+            "change_pct": round(change_pct, 2) if change_pct else None,
+        })
     return results
 
 
