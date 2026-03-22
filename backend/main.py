@@ -807,9 +807,11 @@ confidence: "low" | "medium" | "high"."""
         if ticker in seen_today:
             continue  # skip duplicates
         seen_today.add(ticker)
+        name_map = {s["ticker"]: s["name"] for s in stocks_data}
         entry = {
             "date": today,
             "ticker": ticker,
+            "name": name_map.get(ticker, ""),
             "predicted_pct": cp["predicted_pct"],
             "confidence": cp.get("confidence", "medium"),
             "reasoning": cp.get("reasoning", ""),

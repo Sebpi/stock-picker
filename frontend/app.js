@@ -449,6 +449,7 @@ function renderPredictionsTable(preds) {
       <tr>
         <td>${p.date}</td>
         <td><strong>${p.ticker}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${p.name || "—"}</td>
         <td>${predStr}</td>
         <td>${actualStr}</td>
         <td>${resultStr}</td>
