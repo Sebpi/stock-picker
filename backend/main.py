@@ -800,6 +800,7 @@ confidence: "low" | "medium" | "high"."""
 
     claude_preds = json.loads(raw)
     price_map = {s["ticker"]: s["price"] for s in stocks_data}
+    name_map  = {s["ticker"]: s["name"]  for s in stocks_data}
     new_preds = []
     seen_today = {p["ticker"] for p in predictions if p["date"] == today}
     for cp in claude_preds:
@@ -807,7 +808,6 @@ confidence: "low" | "medium" | "high"."""
         if ticker in seen_today:
             continue  # skip duplicates
         seen_today.add(ticker)
-        name_map = {s["ticker"]: s["name"] for s in stocks_data}
         entry = {
             "date": today,
             "ticker": ticker,
