@@ -617,33 +617,33 @@ textarea:focus { border-color: var(--accent); }
   content: attr(data-tip);
   position: absolute;
   left: 50%;
-  top: calc(100% + 8px);
+  top: calc(100% + 10px);
   transform: translateX(-50%);
-  background: #1e2235;
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-size: 0.8rem;
-  line-height: 1.5;
+  background: #f0f4ff;
+  border: 1px solid #c5cfe8;
+  color: #1a1e30;
+  font-size: 0.82rem;
+  line-height: 1.7;
   white-space: pre;
-  padding: 0.65rem 0.9rem;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  padding: 0.9rem 1.1rem;
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
   z-index: 9000;
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.15s, visibility 0.15s;
-  min-width: 220px;
-  max-width: 320px;
+  width: 310px;
+  max-width: 310px;
 }
 .tip::before {
   content: "";
   position: absolute;
   left: 50%;
-  top: calc(100% + 3px);
+  top: calc(100% + 4px);
   transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-bottom-color: var(--border);
+  border: 6px solid transparent;
+  border-bottom-color: #c5cfe8;
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.15s, visibility 0.15s;
@@ -666,7 +666,7 @@ th .tip::before,
   top: auto;
   bottom: calc(100% + 3px);
   border-bottom-color: transparent;
-  border-top-color: var(--border);
+  border-top-color: #c5cfe8;
 }
 
 /* ── Login overlay ── */
