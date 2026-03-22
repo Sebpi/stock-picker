@@ -769,13 +769,19 @@ CATALYSTS (why would it move NOW?):
 IMPORTANT: You MUST return a prediction for EVERY stock in the watchlist: {must_predict}.
 For any remaining stocks {also_consider}, only include the 2-3 with the strongest outlook.
 
+CONFIDENCE RULES — confidence must directly reflect the reasoning, no contradictions:
+- "high": clear bullish signals, no significant headwinds mentioned in reasoning
+- "medium": mixed signals or at least one notable risk factor mentioned
+- "low": meaningful bearish factors present (e.g. sell-off, overvaluation, weak momentum, macro headwinds)
+If your reasoning mentions a sell-off, downtrend, overvaluation, or risk — confidence MUST be "low" or "medium", never "high".
+
 Return ONLY a valid JSON array, no explanation, no markdown:
 [
   {{
     "ticker": "AAPL",
     "predicted_pct": 1.2,
     "confidence": "high",
-    "reasoning": "PEG 0.8 signals undervaluation vs growth. Strong FCF yield 6.2%. Positive macro tailwind from Fed pause. Recent momentum +2.1% over 5 days."
+    "reasoning": "PEG 0.8 signals undervaluation vs growth. Strong FCF yield 6.2%. Positive macro tailwind from Fed pause. Recent momentum +2.1% over 5 days. No significant headwinds identified."
   }}
 ]
 confidence: "low" | "medium" | "high"."""
