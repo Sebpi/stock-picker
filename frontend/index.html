@@ -270,20 +270,36 @@
         <table id="backtest-table">
           <thead>
             <tr>
-              <th>Date</th>
-              <th>Ticker</th>
-              <th>VIX</th>
-              <th>S&P 5d</th>
-              <th>Sentiment</th>
-              <th>Fund Adj</th>
-              <th>Predicted %</th>
-              <th>Actual %</th>
-              <th>Variance</th>
-              <th>Result</th>
+              <th>Date</th><th>Ticker</th><th>VIX</th><th>S&P 5d</th>
+              <th>Sentiment</th><th>Fund Adj</th><th>Predicted %</th>
+              <th>Actual %</th><th>Variance</th><th>Result</th>
             </tr>
           </thead>
           <tbody id="backtest-body"></tbody>
         </table>
+      </div>
+
+      <!-- P&L Simulator -->
+      <div class="sim-section">
+        <div class="backtest-header">
+          <div>
+            <h3>P&L Simulator</h3>
+            <p class="pred-subtitle">Replays every buy signal through the position sizing model using actual returns, then runs 1,000 Monte Carlo simulations to project 12 months forward.</p>
+          </div>
+          <button id="btn-simulate" class="btn-primary">▶ Run Simulator</button>
+        </div>
+        <div id="sim-status" class="status-msg"></div>
+        <div id="sim-results" class="hidden">
+          <!-- Key stats -->
+          <div id="sim-stats" class="backtest-summary" style="margin-bottom:1rem"></div>
+          <!-- Monte Carlo outcome cards -->
+          <div id="sim-mc-cards" class="sim-mc-cards"></div>
+          <!-- Chart -->
+          <div class="sim-chart-wrap">
+            <canvas id="sim-chart" height="320"></canvas>
+          </div>
+          <p class="sim-disclaimer">Monte Carlo uses observed win rate, avg win/loss magnitude, and avg trades/day from the 4-week backtest. Past performance does not guarantee future results.</p>
+        </div>
       </div>
     </section>
 

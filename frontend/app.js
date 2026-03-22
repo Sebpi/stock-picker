@@ -759,6 +759,105 @@ document.getElementById("btn-backtest").addEventListener("click", async () => {
   }
 });
 
+// ── P&L Simulator ─────────────────────────────────────────────
+
+let simChart = null;
+
+document.getElementById("btn-simulate").addEventListener("click", async () => {
+  const btn    = document.getElementById("btn-simulate");
+  const status = document.getElementById("sim-status");
+  const results = document.getElementById("sim-results");
+
+  btn.disabled = true;
+  status.textContent = "Running simulator… fetching 4 weeks of price data and running 1,000 Monte Carlo simulations (30–60 seconds)…";
+  results.classList.add("hidden");
+
+  try {
+    const res  = await authFetch(`${API}/api/predictions/simulate`);
+    const data = await res.json();
+
+    if (data.error) { status.textContent = data.error; return; }
+    status.textContent = "";
+
+    const s  = data.stats;
+    const mc = data.monte_carlo;
+    const fmt = (n) => "£" + Math.abs(n).toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    const fmtPct = (n) => (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
+
+    // Stats bar
+    const retCls = s.hist_return_pct >= 0 ? "change-pos" : "change-neg";
+    document.getElementById("sim-stats").innerHTML = `
+      <div class="acc-item"><span class="acc-label">Start Capital</span><span class="acc-value">${fmt(s.initial_float)}</span></div>
+      <div class="acc-item"><span class="acc-label">After ${s.hist_weeks}wk (real)</span><span class="acc-value ${retCls}">${fmt(s.hist_final_value)} (${fmtPct(s.hist_return_pct)})</span></div>
+      <div class="acc-item"><span class="acc-label">Win Rate</span><span class="acc-value">${s.win_rate_pct}%</span></div>
+      <div class="acc-item"><span class="acc-label">Avg Win</span><span class="acc-value change-pos">+${s.avg_win_pct}%</span></div>
+      <div class="acc-item"><span class="acc-label">Avg Loss</span><span class="acc-value change-neg">-${s.avg_loss_pct}%</span></div>
+      <div class="acc-item"><span class="acc-label">Trades/Day</span><span class="acc-value">${s.avg_trades_per_day}</span></div>
+    `;
+
+    // Monte Carlo outcome cards
+    const probCls = mc.prob_target_pct >= 50 ? "change-pos" : mc.prob_target_pct >= 25 ? "" : "change-neg";
+    document.getElementById("sim-mc-cards").innerHTML = `
+      <div class="sim-mc-card sim-mc-pessimist"><span class="sim-mc-label">Pessimistic (10th %ile)</span><span class="sim-mc-val change-neg">${fmt(mc.p10)}</span><small>${fmtPct((mc.p10 - s.initial_float) / s.initial_float * 100)}</small></div>
+      <div class="sim-mc-card sim-mc-median"><span class="sim-mc-label">Median (50th %ile)</span><span class="sim-mc-val">${fmt(mc.p50)}</span><small>${fmtPct((mc.p50 - s.initial_float) / s.initial_float * 100)}</small></div>
+      <div class="sim-mc-card sim-mc-optimist"><span class="sim-mc-label">Optimistic (90th %ile)</span><span class="sim-mc-val change-pos">${fmt(mc.p90)}</span><small>${fmtPct((mc.p90 - s.initial_float) / s.initial_float * 100)}</small></div>
+      <div class="sim-mc-card sim-mc-prob"><span class="sim-mc-label">Prob. of hitting ${fmt(s.target)}</span><span class="sim-mc-val ${probCls}">${mc.prob_target_pct}%</span><small>across 1,000 sims</small></div>
+    `;
+
+    // Build chart datasets — Monte Carlo projection paths
+    // Project median path (sample_paths[0] approximates median-ish)
+    const projDays   = Array.from({length: mc.n_days + 1}, (_, i) => `Day ${i}`);
+    const p10Path    = mc.sample_paths[0] || [];
+    const p50Path    = mc.sample_paths[4] || [];
+    const p90Path    = mc.sample_paths[9] || [];
+
+    if (simChart) simChart.destroy();
+    const ctx = document.getElementById("sim-chart").getContext("2d");
+    simChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: projDays,
+        datasets: [
+          { label: "Optimistic (90th)", data: p90Path, borderColor: "rgba(34,197,94,0.7)", backgroundColor: "rgba(34,197,94,0.05)", borderWidth: 1.5, pointRadius: 0, fill: false },
+          { label: "Sample median", data: p50Path, borderColor: "rgba(79,142,247,0.9)", backgroundColor: "rgba(79,142,247,0.08)", borderWidth: 2, pointRadius: 0, fill: false },
+          { label: "Pessimistic (10th)", data: p10Path, borderColor: "rgba(239,68,68,0.7)", backgroundColor: "rgba(239,68,68,0.05)", borderWidth: 1.5, pointRadius: 0, fill: false },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { labels: { color: "#e8eaf0" } },
+          tooltip: {
+            callbacks: { label: ctx => "£" + Math.round(ctx.raw).toLocaleString("en-GB") },
+          },
+          annotation: {
+            annotations: {
+              target: {
+                type: "line", yMin: s.target, yMax: s.target,
+                borderColor: "rgba(250,204,21,0.8)", borderWidth: 1.5, borderDash: [6, 4],
+                label: { content: `Target £${s.target.toLocaleString("en-GB")}`, enabled: true, color: "#fbbf24", backgroundColor: "transparent" },
+              },
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: "#7b82a0", maxTicksLimit: 12 }, grid: { color: "#2e3350" } },
+          y: {
+            ticks: { color: "#7b82a0", callback: v => "£" + Math.round(v / 1000) + "k" },
+            grid: { color: "#2e3350" },
+          },
+        },
+      },
+    });
+
+    results.classList.remove("hidden");
+  } catch (err) {
+    status.textContent = "Simulator error: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ── Recommendations ───────────────────────────────────────────
 
 async function loadRecommendations() {

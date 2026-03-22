@@ -4,6 +4,7 @@ import io
 import pypdf
 import json
 import os
+import random
 import secrets
 import smtplib
 import statistics
@@ -1385,6 +1386,213 @@ async def backtest_predictions():
             "note":            "Headline sentiment not included in backtest (historical news unavailable). Scores use VIX + S&P momentum + beta + fundamentals only.",
         },
         "by_ticker": by_ticker,
+    }
+
+
+@app.get("/api/predictions/simulate")
+async def simulate_predictions():
+    """
+    Replay 4-week backtest through position sizing model to compute real P&L,
+    then run 1000 Monte Carlo simulations projected to 12 months.
+    """
+    settings      = load_settings()
+    initial_float = settings["initial_float"]
+    target        = settings["target"]
+
+    # ── Run backtest to get raw results ────────────────────────────────────
+    watchlist  = load_watchlist()
+    end_date   = date.today()
+    start_date = end_date - timedelta(weeks=6)
+
+    vix_hist = yf.Ticker("^VIX").history(start=str(start_date), end=str(end_date))
+    sp_hist  = yf.Ticker("^GSPC").history(start=str(start_date), end=str(end_date))
+    vix_dates  = [d.date() for d in vix_hist.index]
+    sp_dates   = [d.date() for d in sp_hist.index]
+    vix_closes = list(vix_hist["Close"])
+    sp_closes  = list(sp_hist["Close"])
+
+    raw_results = []
+    for ticker in watchlist:
+        try:
+            t    = yf.Ticker(ticker)
+            info = t.info
+            hist = t.history(start=str(start_date), end=str(end_date))
+            if len(hist) < 3:
+                continue
+            beta       = info.get("beta") or 1.0
+            pe         = info.get("trailingPE")
+            peg        = info.get("pegRatio")
+            fcf_yield  = calc_fcf_yield(info.get("freeCashflow"), info.get("marketCap"))
+            profit_m   = info.get("profitMargins") or 0
+            debt_eq    = info.get("debtToEquity") or 0
+            rev_growth = info.get("revenueGrowth") or 0
+
+            fund_adj = 0.0
+            if peg and peg < 1:    fund_adj += 0.4
+            elif peg and peg > 2:  fund_adj -= 0.3
+            if fcf_yield:
+                if fcf_yield > 6:  fund_adj += 0.3
+                elif fcf_yield < 2: fund_adj -= 0.2
+            if pe:
+                if pe < 15:        fund_adj += 0.2
+                elif pe > 30:      fund_adj -= 0.3
+            if profit_m > 0.20:    fund_adj += 0.1
+            if debt_eq > 200:      fund_adj -= 0.1
+            if rev_growth > 0.10:  fund_adj += 0.1
+            fund_adj = round(max(-1.0, min(1.0, fund_adj)), 2)
+
+            ticker_dates  = [d.date() for d in hist.index]
+            ticker_closes = list(hist["Close"])
+
+            for i in range(5, len(ticker_dates) - 1):
+                trade_date = ticker_dates[i]
+                vix_val = vix_closes[vix_dates.index(trade_date)] if trade_date in vix_dates else 20.0
+                if vix_val < 12:   vix_adj = 0.4
+                elif vix_val < 15: vix_adj = 0.2
+                elif vix_val < 20: vix_adj = 0.0
+                elif vix_val < 25: vix_adj = -0.3
+                elif vix_val < 30: vix_adj = -0.6
+                else:              vix_adj = -1.0
+
+                sp_5d_chg = 0.0
+                if trade_date in sp_dates:
+                    si = sp_dates.index(trade_date)
+                    if si >= 5:
+                        sp_5d_chg = ((sp_closes[si] - sp_closes[si - 5]) / sp_closes[si - 5]) * 100
+                if sp_5d_chg > 3:    mom_adj = 0.4
+                elif sp_5d_chg > 1:  mom_adj = 0.2
+                elif sp_5d_chg > -1: mom_adj = 0.0
+                elif sp_5d_chg > -3: mom_adj = -0.2
+                else:                mom_adj = -0.4
+
+                market_base = vix_adj + mom_adj
+                beta_adj    = round(market_base * (beta - 1.0) * 0.5, 2)
+                sentiment   = round(market_base + beta_adj, 2)
+                predicted   = round(sentiment + fund_adj, 2)
+                actual      = round(((ticker_closes[i + 1] - ticker_closes[i]) / ticker_closes[i]) * 100, 2)
+
+                raw_results.append({
+                    "date":            str(trade_date),
+                    "ticker":          ticker,
+                    "sentiment_score": sentiment,
+                    "predicted_pct":   predicted,
+                    "actual_pct":      actual,
+                    "correct":         (predicted > 0) == (actual > 0),
+                })
+        except Exception as e:
+            print(f"[Simulate] {ticker} error: {e}")
+            continue
+
+    if not raw_results:
+        return {"error": "No backtest data available. Ensure watchlist stocks have sufficient price history."}
+
+    # ── Historical portfolio simulation ────────────────────────────────────
+    from collections import defaultdict
+    by_date = defaultdict(list)
+    for r in raw_results:
+        by_date[r["date"]].append(r)
+
+    portfolio_value = initial_float
+    equity_curve    = [{"date": "start", "value": round(initial_float, 2)}]
+    daily_returns   = []
+
+    for day_date in sorted(by_date.keys()):
+        day_signals   = by_date[day_date]
+        buy_signals   = [r for r in day_signals if r["predicted_pct"] > 0.3]
+        buy_signals.sort(key=lambda x: x["sentiment_score"], reverse=True)
+
+        daily_pnl        = 0.0
+        total_alloc_pct  = 0.0
+
+        for sig in buy_signals:
+            alloc_pct = 0.15 if sig["sentiment_score"] > 0.3 else 0.08
+            if total_alloc_pct + alloc_pct > 0.80:
+                break
+            pnl = portfolio_value * alloc_pct * (sig["actual_pct"] / 100)
+            daily_pnl       += pnl
+            total_alloc_pct += alloc_pct
+
+        portfolio_value += daily_pnl
+        daily_returns.append(daily_pnl / (portfolio_value - daily_pnl) if (portfolio_value - daily_pnl) else 0)
+        equity_curve.append({"date": day_date, "value": round(portfolio_value, 2)})
+
+    # ── Observed stats for Monte Carlo ─────────────────────────────────────
+    all_trades   = [r for r in raw_results if r["predicted_pct"] > 0.3]
+    wins         = [r for r in all_trades if r["correct"]]
+    losses       = [r for r in all_trades if not r["correct"]]
+    win_rate     = len(wins) / len(all_trades) if all_trades else 0.5
+    avg_win_pct  = statistics.mean([abs(r["actual_pct"]) for r in wins])   if wins   else 0.5
+    avg_loss_pct = statistics.mean([abs(r["actual_pct"]) for r in losses]) if losses else 0.5
+
+    n_trading_days    = len(by_date)
+    avg_trades_per_day = len(all_trades) / n_trading_days if n_trading_days else 3
+    avg_alloc_per_trade = 0.10  # rough average allocation per trade
+
+    # ── Monte Carlo: 1000 simulations × 252 trading days ───────────────────
+    N_SIMS     = 1000
+    N_DAYS     = 252
+    sim_finals = []
+    # Store 10 sample paths for the chart
+    sample_paths = []
+
+    for sim_i in range(N_SIMS):
+        port = initial_float
+        path = [port]
+        n_trades_day = max(1, round(avg_trades_per_day))
+        for _ in range(N_DAYS):
+            day_pnl      = 0.0
+            alloc_used   = 0.0
+            for _ in range(n_trades_day):
+                alloc = port * avg_alloc_per_trade
+                if alloc_used + avg_alloc_per_trade > 0.80:
+                    break
+                if random.random() < win_rate:
+                    day_pnl += alloc * (avg_win_pct / 100)
+                else:
+                    day_pnl -= alloc * (avg_loss_pct / 100)
+                alloc_used += avg_alloc_per_trade
+            port += day_pnl
+            port  = max(port, 0)
+            path.append(round(port, 2))
+        sim_finals.append(port)
+        if sim_i < 10:
+            sample_paths.append(path)
+
+    sim_finals.sort()
+    p10 = sim_finals[int(0.10 * N_SIMS)]
+    p50 = sim_finals[int(0.50 * N_SIMS)]
+    p90 = sim_finals[int(0.90 * N_SIMS)]
+    prob_target = round(sum(1 for v in sim_finals if v >= target) / N_SIMS * 100, 1)
+
+    hist_return_pct = round((portfolio_value - initial_float) / initial_float * 100, 2)
+    weeks_observed  = n_trading_days / 5
+    ann_factor      = 52 / weeks_observed if weeks_observed > 0 else 1
+    projected_12m   = round(initial_float * ((portfolio_value / initial_float) ** ann_factor), 2)
+
+    return {
+        "equity_curve":   equity_curve,
+        "monte_carlo": {
+            "p10":         round(p10, 2),
+            "p50":         round(p50, 2),
+            "p90":         round(p90, 2),
+            "prob_target_pct": prob_target,
+            "n_sims":      N_SIMS,
+            "n_days":      N_DAYS,
+            "sample_paths": sample_paths,
+        },
+        "stats": {
+            "initial_float":      initial_float,
+            "target":             target,
+            "hist_final_value":   round(portfolio_value, 2),
+            "hist_return_pct":    hist_return_pct,
+            "hist_weeks":         round(weeks_observed, 1),
+            "projected_12m":      projected_12m,
+            "win_rate_pct":       round(win_rate * 100, 1),
+            "avg_win_pct":        round(avg_win_pct, 2),
+            "avg_loss_pct":       round(avg_loss_pct, 2),
+            "avg_trades_per_day": round(avg_trades_per_day, 1),
+            "total_trades":       len(all_trades),
+        },
     }
 
 

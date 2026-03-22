@@ -852,6 +852,19 @@ body.login-active { overflow: hidden; }
 .rec-section-sell  { background: rgba(239,68,68,0.08); border-left: 3px solid var(--red); color: var(--red); }
 .rec-section-buy   { background: rgba(34,197,94,0.08); border-left: 3px solid var(--green); color: var(--green); }
 
+/* ── P&L Simulator ────────────────────────────────────────────── */
+.sim-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
+.sim-mc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+.sim-mc-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: 0.25rem; }
+.sim-mc-pessimist { border-color: rgba(239,68,68,0.3); }
+.sim-mc-optimist  { border-color: rgba(34,197,94,0.3); }
+.sim-mc-prob      { border-color: rgba(250,204,21,0.3); }
+.sim-mc-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.sim-mc-val   { font-size: 1.4rem; font-weight: 800; }
+.sim-mc-card small { font-size: 0.8rem; color: var(--text-muted); }
+.sim-chart-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 0.75rem; }
+.sim-disclaimer { font-size: 0.75rem; color: var(--text-muted); font-style: italic; }
+
 /* ── Backtest ─────────────────────────────────────────────────── */
 .backtest-guide {
   background: var(--surface);
