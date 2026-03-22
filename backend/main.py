@@ -18,7 +18,7 @@ import httpx
 import yfinance as yf
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -528,10 +528,11 @@ async def forgot_password(req: ForgotPasswordRequest):
         token = secrets.token_urlsafe(32)
         _reset_tokens[token] = (req.username, datetime.now(timezone.utc) + timedelta(minutes=15))
         reset_link = f"http://192.168.1.19:8000/?reset_token={token}"
-        send_email(
-            "Stock Picker — Password Reset",
+        result = send_email(
+            "Stock Picker - Password Reset",
             f"Click the link below to reset your password (valid 15 minutes):\n\n{reset_link}\n\nIf you did not request this, ignore this email.",
         )
+        print(f"[Auth] Password reset email sent for '{req.username}': {result}")
     # Always return ok to avoid revealing valid usernames
     return {"ok": True, "message": "If that username exists, a reset link has been sent to the registered email."}
 
@@ -757,13 +758,23 @@ async def get_watchlist():
     return results
 
 
+async def _run_predictions_bg():
+    try:
+        print("[Predictions] Background generation triggered by watchlist add...")
+        await generate_predictions()
+        print("[Predictions] Background generation completed.")
+    except Exception as e:
+        print(f"[Predictions] Background generation failed: {e}")
+
+
 @app.post("/api/watchlist/{ticker}")
-def add_to_watchlist(ticker: str):
+async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks):
     tickers = load_watchlist()
     ticker = ticker.upper()
     if ticker not in tickers:
         tickers.append(ticker)
         save_watchlist(tickers)
+        background_tasks.add_task(_run_predictions_bg)
     return {"watchlist": tickers}
 
 
@@ -871,7 +882,23 @@ def get_predictions():
             updated = True
     if updated:
         save_predictions(predictions)
-    return sorted(predictions, key=lambda p: p["date"], reverse=True)
+    sorted_preds = sorted(predictions, key=lambda p: p["date"], reverse=True)
+
+    # Always show watchlist stocks — add stub rows for any never analysed
+    predicted_tickers = {p["ticker"] for p in predictions}
+    for ticker in load_watchlist():
+        if ticker not in predicted_tickers:
+            sorted_preds.append({
+                "date": "",
+                "ticker": ticker,
+                "name": TICKER_NAMES.get(ticker, ticker),
+                "predicted_pct": None,
+                "confidence": "pending",
+                "reasoning": "Not yet analysed. Click Generate Predictions to include this stock.",
+                "actual_pct": None,
+                "price_at_prediction": None,
+            })
+    return sorted_preds
 
 
 @app.post("/api/predictions/generate")
@@ -1019,7 +1046,7 @@ confidence: "low" | "medium" | "high"."""
 
     client = anthropic.Anthropic(api_key=api_key)
     msg = client.messages.create(
-        model="claude-sonnet-4-6", max_tokens=2048,
+        model="claude-sonnet-4-6", max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = msg.content[0].text.strip()
@@ -1029,7 +1056,11 @@ confidence: "low" | "medium" | "high"."""
             raw = raw[4:]
         raw = raw.strip().rstrip("```")
 
-    claude_preds = json.loads(raw)
+    try:
+        claude_preds = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"[Predictions] JSON parse error: {e}\nRaw response (first 500 chars): {raw[:500]}")
+        raise HTTPException(status_code=500, detail=f"Claude returned invalid JSON: {e}")
     price_map = {s["ticker"]: s["price"] for s in stocks_data}
     name_map  = {s["ticker"]: s["name"]  for s in stocks_data}
     new_preds = []
