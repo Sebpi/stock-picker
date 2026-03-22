@@ -814,6 +814,44 @@ body.login-active { overflow: hidden; }
 }
 .btn-secondary:hover { border-color: var(--accent); color: var(--text); }
 
+/* ── Recommendations ─────────────────────────────────────────── */
+.rec-progress-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.rec-progress-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem 2rem;
+  margin-bottom: 1.1rem;
+}
+.rec-stat { display: flex; flex-direction: column; gap: 0.15rem; }
+.rec-stat-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.rec-stat-value { font-size: 1.1rem; font-weight: 700; }
+.rec-progress-labels { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.4rem; }
+.rec-progress-track {
+  position: relative;
+  background: var(--surface2);
+  border-radius: 99px;
+  height: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.rec-progress-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent), #7c3aed);
+  transition: width 0.6s ease;
+}
+.rec-progress-fill.rec-progress-good     { background: linear-gradient(90deg, var(--accent), var(--green)); }
+.rec-progress-fill.rec-progress-complete { background: linear-gradient(90deg, var(--green), #16a34a); }
+.rec-section-title { font-size: 1rem; font-weight: 700; margin: 1.5rem 0 0.75rem; padding: 0.5rem 0.75rem; border-radius: var(--radius); }
+.rec-section-sell  { background: rgba(239,68,68,0.08); border-left: 3px solid var(--red); color: var(--red); }
+.rec-section-buy   { background: rgba(34,197,94,0.08); border-left: 3px solid var(--green); color: var(--green); }
+
 /* ── Backtest ─────────────────────────────────────────────────── */
 .backtest-guide {
   background: var(--surface);

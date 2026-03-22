@@ -115,6 +115,16 @@ WATCHLIST_FILE    = Path(__file__).parent / "watchlist.json"
 PREDICTIONS_FILE  = Path(__file__).parent / "predictions.json"
 ALERTS_FILE       = Path(__file__).parent / "alerts.json"
 PORTFOLIO_FILE    = Path(__file__).parent / "portfolio.json"
+SETTINGS_FILE     = Path(__file__).parent / "settings.json"
+
+def load_settings() -> dict:
+    defaults = {"initial_float": 100000.0, "target": 200000.0, "target_months": 12}
+    if SETTINGS_FILE.exists():
+        return {**defaults, **json.loads(SETTINGS_FILE.read_text())}
+    return defaults
+
+def save_settings(s: dict):
+    SETTINGS_FILE.write_text(json.dumps(s, indent=2))
 
 UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "JNJ",
@@ -1422,6 +1432,166 @@ def test_alert():
     )
     texted = send_sms("StockPicker test alert — notifications working!")
     return {"email_sent": emailed, "sms_sent": texted}
+
+
+# ── Recommendations endpoint ──────────────────────────────────────────────────
+
+@app.get("/api/recommendations")
+async def get_recommendations():
+    settings       = load_settings()
+    initial_float  = settings["initial_float"]
+    target         = settings["target"]
+    target_months  = settings.get("target_months", 12)
+
+    predictions    = load_predictions()
+    calibration    = compute_calibration(predictions)
+
+    # Use today's predictions; fall back to most recent date
+    dated = [p for p in predictions if p.get("predicted_pct") is not None]
+    if not dated:
+        return {"buys": [], "sells": [], "summary": {}}
+    latest_date  = max(p["date"] for p in dated)
+    latest_preds = [p for p in dated if p["date"] == latest_date]
+
+    # Compute live portfolio positions
+    transactions = load_portfolio()
+    positions    = compute_positions(transactions)
+    held         = [t for t, p in positions.items() if p["shares"] > 0]
+
+    all_tickers = list(set(held + [p["ticker"] for p in latest_preds]))
+    infos = await asyncio.gather(*[get_info(t) for t in all_tickers], return_exceptions=True)
+    price_map = {}
+    for ticker, info in zip(all_tickers, infos):
+        if not isinstance(info, Exception):
+            price_map[ticker] = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+
+    total_invested  = sum(positions[t]["shares"] * positions[t]["avg_cost"] for t in held)
+    total_current   = sum(positions[t]["shares"] * price_map.get(t, 0) for t in held)
+    total_realised  = sum(positions[t]["realised_pnl"] for t in positions)
+    available_cash  = max(0.0, initial_float - total_invested)
+    total_value     = available_cash + total_current
+    total_pnl       = (total_current - total_invested) + total_realised
+    progress_pct    = round(total_value / target * 100, 1)
+
+    # ── BUY recommendations ─────────────────────────────────────────────────
+    buys = []
+    for pred in latest_preds:
+        ticker      = pred["ticker"]
+        predicted   = pred.get("predicted_pct") or 0
+        confidence  = pred.get("confidence", "medium")
+        cal         = calibration.get(ticker, {})
+        accuracy    = cal.get("accuracy_pct", 50) / 100
+
+        if predicted <= 0.3 or confidence == "low" or available_cash < 500:
+            continue
+
+        current_price = price_map.get(ticker, 0)
+        if not current_price:
+            continue
+
+        alloc_pct = 0.15 if confidence == "high" else 0.08
+        accuracy_bonus = max(0, (accuracy - 0.5) * 0.4)
+        alloc_pct = min(alloc_pct * (1 + accuracy_bonus), 0.20)
+
+        position_value = min(available_cash * alloc_pct, initial_float * 0.15)
+        qty = int(position_value / current_price)
+        if qty < 1:
+            continue
+
+        estimated_cost = round(qty * current_price, 2)
+        score = predicted * accuracy * (1.5 if confidence == "high" else 1.0)
+
+        buys.append({
+            "ticker":         ticker,
+            "name":           pred.get("name", ticker),
+            "action":         "BUY",
+            "trigger":        "PREDICTION",
+            "current_price":  round(current_price, 2),
+            "qty":            qty,
+            "estimated_cost": estimated_cost,
+            "predicted_pct":  predicted,
+            "confidence":     confidence,
+            "accuracy_pct":   cal.get("accuracy_pct"),
+            "reasoning":      pred.get("reasoning", ""),
+            "score":          round(score, 4),
+        })
+
+    buys.sort(key=lambda x: x["score"], reverse=True)
+
+    # ── SELL recommendations ────────────────────────────────────────────────
+    sells = []
+    for ticker in held:
+        pos           = positions[ticker]
+        current_price = price_map.get(ticker, 0)
+        if not current_price:
+            continue
+
+        cost_basis      = pos["shares"] * pos["avg_cost"]
+        current_value   = pos["shares"] * current_price
+        unrealised_pnl  = current_value - cost_basis
+        unrealised_pct  = (unrealised_pnl / cost_basis * 100) if cost_basis else 0
+
+        pred    = next((p for p in latest_preds if p["ticker"] == ticker), None)
+        trigger = None
+        reasoning = ""
+
+        if pred and (pred.get("predicted_pct") or 0) < -0.3 and pred.get("confidence") in ("high", "medium"):
+            trigger   = "PREDICTION"
+            reasoning = pred.get("reasoning", "")
+        elif unrealised_pct >= 8.0:
+            trigger   = "TAKE PROFIT"
+            reasoning = f"Position up {unrealised_pct:.1f}% — take profit target reached."
+        elif unrealised_pct <= -5.0:
+            trigger   = "STOP LOSS"
+            reasoning = f"Position down {unrealised_pct:.1f}% — stop loss triggered."
+
+        if trigger:
+            sells.append({
+                "ticker":              ticker,
+                "name":                pos["name"],
+                "action":              "SELL",
+                "trigger":             trigger,
+                "current_price":       round(current_price, 2),
+                "qty":                 round(pos["shares"], 4),
+                "estimated_proceeds":  round(pos["shares"] * current_price, 2),
+                "cost_basis":          round(cost_basis, 2),
+                "unrealised_pnl":      round(unrealised_pnl, 2),
+                "unrealised_pct":      round(unrealised_pct, 2),
+                "predicted_pct":       pred.get("predicted_pct") if pred else None,
+                "confidence":          pred.get("confidence") if pred else None,
+                "reasoning":           reasoning,
+            })
+
+    return {
+        "buys":            buys,
+        "sells":           sells,
+        "prediction_date": latest_date,
+        "summary": {
+            "initial_float":        initial_float,
+            "target":               target,
+            "target_months":        target_months,
+            "available_cash":       round(available_cash, 2),
+            "total_invested":       round(total_invested, 2),
+            "total_current_value":  round(total_current, 2),
+            "total_portfolio_value": round(total_value, 2),
+            "total_unrealised_pnl": round(total_current - total_invested, 2),
+            "total_realised_pnl":   round(total_realised, 2),
+            "total_pnl":            round(total_pnl, 2),
+            "progress_pct":         progress_pct,
+            "remaining_to_target":  round(target - total_value, 2),
+        },
+    }
+
+
+@app.get("/api/settings")
+def get_settings():
+    return load_settings()
+
+
+@app.post("/api/settings")
+def update_settings(s: dict):
+    save_settings(s)
+    return load_settings()
 
 
 # ── Portfolio endpoints ───────────────────────────────────────────────────────

@@ -161,7 +161,7 @@ document.getElementById("btn-cp-save").onclick = async () => {
 let priceChart = null;
 let watchlist = [];
 
-const TAB_LOADERS = { watchlist: () => loadWatchlist(), predictions: () => loadPredictions(), alerts: () => loadAlerts(), portfolio: () => loadPortfolio(), backtest: () => {} };
+const TAB_LOADERS = { watchlist: () => loadWatchlist(), predictions: () => loadPredictions(), recommendations: () => loadRecommendations(), alerts: () => loadAlerts(), portfolio: () => loadPortfolio(), backtest: () => {} };
 const SIGNAL_LABELS = { daily_swing: "Daily Swing", momentum: "Momentum", volume_surge: "Vol Surge" };
 
 document.querySelectorAll(".tab-btn").forEach(btn => {
@@ -758,6 +758,111 @@ document.getElementById("btn-backtest").addEventListener("click", async () => {
     btn.disabled = false;
   }
 });
+
+// ── Recommendations ───────────────────────────────────────────
+
+async function loadRecommendations() {
+  const status = document.getElementById("rec-status");
+  status.textContent = "Loading recommendations…";
+  try {
+    const res  = await authFetch(`${API}/api/recommendations`);
+    const data = await res.json();
+    status.textContent = "";
+    renderRecommendations(data);
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  }
+}
+
+function fmt(n, prefix = "£") {
+  if (n == null) return "—";
+  return prefix + Math.abs(n).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderRecommendations(data) {
+  const s = data.summary || {};
+  const buys  = data.buys  || [];
+  const sells = data.sells || [];
+  const empty = document.getElementById("rec-empty");
+
+  // ── Progress card ─────────────────────────────────────────────
+  if (s.initial_float) {
+    const card = document.getElementById("rec-progress-card");
+    card.classList.remove("hidden");
+
+    const pnlCls = s.total_pnl >= 0 ? "change-pos" : "change-neg";
+    document.getElementById("rec-total-value").textContent  = fmt(s.total_portfolio_value);
+    document.getElementById("rec-invested").textContent     = fmt(s.total_invested);
+    document.getElementById("rec-cash").textContent         = fmt(s.available_cash);
+    document.getElementById("rec-pnl").innerHTML            = `<span class="${pnlCls}">${s.total_pnl >= 0 ? "+" : ""}${fmt(s.total_pnl)}</span>`;
+    document.getElementById("rec-target").textContent       = fmt(s.target) + ` (${s.target_months}mo)`;
+    document.getElementById("rec-remaining").textContent    = fmt(s.remaining_to_target);
+    document.getElementById("rec-progress-label").textContent = `${s.progress_pct}% of target reached`;
+    document.getElementById("rec-progress-date").textContent  = data.prediction_date ? `Based on predictions: ${data.prediction_date}` : "";
+
+    const fillPct = Math.min(s.progress_pct, 100);
+    const fillEl  = document.getElementById("rec-progress-fill");
+    fillEl.style.width = fillPct + "%";
+    fillEl.className   = "rec-progress-fill" + (fillPct >= 100 ? " rec-progress-complete" : fillPct >= 75 ? " rec-progress-good" : "");
+  }
+
+  // ── Sells ─────────────────────────────────────────────────────
+  const sellsWrap = document.getElementById("rec-sells-wrap");
+  const sellsBody = document.getElementById("rec-sells-body");
+  if (sells.length > 0) {
+    sellsWrap.classList.remove("hidden");
+    sellsBody.innerHTML = sells.map(s => {
+      const pnlCls   = s.unrealised_pnl >= 0 ? "change-pos" : "change-neg";
+      const predStr  = s.predicted_pct != null ? `<span class="${s.predicted_pct >= 0 ? "change-pos" : "change-neg"}">${s.predicted_pct >= 0 ? "+" : ""}${s.predicted_pct.toFixed(2)}%</span>` : "—";
+      const trigCls  = s.trigger === "STOP LOSS" ? "badge-low" : s.trigger === "TAKE PROFIT" ? "badge-high" : "badge-medium";
+      return `<tr>
+        <td><strong>${s.ticker}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${s.name}</td>
+        <td><span class="${trigCls}">${s.trigger}</span></td>
+        <td>${s.qty}</td>
+        <td>${fmt(s.current_price)}</td>
+        <td><strong>${fmt(s.estimated_proceeds)}</strong></td>
+        <td><span class="${pnlCls}">${s.unrealised_pnl >= 0 ? "+" : ""}${fmt(s.unrealised_pnl)} (${s.unrealised_pct >= 0 ? "+" : ""}${s.unrealised_pct.toFixed(1)}%)</span></td>
+        <td>${predStr}</td>
+        <td class="reasoning-cell">${s.reasoning}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    sellsWrap.classList.add("hidden");
+  }
+
+  // ── Buys ──────────────────────────────────────────────────────
+  const buysWrap = document.getElementById("rec-buys-wrap");
+  const buysBody = document.getElementById("rec-buys-body");
+  if (buys.length > 0) {
+    buysWrap.classList.remove("hidden");
+    buysBody.innerHTML = buys.map((b, i) => {
+      const accStr = b.accuracy_pct != null ? `${b.accuracy_pct}%` : "<span style='color:var(--text-muted)'>No data</span>";
+      return `<tr>
+        <td style="color:var(--text-muted)">#${i + 1}</td>
+        <td><strong>${b.ticker}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${b.name}</td>
+        <td><span class="badge-${b.confidence}">${b.confidence.toUpperCase()}</span></td>
+        <td>${accStr}</td>
+        <td><span class="change-pos">+${b.predicted_pct.toFixed(2)}%</span></td>
+        <td>${fmt(b.current_price)}</td>
+        <td><strong>${b.qty}</strong></td>
+        <td><strong>${fmt(b.estimated_cost)}</strong></td>
+        <td class="reasoning-cell">${b.reasoning}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    buysWrap.classList.add("hidden");
+  }
+
+  if (buys.length === 0 && sells.length === 0) {
+    empty.classList.remove("hidden");
+  } else {
+    empty.classList.add("hidden");
+  }
+}
+
+document.getElementById("btn-load-recs").addEventListener("click", loadRecommendations);
 
 // ── Alerts ────────────────────────────────────────────────────
 

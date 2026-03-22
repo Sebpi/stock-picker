@@ -50,6 +50,7 @@
       <button class="tab-btn" data-tab="ai">AI Advisor</button>
       <button class="tab-btn" data-tab="predictions">Predictions</button>
       <button class="tab-btn" data-tab="backtest">Backtest</button>
+      <button class="tab-btn" data-tab="recommendations">Recommendations</button>
       <button class="tab-btn" data-tab="alerts">Alerts</button>
       <button class="tab-btn" data-tab="portfolio">Portfolio</button>
     </nav>
@@ -284,6 +285,81 @@
           <tbody id="backtest-body"></tbody>
         </table>
       </div>
+    </section>
+
+    <!-- Recommendations Tab -->
+    <section id="tab-recommendations" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>Recommendations</h2>
+          <p class="pred-subtitle">Buy/sell signals sized from your £100,000 float. Target: £200,000 in 12 months.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-load-recs" class="btn-primary">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div id="rec-status" class="status-msg"></div>
+
+      <!-- Progress toward target -->
+      <div id="rec-progress-card" class="rec-progress-card hidden">
+        <div class="rec-progress-header">
+          <div class="rec-progress-stats">
+            <div class="rec-stat"><span class="rec-stat-label">Total Value</span><span id="rec-total-value" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Invested</span><span id="rec-invested" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Available Cash</span><span id="rec-cash" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Total P&L</span><span id="rec-pnl" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Target (12 months)</span><span id="rec-target" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Remaining</span><span id="rec-remaining" class="rec-stat-value">—</span></div>
+          </div>
+        </div>
+        <div class="rec-progress-bar-wrap">
+          <div class="rec-progress-labels">
+            <span id="rec-progress-label">0% of target</span>
+            <span id="rec-progress-date"></span>
+          </div>
+          <div class="rec-progress-track">
+            <div id="rec-progress-fill" class="rec-progress-fill" style="width:0%"></div>
+            <div class="rec-progress-target-marker" title="£200,000 target"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SELL recommendations -->
+      <div id="rec-sells-wrap" class="hidden">
+        <h3 class="rec-section-title rec-section-sell">⚠ Sell Signals</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Ticker</th><th>Name</th><th>Trigger</th><th>Qty</th>
+                <th>Current Price</th><th>Est. Proceeds</th><th>Unrealised P&L</th>
+                <th>Predicted %</th><th>Reasoning</th>
+              </tr>
+            </thead>
+            <tbody id="rec-sells-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- BUY recommendations -->
+      <div id="rec-buys-wrap" class="hidden">
+        <h3 class="rec-section-title rec-section-buy">↑ Buy Signals</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Rank</th><th>Ticker</th><th>Name</th><th>Confidence</th>
+                <th>Accuracy</th><th>Predicted %</th><th>Current Price</th>
+                <th>Qty</th><th>Est. Cost</th><th>Reasoning</th>
+              </tr>
+            </thead>
+            <tbody id="rec-buys-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <p id="rec-empty" class="empty-msg hidden">No recommendations available. Generate today's predictions first.</p>
     </section>
 
     <!-- Alerts Tab -->
