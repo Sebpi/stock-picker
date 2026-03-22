@@ -1,6 +1,7 @@
 import asyncio
 import csv as csv_mod
 import io
+import pypdf
 import json
 import os
 import secrets
@@ -1816,6 +1817,141 @@ def portfolio_template():
     template = "type,ticker,qty,price,date\nbuy,AAPL,10,175.50,2025-01-15\nbuy,MSFT,5,380.00,2025-02-01\nsell,AAPL,5,182.00,2025-03-10\n"
     return Response(content=template, media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=portfolio_template.csv"})
+
+
+@app.post("/api/portfolio/import-pdf")
+async def import_portfolio_pdf(file: UploadFile = File(...)):
+    """
+    Import transactions from a Saxo Bank PDF statement.
+    Extracts text from the PDF and uses Claude AI to parse transactions.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
+
+    content = await file.read()
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(content))
+        pages_text = []
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                pages_text.append(text)
+        full_text = "\n\n".join(pages_text)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {e}")
+
+    if not full_text.strip():
+        raise HTTPException(status_code=400, detail="PDF appears to be empty or image-only — text could not be extracted.")
+
+    # Truncate to avoid token limits (keep first ~12000 chars)
+    truncated = full_text[:12000]
+
+    prompt = f"""You are parsing a Saxo Bank brokerage statement to extract stock transactions.
+
+Extract every BUY and SELL transaction from the text below.
+For each transaction return:
+- type: "buy" or "sell"
+- ticker: the US stock ticker symbol (e.g. "AAPL"). If only a company name is given, infer the correct US ticker.
+- qty: number of shares (positive number)
+- price: price per share in the currency shown (use the per-share price, not total)
+- date: transaction date in YYYY-MM-DD format
+
+If the document shows current POSITIONS (not transactions), treat each position as a "buy" using the average cost/purchase price and most recent date available.
+
+Return ONLY a valid JSON array, no explanation:
+[
+  {{"type": "buy", "ticker": "AAPL", "qty": 10, "price": 175.50, "date": "2025-01-15"}},
+  {{"type": "sell", "ticker": "MSFT", "qty": 5, "price": 380.00, "date": "2025-02-01"}}
+]
+
+If no transactions can be found, return an empty array: []
+
+PDF TEXT:
+{truncated}"""
+
+    client = anthropic.Anthropic(api_key=api_key)
+    msg = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = msg.content[0].text.strip()
+    if "```" in raw:
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip().rstrip("```")
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Claude could not parse transactions from this PDF: {e}")
+
+    if not parsed:
+        return {"imported": 0, "skipped": 0, "errors": [], "preview": [], "message": "No transactions found in this PDF."}
+
+    # Validate and import
+    transactions = load_portfolio()
+    positions    = compute_positions(transactions)
+    imported, skipped = 0, []
+    preview = []
+
+    for i, row in enumerate(parsed, start=1):
+        try:
+            tx_type = str(row.get("type", "")).lower()
+            ticker  = str(row.get("ticker", "")).upper()
+            qty     = float(row.get("qty", 0))
+            price   = float(row.get("price", 0))
+            tx_date = str(row.get("date", ""))
+
+            if tx_type not in ("buy", "sell"):
+                skipped.append(f"Row {i}: invalid type '{tx_type}'"); continue
+            if not ticker:
+                skipped.append(f"Row {i}: missing ticker"); continue
+            if qty <= 0 or price <= 0:
+                skipped.append(f"Row {i} ({ticker}): qty and price must be positive"); continue
+
+            datetime.strptime(tx_date, "%Y-%m-%d")
+
+            if tx_type == "sell":
+                held = positions.get(ticker, {}).get("shares", 0)
+                if qty > held:
+                    skipped.append(f"Row {i} ({ticker}): cannot sell {qty} — only {held:.4f} held"); continue
+
+            try:
+                info = yf.Ticker(ticker).info
+                name = info.get("shortName", ticker)
+            except Exception:
+                name = ticker
+
+            tx = {
+                "id": str(uuid.uuid4()), "type": tx_type, "ticker": ticker,
+                "name": name, "qty": qty, "price": price,
+                "date": tx_date, "timestamp": datetime.utcnow().isoformat(),
+            }
+            transactions.append(tx)
+            preview.append({"type": tx_type, "ticker": ticker, "name": name, "qty": qty, "price": price, "date": tx_date})
+
+            if ticker not in positions:
+                positions[ticker] = {"shares": 0, "avg_cost": 0, "realised_pnl": 0, "name": name}
+            if tx_type == "buy":
+                old_s = positions[ticker]["shares"]
+                old_c = positions[ticker]["avg_cost"]
+                new_s = old_s + qty
+                positions[ticker]["avg_cost"] = ((old_s * old_c) + (qty * price)) / new_s
+                positions[ticker]["shares"]   = new_s
+            else:
+                positions[ticker]["shares"] -= qty
+
+            imported += 1
+        except ValueError as e:
+            skipped.append(f"Row {i}: {e}")
+
+    if imported > 0:
+        save_portfolio(transactions)
+
+    return {"imported": imported, "skipped": len(skipped), "errors": skipped, "preview": preview}
 
 
 @app.delete("/api/alerts")

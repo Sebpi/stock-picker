@@ -1080,6 +1080,78 @@ document.getElementById("btn-import-portfolio").addEventListener("click", () => 
   document.getElementById("import-file-input").click();
 });
 
+// ── Saxo PDF import ───────────────────────────────────────────
+document.getElementById("btn-import-pdf").addEventListener("click", () => {
+  document.getElementById("import-pdf-input").click();
+});
+
+document.getElementById("import-pdf-input").addEventListener("change", async (e) => {
+  const file   = e.target.files[0];
+  const status = document.getElementById("portfolio-status");
+  if (!file) return;
+
+  status.textContent = "Reading PDF… this may take 15–30 seconds while Claude parses it…";
+
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const res  = await authFetch(`${API}/api/portfolio/import-pdf`, { method: "POST", body: form });
+    const data = await res.json();
+    status.textContent = "";
+
+    if (!res.ok) {
+      status.textContent = "PDF import failed: " + (data.detail || "Unknown error");
+      return;
+    }
+
+    if (data.imported === 0 && data.skipped === 0) {
+      status.textContent = data.message || "No transactions found in this PDF.";
+      return;
+    }
+
+    // Show preview modal
+    const overlay  = document.getElementById("pdf-import-overlay");
+    const tbody    = document.getElementById("pdf-preview-body");
+    const summary  = document.getElementById("pdf-import-summary");
+    const errorsEl = document.getElementById("pdf-import-errors");
+
+    summary.textContent = `${data.imported} transaction(s) imported successfully.` +
+      (data.skipped > 0 ? ` ${data.skipped} skipped.` : "");
+
+    tbody.innerHTML = (data.preview || []).map(r => {
+      const typeCls = r.type === "buy" ? "change-pos" : "change-neg";
+      return `<tr>
+        <td><span class="${typeCls}">${r.type.toUpperCase()}</span></td>
+        <td><strong>${r.ticker}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${r.name}</td>
+        <td>${r.qty}</td>
+        <td>$${r.price.toFixed(2)}</td>
+        <td>${r.date}</td>
+      </tr>`;
+    }).join("");
+
+    errorsEl.innerHTML = data.errors.length > 0
+      ? "<strong>Skipped rows:</strong><br>" + data.errors.join("<br>")
+      : "";
+
+    overlay.classList.remove("hidden");
+    loadPortfolio();
+  } catch (err) {
+    status.textContent = "PDF import error: " + err.message;
+  } finally {
+    e.target.value = "";
+  }
+});
+
+document.getElementById("btn-pdf-cancel").addEventListener("click", () => {
+  document.getElementById("pdf-import-overlay").classList.add("hidden");
+});
+document.getElementById("btn-pdf-confirm").addEventListener("click", () => {
+  document.getElementById("pdf-import-overlay").classList.add("hidden");
+  document.getElementById("portfolio-status").textContent = "Portfolio updated from PDF import.";
+});
+
 document.getElementById("import-file-input").addEventListener("change", async (e) => {
   const file   = e.target.files[0];
   const status = document.getElementById("portfolio-status");

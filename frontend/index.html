@@ -472,6 +472,8 @@
           <a id="btn-portfolio-template" href="/api/portfolio/template" download class="btn-secondary">↓ CSV Template</a>
           <button id="btn-import-portfolio" class="btn-secondary">⇪ Import CSV</button>
           <input id="import-file-input" type="file" accept=".csv" style="display:none" />
+          <button id="btn-import-pdf" class="btn-secondary">⇪ Import Saxo PDF</button>
+          <input id="import-pdf-input" type="file" accept=".pdf" style="display:none" />
           <button id="btn-refresh-portfolio" class="btn-secondary">↻ Refresh</button>
         </div>
       </div>
@@ -517,6 +519,25 @@
       </div>
       <p id="portfolio-empty" class="empty-msg">No positions yet. Use the form above to record a purchase.</p>
     </section>
+
+  <!-- PDF Import Preview Modal -->
+  <div id="pdf-import-overlay" class="overlay hidden">
+    <div class="modal-box" style="max-width:700px;width:95%">
+      <h3 style="margin-bottom:0.5rem">Saxo PDF Import — Preview</h3>
+      <p id="pdf-import-summary" style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem"></p>
+      <div class="table-wrap" style="max-height:320px">
+        <table>
+          <thead><tr><th>Type</th><th>Ticker</th><th>Name</th><th>Qty</th><th>Price</th><th>Date</th></tr></thead>
+          <tbody id="pdf-preview-body"></tbody>
+        </table>
+      </div>
+      <div id="pdf-import-errors" style="margin-top:0.75rem;font-size:0.82rem;color:var(--red)"></div>
+      <div class="modal-btns" style="margin-top:1.25rem">
+        <button id="btn-pdf-confirm" class="btn-login-submit">Confirm Import</button>
+        <button id="btn-pdf-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Stock Detail Panel -->
   <div id="detail-overlay" class="overlay hidden">
