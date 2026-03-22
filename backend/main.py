@@ -55,6 +55,26 @@ UNIVERSE = [
     "AMGN", "IBM", "CAT", "SBUX", "GS", "SPGI", "BLK", "AXP", "ISRG", "GILD",
 ]
 
+TICKER_NAMES = {
+    "AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation", "GOOGL": "Alphabet Inc.",
+    "AMZN": "Amazon.com Inc.", "NVDA": "NVIDIA Corporation", "META": "Meta Platforms Inc.",
+    "TSLA": "Tesla Inc.", "BRK-B": "Berkshire Hathaway Inc.", "JPM": "JPMorgan Chase & Co.",
+    "JNJ": "Johnson & Johnson", "V": "Visa Inc.", "PG": "Procter & Gamble Co.",
+    "UNH": "UnitedHealth Group Inc.", "HD": "The Home Depot Inc.", "MA": "Mastercard Inc.",
+    "MRK": "Merck & Co. Inc.", "ABBV": "AbbVie Inc.", "CVX": "Chevron Corporation",
+    "LLY": "Eli Lilly and Company", "PEP": "PepsiCo Inc.", "KO": "The Coca-Cola Company",
+    "AVGO": "Broadcom Inc.", "COST": "Costco Wholesale Corporation", "MCD": "McDonald's Corporation",
+    "TMO": "Thermo Fisher Scientific", "ACN": "Accenture plc", "WMT": "Walmart Inc.",
+    "DHR": "Danaher Corporation", "BAC": "Bank of America Corp.", "ADBE": "Adobe Inc.",
+    "CRM": "Salesforce Inc.", "NEE": "NextEra Energy Inc.", "TXN": "Texas Instruments Inc.",
+    "PM": "Philip Morris International", "ORCL": "Oracle Corporation", "LIN": "Linde plc",
+    "RTX": "RTX Corporation", "QCOM": "Qualcomm Incorporated", "AMD": "Advanced Micro Devices",
+    "HON": "Honeywell International", "AMGN": "Amgen Inc.", "IBM": "IBM Corporation",
+    "CAT": "Caterpillar Inc.", "SBUX": "Starbucks Corporation", "GS": "Goldman Sachs Group",
+    "SPGI": "S&P Global Inc.", "BLK": "BlackRock Inc.", "AXP": "American Express Co.",
+    "ISRG": "Intuitive Surgical Inc.", "GILD": "Gilead Sciences Inc.",
+}
+
 MACRO_SYMBOLS = {
     "SPY": "S&P 500 ETF",
     "QQQ": "NASDAQ ETF",
@@ -638,6 +658,11 @@ def fetch_macro_data() -> dict:
 def get_predictions():
     predictions = load_predictions()
     predictions, updated = update_actuals(predictions)
+    # Backfill missing names from lookup table
+    for p in predictions:
+        if not p.get("name"):
+            p["name"] = TICKER_NAMES.get(p["ticker"], p["ticker"])
+            updated = True
     if updated:
         save_predictions(predictions)
     return sorted(predictions, key=lambda p: p["date"], reverse=True)
