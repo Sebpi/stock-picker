@@ -871,6 +871,78 @@ def fetch_macro_data() -> dict:
     return macro
 
 
+_POSITIVE_KEYWORDS = {"upgrade", "beat", "beats", "strong", "raised", "record", "buyback",
+                       "partnership", "growth", "acquisition", "outperform", "buy", "bullish",
+                       "rally", "surge", "profit", "dividend", "approved", "wins"}
+_NEGATIVE_KEYWORDS = {"downgrade", "miss", "misses", "recall", "loss", "cut", "cuts", "lawsuit",
+                       "investigation", "layoffs", "warning", "disappoints", "underperform",
+                       "sell", "bearish", "decline", "debt", "penalty", "fine", "probe"}
+
+
+def calculate_sentiment_scores(stocks_data: list[dict], macro: dict) -> list[dict]:
+    """Pre-calculate a structured sentiment score for each stock before the AI call."""
+
+    # 1. VIX adjustment
+    vix_price = macro.get("VIX (Fear Index)", {}).get("price", 20)
+    if vix_price < 12:
+        vix_adj = 0.4
+    elif vix_price < 15:
+        vix_adj = 0.2
+    elif vix_price < 20:
+        vix_adj = 0.0
+    elif vix_price < 25:
+        vix_adj = -0.3
+    elif vix_price < 30:
+        vix_adj = -0.6
+    else:
+        vix_adj = -1.0
+
+    # 2. Market momentum adjustment (use S&P 500 5d change if available)
+    sp_chg = macro.get("S&P 500", {}).get("change_pct", 0)
+    if sp_chg > 3:
+        momentum_adj = 0.4
+    elif sp_chg > 1:
+        momentum_adj = 0.2
+    elif sp_chg > -1:
+        momentum_adj = 0.0
+    elif sp_chg > -3:
+        momentum_adj = -0.2
+    else:
+        momentum_adj = -0.4
+
+    market_base = round(vix_adj + momentum_adj, 2)
+
+    for stock in stocks_data:
+        beta = stock.get("beta") or 1.0
+
+        # 3. Beta multiplier — amplifies market move for high/low beta stocks
+        beta_adj = round(market_base * (beta - 1.0) * 0.5, 2)
+
+        # 4. Headline sentiment — keyword scan of recent news titles
+        headline_adj = 0.0
+        news_titles = stock.get("recent_news", [])
+        for title in news_titles:
+            words = set(title.lower().split())
+            pos_hits = words & _POSITIVE_KEYWORDS
+            neg_hits = words & _NEGATIVE_KEYWORDS
+            headline_adj += len(pos_hits) * 0.3
+            headline_adj -= len(neg_hits) * 0.3
+        headline_adj = round(max(-0.6, min(0.6, headline_adj)), 2)  # cap ±0.6%
+
+        total = round(market_base + beta_adj + headline_adj, 2)
+
+        stock["sentiment_score"] = total
+        stock["sentiment_breakdown"] = {
+            "vix_adj": vix_adj,
+            "market_momentum_adj": momentum_adj,
+            "beta_adj": beta_adj,
+            "headline_adj": headline_adj,
+            "total": total,
+        }
+
+    return stocks_data
+
+
 @app.get("/api/predictions")
 def get_predictions():
     predictions = load_predictions()
@@ -985,6 +1057,8 @@ async def generate_predictions():
                 f"actual {p['actual_pct']:+.2f}% [{direction}]\n"
             )
 
+    stocks_data = calculate_sentiment_scores(stocks_data, macro)
+
     watchlist_set = set(watchlist_tickers)
     must_predict = [s["ticker"] for s in stocks_data if s["ticker"] in watchlist_set]
     also_consider = [s["ticker"] for s in stocks_data if s["ticker"] not in watchlist_set]
@@ -1000,37 +1074,40 @@ Today: {today}
 {chr(10).join(headlines[:20]) if headlines else "No headlines fetched."}
 
 === STOCKS TO ANALYZE ===
+Each stock includes a pre-calculated `sentiment_score` (%) built from:
+  - VIX fear adjustment
+  - S&P 500 5-day momentum adjustment
+  - Beta multiplier (amplifies market moves for high/low beta stocks)
+  - Headline sentiment (keyword scan: +0.3% per positive signal, -0.3% per negative)
+
 {json.dumps(stocks_data, indent=2)}
 {accuracy_summary}
-=== VALUATION FRAMEWORK TO APPLY ===
-Use ALL of the following criteria to assess each stock:
+=== SCORING RULES ===
+1. START with `sentiment_score` as your baseline predicted_pct for each stock.
+2. ADJUST up or down based on fundamentals (valuation + quality):
+   - Strong fundamentals (PEG<1, FCF yield>6%, high margins, low debt): add up to +1.0%
+   - Weak fundamentals (P/E>30, negative FCF, declining revenue): subtract up to -1.0%
+   - Neutral fundamentals: no adjustment
 
-VALUATION (is it cheap?):
+VALUATION THRESHOLDS:
 - P/E < 15 = cheap, 15-25 = fair, >25 = expensive
-- PEG < 1 = undervalued relative to growth, >2 = expensive
-- P/B < 1 = trading below asset value, >3 = expensive
+- PEG < 1 = undervalued vs growth, >2 = expensive
+- P/B < 1 = below asset value, >3 = expensive
 - EV/EBITDA < 8 = cheap, 8-15 = fair, >15 = expensive
 - FCF Yield > 8% = excellent, 4-8% = good, <4% = poor
 
-QUALITY (is it a good business?):
-- High profit margins and growing revenue = quality
+QUALITY:
+- High profit margins + growing revenue = quality business
 - Low debt-to-equity = financial safety
 - High EPS and revenue growth = momentum
-
-CATALYSTS (why would it move NOW?):
-- Macro tailwinds/headwinds from news
-- Sector rotation signals
-- Short squeeze potential (high short float)
-- Beta (high beta = amplified moves)
-- Recent 5-day momentum
 
 IMPORTANT: You MUST return a prediction for EVERY stock in the watchlist: {must_predict}.
 For any remaining stocks {also_consider}, only include the 2-3 with the strongest outlook.
 
-CONFIDENCE RULES — confidence must directly reflect the reasoning, no contradictions:
-- "high": clear bullish signals, no significant headwinds mentioned in reasoning
-- "medium": mixed signals or at least one notable risk factor mentioned
-- "low": meaningful bearish factors present (e.g. sell-off, overvaluation, weak momentum, macro headwinds)
+CONFIDENCE RULES — must directly reflect the reasoning, no contradictions:
+- "high": sentiment_score positive AND strong fundamentals support it
+- "medium": mixed signals or at least one notable risk factor
+- "low": negative sentiment_score OR meaningful bearish fundamentals present
 If your reasoning mentions a sell-off, downtrend, overvaluation, or risk — confidence MUST be "low" or "medium", never "high".
 
 Return ONLY a valid JSON array, no explanation, no markdown:
@@ -1039,7 +1116,7 @@ Return ONLY a valid JSON array, no explanation, no markdown:
     "ticker": "AAPL",
     "predicted_pct": 1.2,
     "confidence": "high",
-    "reasoning": "PEG 0.8 signals undervaluation vs growth. Strong FCF yield 6.2%. Positive macro tailwind from Fed pause. Recent momentum +2.1% over 5 days. No significant headwinds identified."
+    "reasoning": "Sentiment score +0.4% (VIX calm, low beta). PEG 0.8 undervalued. FCF yield 6.2% strong. Adjusted +0.8% above baseline for quality fundamentals."
   }}
 ]
 confidence: "low" | "medium" | "high"."""
