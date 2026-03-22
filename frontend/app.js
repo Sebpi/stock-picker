@@ -1075,3 +1075,34 @@ async function submitTrade(type) {
 document.getElementById("btn-buy").addEventListener("click",  () => submitTrade("buy"));
 document.getElementById("btn-sell").addEventListener("click", () => submitTrade("sell"));
 document.getElementById("btn-refresh-portfolio").addEventListener("click", loadPortfolio);
+
+document.getElementById("btn-import-portfolio").addEventListener("click", () => {
+  document.getElementById("import-file-input").click();
+});
+
+document.getElementById("import-file-input").addEventListener("change", async (e) => {
+  const file   = e.target.files[0];
+  const status = document.getElementById("portfolio-status");
+  if (!file) return;
+
+  status.textContent = "Importing…";
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const res  = await authFetch(`${API}/api/portfolio/import`, { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      status.textContent = "Import failed: " + (data.detail || "Unknown error");
+      return;
+    }
+    let msg = `Imported ${data.imported} transaction(s).`;
+    if (data.skipped > 0) msg += ` ${data.skipped} row(s) skipped: ${data.errors.join("; ")}`;
+    status.textContent = msg;
+    loadPortfolio();
+  } catch (err) {
+    status.textContent = "Import error: " + err.message;
+  } finally {
+    e.target.value = "";  // reset so same file can be re-imported if needed
+  }
+});

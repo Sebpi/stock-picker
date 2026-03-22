@@ -1,4 +1,6 @@
 import asyncio
+import csv as csv_mod
+import io
 import json
 import os
 import secrets
@@ -18,7 +20,7 @@ import httpx
 import yfinance as yf
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -1707,6 +1709,113 @@ def delete_transaction(tx_id: str):
     transactions = [t for t in transactions if t["id"] != tx_id]
     save_portfolio(transactions)
     return {"ok": True}
+
+
+@app.post("/api/portfolio/import")
+async def import_portfolio(file: UploadFile = File(...)):
+    """
+    Import transactions from a CSV file.
+    Required columns: type, ticker, qty, price, date
+    type must be 'buy' or 'sell'
+    date format: YYYY-MM-DD
+    """
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")  # handle BOM from Excel
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not decode file — ensure it is UTF-8 CSV.")
+
+    reader     = csv_mod.DictReader(io.StringIO(text))
+    required   = {"type", "ticker", "qty", "price", "date"}
+    if not required.issubset({c.strip().lower() for c in (reader.fieldnames or [])}):
+        raise HTTPException(status_code=400, detail=f"CSV must have columns: {', '.join(sorted(required))}")
+
+    transactions = load_portfolio()
+    imported, skipped = 0, []
+
+    # Pre-build current positions for sell validation
+    positions = compute_positions(transactions)
+
+    for i, row in enumerate(reader, start=2):
+        row = {k.strip().lower(): v.strip() for k, v in row.items()}
+        try:
+            tx_type = row["type"].lower()
+            if tx_type not in ("buy", "sell"):
+                skipped.append(f"Row {i}: type must be 'buy' or 'sell', got '{row['type']}'")
+                continue
+
+            ticker = row["ticker"].upper()
+            qty    = float(row["qty"])
+            price  = float(row["price"])
+            tx_date = row["date"]
+
+            if qty <= 0 or price <= 0:
+                skipped.append(f"Row {i} ({ticker}): qty and price must be positive")
+                continue
+
+            # Validate date
+            datetime.strptime(tx_date, "%Y-%m-%d")
+
+            # For sells, check sufficient shares
+            if tx_type == "sell":
+                held = positions.get(ticker, {}).get("shares", 0)
+                if qty > held:
+                    skipped.append(f"Row {i} ({ticker}): cannot sell {qty} — only {held} held")
+                    continue
+
+            # Fetch name (best effort)
+            try:
+                info = yf.Ticker(ticker).info
+                name = info.get("shortName", ticker)
+            except Exception:
+                name = ticker
+
+            tx = {
+                "id":        str(uuid.uuid4()),
+                "type":      tx_type,
+                "ticker":    ticker,
+                "name":      name,
+                "qty":       qty,
+                "price":     price,
+                "date":      tx_date,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            transactions.append(tx)
+            # Update positions dict for subsequent sell validation in same file
+            if ticker not in positions:
+                positions[ticker] = {"shares": 0, "avg_cost": 0, "realised_pnl": 0, "name": name}
+            if tx_type == "buy":
+                old_shares = positions[ticker]["shares"]
+                old_cost   = positions[ticker]["avg_cost"]
+                new_shares = old_shares + qty
+                positions[ticker]["avg_cost"] = ((old_shares * old_cost) + (qty * price)) / new_shares
+                positions[ticker]["shares"]   = new_shares
+            else:
+                positions[ticker]["shares"] -= qty
+
+            imported += 1
+
+        except ValueError as e:
+            skipped.append(f"Row {i}: {e}")
+            continue
+
+    if imported > 0:
+        save_portfolio(transactions)
+
+    return {
+        "imported": imported,
+        "skipped":  len(skipped),
+        "errors":   skipped,
+    }
+
+
+@app.get("/api/portfolio/template")
+def portfolio_template():
+    """Return a CSV template for portfolio import."""
+    from fastapi.responses import Response
+    template = "type,ticker,qty,price,date\nbuy,AAPL,10,175.50,2025-01-15\nbuy,MSFT,5,380.00,2025-02-01\nsell,AAPL,5,182.00,2025-03-10\n"
+    return Response(content=template, media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=portfolio_template.csv"})
 
 
 @app.delete("/api/alerts")
