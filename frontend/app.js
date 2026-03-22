@@ -589,10 +589,14 @@ function renderPredictionsTable(preds) {
     const predStr = p.predicted_pct != null ? `<span class="${predCls}">${p.predicted_pct >= 0 ? "+" : ""}${p.predicted_pct.toFixed(2)}%</span>` : "—";
 
     let actualStr = '<span class="result-pending">Pending</span>';
+    let varianceStr = '<span class="result-pending">—</span>';
     let resultStr = '<span class="result-pending">—</span>';
     if (p.actual_pct != null) {
       const actCls = p.actual_pct >= 0 ? "change-pos" : "change-neg";
       actualStr = `<span class="${actCls}">${p.actual_pct >= 0 ? "+" : ""}${p.actual_pct.toFixed(2)}%</span>`;
+      const variance = p.actual_pct - p.predicted_pct;
+      const varCls = variance >= 0 ? "change-pos" : "change-neg";
+      varianceStr = `<span class="${varCls}">${variance >= 0 ? "+" : ""}${variance.toFixed(2)}%</span>`;
       const correct = (p.predicted_pct > 0) === (p.actual_pct > 0);
       resultStr = correct
         ? '<span class="result-correct">✓ Correct</span>'
@@ -613,6 +617,7 @@ function renderPredictionsTable(preds) {
         <td style="color:var(--text-muted);font-size:0.85rem">${p.name || "—"}</td>
         <td>${predStr}</td>
         <td>${actualStr}</td>
+        <td>${varianceStr}</td>
         <td>${resultStr}</td>
         <td>${confBadge}</td>
         <td class="reasoning-cell">${p.reasoning || "—"}</td>
