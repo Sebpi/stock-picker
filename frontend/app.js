@@ -441,7 +441,9 @@ function renderPredictionsTable(preds) {
         : '<span class="result-wrong">✗ Wrong</span>';
     }
 
-    const confBadge = `<span class="badge-${p.confidence || 'medium'}">${(p.confidence || 'medium').toUpperCase()}</span>`;
+    const direction = p.predicted_pct >= 0 ? "▲ BULLISH" : "▼ BEARISH";
+    const dirClass  = p.predicted_pct >= 0 ? "dir-bull" : "dir-bear";
+    const confBadge = `<span class="badge-${p.confidence || 'medium'}">${(p.confidence || 'medium').toUpperCase()}</span> <span class="${dirClass}">${direction}</span>`;
 
     return `
       <tr>

@@ -345,6 +345,8 @@ textarea:focus { border-color: var(--accent); }
 .result-correct { color: var(--green); font-weight: 700; }
 .result-wrong   { color: var(--red);   font-weight: 700; }
 .result-pending { color: var(--text-muted); font-style: italic; }
+.dir-bull { color: var(--green); font-size: 0.72rem; font-weight: 700; }
+.dir-bear { color: var(--red);   font-size: 0.72rem; font-weight: 700; }
 
 .reasoning-cell { font-size: 0.82rem; color: var(--text-muted); max-width: 320px; line-height: 1.4; }
 
