@@ -225,6 +225,43 @@
           <button id="btn-backtest" class="btn-primary">▶ Run Backtest</button>
         </div>
       </div>
+      <!-- Interpretation guide -->
+      <div class="backtest-guide">
+        <h4>How to read the results</h4>
+        <div class="guide-grid">
+          <div class="guide-card">
+            <span class="guide-icon">🎯</span>
+            <strong>Accuracy %</strong>
+            <p>How often the model predicted the correct <em>direction</em> (up or down) for the next day. 50% = coin flip. Above 60% = model has an edge for that stock.</p>
+          </div>
+          <div class="guide-card">
+            <span class="guide-icon">📏</span>
+            <strong>Variance ±%</strong>
+            <p>How far off the predicted <em>magnitude</em> was from the actual move. ±1.2% means the predicted % was on average 1.2 points away from reality. Lower is better.</p>
+          </div>
+          <div class="guide-card guide-card--warn">
+            <span class="guide-icon">🔴</span>
+            <strong>Red + Small Variance</strong>
+            <p>Dangerous combination. Model is correctly sizing the move but has the direction inverted. The stock likely behaves counter-cyclically — consider flipping its signal (e.g. defensive stocks that rise when VIX spikes).</p>
+          </div>
+          <div class="guide-card guide-card--good">
+            <span class="guide-icon">🟢</span>
+            <strong>Green + Small Variance</strong>
+            <p>Ideal. Model is getting direction right and the magnitude is close. High confidence in predictions for this stock.</p>
+          </div>
+          <div class="guide-card">
+            <span class="guide-icon">🟡</span>
+            <strong>Green + Large Variance</strong>
+            <p>Direction is right but magnitude is off. Useful for trade direction but don't rely on the predicted % size of the move.</p>
+          </div>
+          <div class="guide-card">
+            <span class="guide-icon">⚪</span>
+            <strong>50–60% Accuracy</strong>
+            <p>Marginal — close to random chance. Not enough data to trust this stock's predictions. Watch for improvement as more days accumulate.</p>
+          </div>
+        </div>
+      </div>
+
       <div id="backtest-status" class="status-msg"></div>
       <div id="backtest-summary" class="backtest-summary hidden"></div>
       <div id="backtest-by-ticker" class="backtest-by-ticker hidden"></div>
