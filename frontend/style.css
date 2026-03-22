@@ -813,3 +813,47 @@ body.login-active { overflow: hidden; }
   cursor: pointer;
 }
 .btn-secondary:hover { border-color: var(--accent); color: var(--text); }
+
+/* ── Backtest ─────────────────────────────────────────────────── */
+.backtest-section {
+  margin-top: 2.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1.5rem;
+}
+.backtest-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+.backtest-header h3 { font-size: 1.1rem; margin-bottom: 0.2rem; }
+.backtest-header .btn-secondary { flex: none; white-space: nowrap; }
+.backtest-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+.backtest-ticker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+.backtest-ticker-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  gap: 0.1rem;
+}
+.backtest-ticker-card strong { font-size: 0.9rem; }
+.backtest-ticker-card small  { color: var(--text-muted); }

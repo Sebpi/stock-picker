@@ -683,6 +683,82 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
 
 document.getElementById("btn-refresh-preds").addEventListener("click", loadPredictions);
 
+// ── Backtest ───────────────────────────────────────────────────
+
+document.getElementById("btn-backtest").addEventListener("click", async () => {
+  const btn    = document.getElementById("btn-backtest");
+  const status = document.getElementById("backtest-status");
+  const summary  = document.getElementById("backtest-summary");
+  const byTicker = document.getElementById("backtest-by-ticker");
+  const tableWrap = document.getElementById("backtest-table-wrap");
+
+  btn.disabled = true;
+  status.textContent = "Running backtest… fetching 4 weeks of historical data (this may take 30–60 seconds)…";
+  summary.classList.add("hidden");
+  byTicker.classList.add("hidden");
+  tableWrap.classList.add("hidden");
+
+  try {
+    const res  = await authFetch(`${API}/api/predictions/backtest`);
+    const data = await res.json();
+    status.textContent = "";
+
+    const s = data.summary;
+    const accCls = s.accuracy_pct >= 60 ? "change-pos" : s.accuracy_pct >= 50 ? "" : "change-neg";
+    summary.innerHTML = `
+      <div class="acc-item"><span class="acc-label">Directional Accuracy</span><span class="acc-value ${accCls}">${s.accuracy_pct}%</span></div>
+      <div class="acc-item"><span class="acc-label">Total Days Tested</span><span class="acc-value">${s.total}</span></div>
+      <div class="acc-item"><span class="acc-label">Correct Direction</span><span class="acc-value">${s.correct}</span></div>
+      <div class="acc-item"><span class="acc-label">Avg Abs Variance</span><span class="acc-value">±${s.avg_abs_variance}%</span></div>
+      <div class="acc-item"><span class="acc-label">Avg Predicted</span><span class="acc-value">${s.avg_predicted >= 0 ? "+" : ""}${s.avg_predicted}%</span></div>
+      <div class="acc-item"><span class="acc-label">Avg Actual</span><span class="acc-value">${s.avg_actual >= 0 ? "+" : ""}${s.avg_actual}%</span></div>
+    `;
+    summary.classList.remove("hidden");
+
+    // Per-ticker breakdown
+    const tickers = Object.entries(data.by_ticker).sort((a, b) => b[1].accuracy_pct - a[1].accuracy_pct);
+    byTicker.innerHTML = `<h4 style="margin:1rem 0 0.5rem">Accuracy by Stock</h4>
+      <div class="backtest-ticker-grid">` +
+      tickers.map(([ticker, t]) => {
+        const cls = t.accuracy_pct >= 60 ? "change-pos" : t.accuracy_pct >= 50 ? "" : "change-neg";
+        return `<div class="backtest-ticker-card">
+          <strong>${ticker}</strong>
+          <span class="${cls}">${t.accuracy_pct}%</span>
+          <small>${t.correct}/${t.total} · ±${t.avg_abs_variance}% var</small>
+        </div>`;
+      }).join("") + `</div>`;
+    byTicker.classList.remove("hidden");
+
+    // Detail table
+    const body = document.getElementById("backtest-body");
+    body.innerHTML = data.results.map(r => {
+      const pCls = r.predicted_pct >= 0 ? "change-pos" : "change-neg";
+      const aCls = r.actual_pct    >= 0 ? "change-pos" : "change-neg";
+      const vCls = r.variance      >= 0 ? "change-pos" : "change-neg";
+      const sp5Cls = r.sp_5d_chg  >= 0 ? "change-pos" : "change-neg";
+      const resCls = r.correct ? "result-correct" : "result-wrong";
+      return `<tr>
+        <td>${r.date}</td>
+        <td><strong>${r.ticker}</strong></td>
+        <td>${r.vix}</td>
+        <td><span class="${sp5Cls}">${r.sp_5d_chg >= 0 ? "+" : ""}${r.sp_5d_chg}%</span></td>
+        <td><span class="${r.sentiment_score >= 0 ? "change-pos" : "change-neg"}">${r.sentiment_score >= 0 ? "+" : ""}${r.sentiment_score}%</span></td>
+        <td><span class="${r.fund_adj >= 0 ? "change-pos" : "change-neg"}">${r.fund_adj >= 0 ? "+" : ""}${r.fund_adj}%</span></td>
+        <td><span class="${pCls}">${r.predicted_pct >= 0 ? "+" : ""}${r.predicted_pct}%</span></td>
+        <td><span class="${aCls}">${r.actual_pct >= 0 ? "+" : ""}${r.actual_pct}%</span></td>
+        <td><span class="${vCls}">${r.variance >= 0 ? "+" : ""}${r.variance}%</span></td>
+        <td><span class="${resCls}">${r.correct ? "✓" : "✗"}</span></td>
+      </tr>`;
+    }).join("");
+    tableWrap.classList.remove("hidden");
+
+  } catch (err) {
+    status.textContent = "Error running backtest: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ── Alerts ────────────────────────────────────────────────────
 
 async function loadAlerts() {

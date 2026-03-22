@@ -1165,6 +1165,144 @@ confidence: "low" | "medium" | "high"."""
     return {"predictions": new_preds}
 
 
+@app.get("/api/predictions/backtest")
+async def backtest_predictions():
+    """Replay 4 weeks of historical data through the sentiment scoring model and compare against actual returns."""
+    watchlist = load_watchlist()
+    end_date   = date.today()
+    start_date = end_date - timedelta(weeks=6)  # 6 weeks buffer to get clean 4-week window
+
+    # Fetch historical VIX and S&P 500
+    vix_hist = yf.Ticker("^VIX").history(start=str(start_date), end=str(end_date))
+    sp_hist  = yf.Ticker("^GSPC").history(start=str(start_date), end=str(end_date))
+    vix_dates  = [d.date() for d in vix_hist.index]
+    sp_dates   = [d.date() for d in sp_hist.index]
+    vix_closes = list(vix_hist["Close"])
+    sp_closes  = list(sp_hist["Close"])
+
+    results = []
+
+    for ticker in watchlist:
+        try:
+            t    = yf.Ticker(ticker)
+            info = t.info
+            hist = t.history(start=str(start_date), end=str(end_date))
+            if len(hist) < 3:
+                continue
+
+            beta      = info.get("beta") or 1.0
+            pe        = info.get("trailingPE")
+            peg       = info.get("pegRatio")
+            fcf_yield = calc_fcf_yield(info.get("freeCashflow"), info.get("marketCap"))
+            profit_m  = info.get("profitMargins") or 0
+            debt_eq   = info.get("debtToEquity") or 0
+            rev_growth = info.get("revenueGrowth") or 0
+
+            # Static fundamental adjustment (same logic as live scoring)
+            fund_adj = 0.0
+            if peg and peg < 1:    fund_adj += 0.4
+            elif peg and peg > 2:  fund_adj -= 0.3
+            if fcf_yield:
+                if fcf_yield > 6:  fund_adj += 0.3
+                elif fcf_yield < 2: fund_adj -= 0.2
+            if pe:
+                if pe < 15:        fund_adj += 0.2
+                elif pe > 30:      fund_adj -= 0.3
+            if profit_m > 0.20:    fund_adj += 0.1
+            if debt_eq > 200:      fund_adj -= 0.1
+            if rev_growth > 0.10:  fund_adj += 0.1
+            fund_adj = round(max(-1.0, min(1.0, fund_adj)), 2)
+
+            ticker_dates  = [d.date() for d in hist.index]
+            ticker_closes = list(hist["Close"])
+
+            for i in range(5, len(ticker_dates) - 1):
+                trade_date = ticker_dates[i]
+
+                # VIX on this day
+                vix_val = vix_closes[vix_dates.index(trade_date)] if trade_date in vix_dates else 20.0
+                if vix_val < 12:   vix_adj = 0.4
+                elif vix_val < 15: vix_adj = 0.2
+                elif vix_val < 20: vix_adj = 0.0
+                elif vix_val < 25: vix_adj = -0.3
+                elif vix_val < 30: vix_adj = -0.6
+                else:              vix_adj = -1.0
+
+                # S&P 500 5-day momentum on this day
+                sp_5d_chg = 0.0
+                if trade_date in sp_dates:
+                    si = sp_dates.index(trade_date)
+                    if si >= 5:
+                        sp_5d_chg = ((sp_closes[si] - sp_closes[si - 5]) / sp_closes[si - 5]) * 100
+                if sp_5d_chg > 3:    mom_adj = 0.4
+                elif sp_5d_chg > 1:  mom_adj = 0.2
+                elif sp_5d_chg > -1: mom_adj = 0.0
+                elif sp_5d_chg > -3: mom_adj = -0.2
+                else:                mom_adj = -0.4
+
+                market_base   = vix_adj + mom_adj
+                beta_adj      = round(market_base * (beta - 1.0) * 0.5, 2)
+                sentiment     = round(market_base + beta_adj, 2)
+                predicted     = round(sentiment + fund_adj, 2)
+
+                actual = round(((ticker_closes[i + 1] - ticker_closes[i]) / ticker_closes[i]) * 100, 2)
+                variance = round(actual - predicted, 2)
+                correct  = (predicted > 0) == (actual > 0)
+
+                results.append({
+                    "date":            str(trade_date),
+                    "ticker":          ticker,
+                    "vix":             round(vix_val, 1),
+                    "sp_5d_chg":       round(sp_5d_chg, 2),
+                    "sentiment_score": sentiment,
+                    "fund_adj":        fund_adj,
+                    "predicted_pct":   predicted,
+                    "actual_pct":      actual,
+                    "variance":        variance,
+                    "correct":         correct,
+                })
+        except Exception as e:
+            print(f"[Backtest] {ticker} error: {e}")
+            continue
+
+    if not results:
+        return {"results": [], "summary": {}, "by_ticker": {}}
+
+    total   = len(results)
+    correct = sum(1 for r in results if r["correct"])
+    avg_abs_var = round(sum(abs(r["variance"]) for r in results) / total, 2)
+    avg_pred    = round(sum(r["predicted_pct"] for r in results) / total, 2)
+    avg_actual  = round(sum(r["actual_pct"] for r in results) / total, 2)
+
+    by_ticker = {}
+    for ticker in watchlist:
+        rows = [r for r in results if r["ticker"] == ticker]
+        if not rows:
+            continue
+        t_correct = sum(1 for r in rows if r["correct"])
+        by_ticker[ticker] = {
+            "total":        len(rows),
+            "correct":      t_correct,
+            "accuracy_pct": round(t_correct / len(rows) * 100, 1),
+            "avg_variance": round(sum(r["variance"] for r in rows) / len(rows), 2),
+            "avg_abs_variance": round(sum(abs(r["variance"]) for r in rows) / len(rows), 2),
+        }
+
+    return {
+        "results": sorted(results, key=lambda x: x["date"], reverse=True),
+        "summary": {
+            "total":           total,
+            "correct":         correct,
+            "accuracy_pct":    round(correct / total * 100, 1),
+            "avg_abs_variance": avg_abs_var,
+            "avg_predicted":   avg_pred,
+            "avg_actual":      avg_actual,
+            "note":            "Headline sentiment not included in backtest (historical news unavailable). Scores use VIX + S&P momentum + beta + fundamentals only.",
+        },
+        "by_ticker": by_ticker,
+    }
+
+
 @app.delete("/api/predictions")
 def clear_predictions():
     save_predictions([])
