@@ -6,3 +6,7 @@ python-dotenv
 httpx
 apscheduler
 twilio
+python-jose[cryptography]
+bcrypt
+python-multipart
+pypdf
