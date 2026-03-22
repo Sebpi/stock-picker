@@ -1,13 +1,16 @@
 import asyncio
 import csv as csv_mod
 import io
+import logging
 import pypdf
 import json
 import os
 import random
+import re
 import secrets
 import smtplib
 import statistics
+import tempfile
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, time, timedelta, timezone
@@ -30,8 +33,62 @@ from fastapi.staticfiles import StaticFiles
 import bcrypt as _bcrypt
 from jose import JWTError, jwt
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(Path(__file__).parent / "audit.log", encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger("stockpicker")
+
+# ── Input validation ───────────────────────────────────────────────────────────
+_TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,10}$")
+
+def _validate_ticker(ticker: str) -> str:
+    """Uppercase and validate a ticker symbol. Raises 400 if invalid."""
+    t = ticker.upper().strip()
+    if not _TICKER_RE.match(t):
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+    return t
+
+# ── Rate limiter ───────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
+
+# ── Account lockout ────────────────────────────────────────────────────────────
+_MAX_ATTEMPTS   = 5
+_LOCKOUT_MINS   = 15
+_failed_logins: dict[str, list] = {}   # username -> list of attempt datetimes
+_lockout_until: dict[str, datetime] = {}
+
+def _check_lockout(username: str) -> None:
+    """Raise 429 if account is locked out."""
+    until = _lockout_until.get(username)
+    if until and datetime.now(timezone.utc) < until:
+        remaining = int((until - datetime.now(timezone.utc)).total_seconds() // 60) + 1
+        raise HTTPException(status_code=429, detail=f"Account locked. Try again in {remaining} minute(s).")
+
+def _record_failed_login(username: str) -> None:
+    """Track failed login; lock account after _MAX_ATTEMPTS within 10 minutes."""
+    now = datetime.now(timezone.utc)
+    window = [t for t in _failed_logins.get(username, []) if (now - t).total_seconds() < 600]
+    window.append(now)
+    _failed_logins[username] = window
+    if len(window) >= _MAX_ATTEMPTS:
+        _lockout_until[username] = now + timedelta(minutes=_LOCKOUT_MINS)
+        logger.warning("LOCKOUT username=%s after %d failed attempts", username, len(window))
+
+def _clear_failed_logins(username: str) -> None:
+    _failed_logins.pop(username, None)
+    _lockout_until.pop(username, None)
 
 # ── Auth setup ─────────────────────────────────────────────────────────────────
 _SECRET_KEY = os.getenv("SECRET_KEY") or secrets.token_hex(32)
@@ -39,7 +96,7 @@ _ALGORITHM  = "HS256"
 _TOKEN_HOURS = 24
 
 def _hash_pw(password: str) -> str:
-    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt(rounds=12)).decode()
 
 def _verify_pw(password: str, hashed: str) -> bool:
     return _bcrypt.checkpw(password.encode(), hashed.encode())
@@ -58,8 +115,22 @@ def load_users() -> dict:
         return json.loads(USERS_FILE.read_text())
     return {}
 
+def _atomic_write(path: Path, data: str) -> None:
+    """Write data to a temp file then atomically replace the target."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 def save_users(users: dict):
-    USERS_FILE.write_text(json.dumps(users, indent=2))
+    _atomic_write(USERS_FILE, json.dumps(users, indent=2))
 
 def create_access_token(username: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=_TOKEN_HOURS)
@@ -79,14 +150,34 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(h
         raise exc
 
 app = FastAPI(title="Stock Picker API")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 scheduler = AsyncIOScheduler()
 
+_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:8000").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; "
+        "img-src 'self' data:; "
+        "frame-ancestors 'none';"
+    )
+    return response
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -128,7 +219,7 @@ def load_settings() -> dict:
     return defaults
 
 def save_settings(s: dict):
-    SETTINGS_FILE.write_text(json.dumps(s, indent=2))
+    _atomic_write(SETTINGS_FILE, json.dumps(s, indent=2))
 
 UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "JNJ",
@@ -202,7 +293,7 @@ def load_watchlist() -> list[str]:
     return []
 
 def save_watchlist(tickers: list[str]):
-    WATCHLIST_FILE.write_text(json.dumps(tickers))
+    _atomic_write(WATCHLIST_FILE, json.dumps(tickers))
 
 def load_predictions() -> list[dict]:
     if PREDICTIONS_FILE.exists():
@@ -210,7 +301,7 @@ def load_predictions() -> list[dict]:
     return []
 
 def save_predictions(predictions: list[dict]):
-    PREDICTIONS_FILE.write_text(json.dumps(predictions[:1000], indent=2))
+    _atomic_write(PREDICTIONS_FILE, json.dumps(predictions[:1000], indent=2))
 
 def calc_fcf_yield(fcf, market_cap) -> Optional[float]:
     return round((fcf / market_cap) * 100, 2) if fcf and market_cap else None
@@ -221,7 +312,7 @@ def load_alerts() -> list[dict]:
     return []
 
 def save_alerts(alerts: list[dict]):
-    ALERTS_FILE.write_text(json.dumps(alerts, indent=2))
+    _atomic_write(ALERTS_FILE, json.dumps(alerts, indent=2))
 
 def append_alert(entry: dict):
     alerts = load_alerts()
@@ -235,7 +326,7 @@ def load_portfolio() -> list[dict]:
     return []
 
 def save_portfolio(transactions: list[dict]):
-    PORTFOLIO_FILE.write_text(json.dumps(transactions, indent=2))
+    _atomic_write(PORTFOLIO_FILE, json.dumps(transactions, indent=2))
 
 def compute_positions(transactions: list[dict]) -> dict:
     """Average cost basis P&L per ticker."""
@@ -499,7 +590,7 @@ async def startup():
     # Create default admin account on first run
     users = load_users()
     if not users:
-        default_pass = "stockpicker123"
+        default_pass = secrets.token_urlsafe(16)
         users["admin"] = {
             "hashed_password": _hash_pw(default_pass),
             "email": os.getenv("ALERT_EMAIL", ""),
@@ -511,6 +602,7 @@ async def startup():
         print(f"  Password : {default_pass}")
         print("  Please change this password after first login!")
         print("="*55 + "\n")
+        logger.info("First-run admin account created")
 
     scheduler.add_job(monitor_stocks, "interval", minutes=5,  id="monitor")
     scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
@@ -526,33 +618,43 @@ async def shutdown():
 # ── Auth endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/login")
-async def login(req: LoginRequest):
+@limiter.limit("10/minute")
+async def login(req: LoginRequest, request: Request):
+    username = req.username.strip()
+    _check_lockout(username)
     users = load_users()
-    user = users.get(req.username)
+    user = users.get(username)
     if not user or not _verify_pw(req.password, user["hashed_password"]):
+        _record_failed_login(username)
+        logger.warning("LOGIN_FAIL username=%s ip=%s", username, request.client.host if request.client else "unknown")
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    token = create_access_token(req.username)
+    _clear_failed_logins(username)
+    logger.info("LOGIN_OK username=%s ip=%s", username, request.client.host if request.client else "unknown")
+    token = create_access_token(username)
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/api/auth/forgot-password")
+@limiter.limit("5/minute")
 async def forgot_password(req: ForgotPasswordRequest, request: Request):
     users = load_users()
-    user = users.get(req.username)
+    user = users.get(req.username.strip())
     if user:
         token = secrets.token_urlsafe(32)
-        _reset_tokens[token] = (req.username, datetime.now(timezone.utc) + timedelta(minutes=15))
-        base_url = str(request.base_url).rstrip("/")
-        reset_link = f"{base_url}/?reset_token={token}"
+        _reset_tokens[token] = (req.username.strip(), datetime.now(timezone.utc) + timedelta(minutes=15))
+        app_url = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
+        reset_link = f"{app_url}/?reset_token={token}"
         result = send_email(
             "Stock Picker - Password Reset",
             f"Click the link below to reset your password (valid 15 minutes):\n\n{reset_link}\n\nIf you did not request this, ignore this email.",
         )
-        print(f"[Auth] Password reset email sent for '{req.username}': {result}")
+        logger.info("PASSWORD_RESET_REQUESTED username=%s email_sent=%s", req.username, result)
     # Always return ok to avoid revealing valid usernames
     return {"ok": True, "message": "If that username exists, a reset link has been sent to the registered email."}
 
 @app.post("/api/auth/reset-password")
 async def reset_password(req: ResetPasswordRequest):
+    if len(req.new_password) < 12:
+        raise HTTPException(status_code=400, detail="Password must be at least 12 characters")
     entry = _reset_tokens.get(req.token)
     if not entry:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
@@ -566,16 +668,21 @@ async def reset_password(req: ResetPasswordRequest):
     users[username]["hashed_password"] = _hash_pw(req.new_password)
     save_users(users)
     _reset_tokens.pop(req.token, None)
+    logger.info("PASSWORD_RESET_OK username=%s", username)
     return {"ok": True}
 
 @app.post("/api/auth/change-password")
 async def change_password(req: ChangePasswordRequest, current_user: str = Depends(get_current_user)):
+    if len(req.new_password) < 12:
+        raise HTTPException(status_code=400, detail="Password must be at least 12 characters")
     users = load_users()
     user = users[current_user]
     if not _verify_pw(req.current_password, user["hashed_password"]):
+        logger.warning("CHANGE_PASSWORD_FAIL username=%s", current_user)
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     users[current_user]["hashed_password"] = _hash_pw(req.new_password)
     save_users(users)
+    logger.info("CHANGE_PASSWORD_OK username=%s", current_user)
     return {"ok": True}
 
 @app.get("/api/auth/me")
@@ -648,8 +755,9 @@ async def screen_stocks(
 
 @app.get("/api/stock/{ticker}")
 def get_stock(ticker: str):
+    ticker = _validate_ticker(ticker)
     try:
-        t = yf.Ticker(ticker.upper())
+        t = yf.Ticker(ticker)
         info = t.info
         hist = t.history(period="1y")
         history = [
@@ -681,17 +789,21 @@ def get_stock(ticker: str):
             "description": info.get("longBusinessSummary", ""),
             "history": history,
         }
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="Could not fetch stock data")
 
 
 @app.get("/api/stock/{ticker}/peers")
 async def get_peer_valuation(ticker: str):
-    ticker = ticker.upper()
+    ticker = _validate_ticker(ticker)
     try:
         info = await get_info(ticker)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="Could not fetch stock data")
 
     sector = info.get("sector", "")
     target = {
@@ -784,8 +896,8 @@ async def _run_predictions_bg():
 
 @app.post("/api/watchlist/{ticker}")
 async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks):
+    ticker = _validate_ticker(ticker)
     tickers = load_watchlist()
-    ticker = ticker.upper()
     if ticker not in tickers:
         tickers.append(ticker)
         save_watchlist(tickers)
@@ -795,8 +907,8 @@ async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks):
 
 @app.delete("/api/watchlist/{ticker}")
 def remove_from_watchlist(ticker: str):
+    ticker = _validate_ticker(ticker)
     tickers = load_watchlist()
-    ticker = ticker.upper()
     tickers = [t for t in tickers if t != ticker]
     save_watchlist(tickers)
     return {"watchlist": tickers}
@@ -810,11 +922,6 @@ class TradeRequest(BaseModel):
     qty: float
     price: float
     date: Optional[str] = None
-
-class PaperTradeRequest(BaseModel):
-    ticker: str
-    qty: float
-    price: float
 
 @app.post("/api/recommend")
 def recommend(req: RecommendRequest):
@@ -1205,8 +1312,8 @@ confidence: "low" | "medium" | "high"."""
     try:
         claude_preds = json.loads(raw)
     except json.JSONDecodeError as e:
-        print(f"[Predictions] JSON parse error: {e}\nRaw response (first 500 chars): {raw[:500]}")
-        raise HTTPException(status_code=500, detail=f"Claude returned invalid JSON: {e}")
+        logger.error("Predictions JSON parse error: %s | raw (first 500): %s", e, raw[:500])
+        raise HTTPException(status_code=500, detail="AI returned an unexpected response format. Please try again.")
     price_map = {s["ticker"]: s["price"] for s in stocks_data}
     name_map  = {s["ticker"]: s["name"]  for s in stocks_data}
     new_preds = []
@@ -1603,8 +1710,9 @@ async def simulate_predictions():
 
 
 @app.delete("/api/predictions")
-def clear_predictions():
+def clear_predictions(current_user: str = Depends(get_current_user)):
     save_predictions([])
+    logger.info("PREDICTIONS_CLEARED user=%s", current_user)
     return {"message": "All predictions cleared."}
 
 
@@ -1806,8 +1914,9 @@ def get_settings():
 
 
 @app.post("/api/settings")
-def update_settings(s: dict):
+def update_settings(s: dict, current_user: str = Depends(get_current_user)):
     save_settings(s)
+    logger.info("SETTINGS_UPDATED user=%s", current_user)
     return load_settings()
 
 
@@ -1919,12 +2028,16 @@ def get_transactions():
 
 
 @app.delete("/api/portfolio/transaction/{tx_id}")
-def delete_transaction(tx_id: str):
+def delete_transaction(tx_id: str, current_user: str = Depends(get_current_user)):
     transactions = load_portfolio()
     transactions = [t for t in transactions if t["id"] != tx_id]
     save_portfolio(transactions)
+    logger.info("TRANSACTION_DELETED user=%s tx_id=%s", current_user, tx_id)
     return {"ok": True}
 
+
+_MAX_CSV_BYTES = 5 * 1024 * 1024   # 5 MB
+_MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MB
 
 @app.post("/api/portfolio/import")
 async def import_portfolio(file: UploadFile = File(...)):
@@ -1934,7 +2047,9 @@ async def import_portfolio(file: UploadFile = File(...)):
     type must be 'buy' or 'sell'
     date format: YYYY-MM-DD
     """
-    content = await file.read()
+    content = await file.read(_MAX_CSV_BYTES + 1)
+    if len(content) > _MAX_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="File too large — maximum CSV size is 5 MB")
     try:
         text = content.decode("utf-8-sig")  # handle BOM from Excel
     except Exception:
@@ -2043,7 +2158,9 @@ async def import_portfolio_pdf(file: UploadFile = File(...)):
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
 
-    content = await file.read()
+    content = await file.read(_MAX_PDF_BYTES + 1)
+    if len(content) > _MAX_PDF_BYTES:
+        raise HTTPException(status_code=413, detail="File too large — maximum PDF size is 20 MB")
     try:
         reader = pypdf.PdfReader(io.BytesIO(content))
         pages_text = []
@@ -2052,8 +2169,8 @@ async def import_portfolio_pdf(file: UploadFile = File(...)):
             if text:
                 pages_text.append(text)
         full_text = "\n\n".join(pages_text)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read PDF: {e}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read PDF — ensure the file is a valid PDF.")
 
     if not full_text.strip():
         raise HTTPException(status_code=400, detail="PDF appears to be empty or image-only — text could not be extracted.")
@@ -2100,7 +2217,8 @@ PDF TEXT:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Claude could not parse transactions from this PDF: {e}")
+        logger.error("PDF import JSON parse error: %s", e)
+        raise HTTPException(status_code=500, detail="Could not parse transactions from this PDF. Ensure it contains readable text.")
 
     if not parsed:
         return {"imported": 0, "skipped": 0, "errors": [], "preview": [], "message": "No transactions found in this PDF."}
@@ -2169,58 +2287,7 @@ PDF TEXT:
 
 
 @app.delete("/api/alerts")
-def clear_alerts():
+def clear_alerts(current_user: str = Depends(get_current_user)):
     save_alerts([])
+    logger.info("ALERTS_CLEARED user=%s", current_user)
     return {"message": "Alert history cleared."}
-
-
-# ── Paper portfolio execute trade endpoints ───────────────────────────────────
-
-PAPER_PORTFOLIO_FILE = Path(__file__).parent / "paper_portfolio.json"
-
-def load_paper_portfolio() -> list:
-    if PAPER_PORTFOLIO_FILE.exists():
-        return json.loads(PAPER_PORTFOLIO_FILE.read_text())
-    return []
-
-def save_paper_portfolio(txs: list):
-    _atomic_write(PAPER_PORTFOLIO_FILE, json.dumps(txs, indent=2))
-
-@app.post("/api/paper/execute-buy")
-async def paper_execute_buy(req: PaperTradeRequest, current_user: str = Depends(get_current_user)):
-    ticker = req.ticker.upper()
-    txs = load_paper_portfolio()
-    txs.append({
-        "type": "buy",
-        "ticker": ticker,
-        "qty": req.qty,
-        "price": req.price,
-        "timestamp": datetime.utcnow().isoformat(),
-    })
-    save_paper_portfolio(txs)
-    return {"ok": True, "message": f"Bought {req.qty} shares of {ticker} at {req.price}"}
-
-@app.post("/api/paper/execute-sell")
-async def paper_execute_sell(req: PaperTradeRequest, current_user: str = Depends(get_current_user)):
-    ticker = req.ticker.upper()
-    txs = load_paper_portfolio()
-    # Compute current holdings
-    held: dict[str, float] = {}
-    for tx in txs:
-        t = tx.get("ticker", "")
-        if tx.get("type") == "buy":
-            held[t] = held.get(t, 0) + float(tx.get("qty", 0))
-        elif tx.get("type") == "sell":
-            held[t] = held.get(t, 0) - float(tx.get("qty", 0))
-    shares_held = held.get(ticker, 0)
-    if req.qty > shares_held:
-        raise HTTPException(status_code=400, detail=f"Cannot sell {req.qty} shares — only {shares_held:.4f} held")
-    txs.append({
-        "type": "sell",
-        "ticker": ticker,
-        "qty": req.qty,
-        "price": req.price,
-        "timestamp": datetime.utcnow().isoformat(),
-    })
-    save_paper_portfolio(txs)
-    return {"ok": True, "message": f"Sold {req.qty} shares of {ticker} at {req.price}"}

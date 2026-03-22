@@ -4,6 +4,9 @@ backend/predictions.json
 backend/alerts.json
 backend/portfolio.json
 backend/users.json
+backend/settings.json
+backend/audit.log
+backend/*.log
 __pycache__/
 *.pyc
 *.pyo

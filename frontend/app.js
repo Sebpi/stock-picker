@@ -1,5 +1,8 @@
 const API = "";
 
+// ── XSS protection ────────────────────────────────────────────
+const safe = html => (typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(String(html ?? "")) : String(html ?? ""));
+
 // ── Auth helpers ──────────────────────────────────────────────
 const TOKEN_KEY = "sp_token";
 const getToken = () => localStorage.getItem(TOKEN_KEY);
@@ -49,7 +52,7 @@ function hideLogin() {
       const errEl = document.getElementById("reset-error");
       errEl.style.display = "none";
       if (np !== cp) { errEl.textContent = "Passwords do not match."; errEl.style.display = "block"; return; }
-      if (np.length < 6) { errEl.textContent = "Password must be at least 6 characters."; errEl.style.display = "block"; return; }
+      if (np.length < 12) { errEl.textContent = "Password must be at least 12 characters."; errEl.style.display = "block"; return; }
       const res = await fetch(`${API}/api/auth/reset-password`, {
         method: "POST", headers: {"Content-Type":"application/json"},
         body: JSON.stringify({ token: urlToken, new_password: np })
@@ -140,7 +143,7 @@ document.getElementById("btn-cp-save").onclick = async () => {
   const okEl  = document.getElementById("change-pw-ok");
   errEl.style.display = "none"; okEl.style.display = "none";
   if (np !== cp) { errEl.textContent = "New passwords do not match."; errEl.style.display = "block"; return; }
-  if (np.length < 6) { errEl.textContent = "Password must be at least 6 characters."; errEl.style.display = "block"; return; }
+  if (np.length < 12) { errEl.textContent = "Password must be at least 12 characters."; errEl.style.display = "block"; return; }
   try {
     const res = await fetch(`${API}/api/auth/change-password`, {
       method: "POST", headers: {"Content-Type":"application/json"},
@@ -614,13 +617,13 @@ function renderPredictionsTable(preds) {
       <tr>
         <td>${p.date}</td>
         <td><strong>${p.ticker}</strong></td>
-        <td style="color:var(--text-muted);font-size:0.85rem">${p.name || "—"}</td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${safe(p.name || "—")}</td>
         <td>${predStr}</td>
         <td>${actualStr}</td>
         <td>${varianceStr}</td>
         <td>${resultStr}</td>
         <td>${confBadge}</td>
-        <td class="reasoning-cell">${p.reasoning || "—"}</td>
+        <td class="reasoning-cell">${safe(p.reasoning || "—")}</td>
       </tr>
     `;
   }).join("");
@@ -915,16 +918,15 @@ function renderRecommendations(data) {
       const predStr  = s.predicted_pct != null ? `<span class="${s.predicted_pct >= 0 ? "change-pos" : "change-neg"}">${s.predicted_pct >= 0 ? "+" : ""}${s.predicted_pct.toFixed(2)}%</span>` : "—";
       const trigCls  = s.trigger === "STOP LOSS" ? "badge-low" : s.trigger === "TAKE PROFIT" ? "badge-high" : "badge-medium";
       return `<tr>
-        <td><strong>${s.ticker}</strong></td>
-        <td style="color:var(--text-muted);font-size:0.85rem">${s.name}</td>
-        <td><span class="${trigCls}">${s.trigger}</span></td>
+        <td><strong>${safe(s.ticker)}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${safe(s.name)}</td>
+        <td><span class="${trigCls}">${safe(s.trigger)}</span></td>
         <td>${s.qty}</td>
         <td>${fmt(s.current_price)}</td>
         <td><strong>${fmt(s.estimated_proceeds)}</strong></td>
         <td><span class="${pnlCls}">${s.unrealised_pnl >= 0 ? "+" : ""}${fmt(s.unrealised_pnl)} (${s.unrealised_pct >= 0 ? "+" : ""}${s.unrealised_pct.toFixed(1)}%)</span></td>
         <td>${predStr}</td>
-        <td class="reasoning-cell">${s.reasoning}</td>
-        <td><button class="btn-sell" onclick="executePaperSell('${s.ticker}', ${s.qty}, ${s.current_price})">Execute Sell</button></td>
+        <td class="reasoning-cell">${safe(s.reasoning)}</td>
       </tr>`;
     }).join("");
   } else {
@@ -940,16 +942,15 @@ function renderRecommendations(data) {
       const accStr = b.accuracy_pct != null ? `${b.accuracy_pct}%` : "<span style='color:var(--text-muted)'>No data</span>";
       return `<tr>
         <td style="color:var(--text-muted)">#${i + 1}</td>
-        <td><strong>${b.ticker}</strong></td>
-        <td style="color:var(--text-muted);font-size:0.85rem">${b.name}</td>
+        <td><strong>${safe(b.ticker)}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${safe(b.name)}</td>
         <td><span class="badge-${b.confidence}">${b.confidence.toUpperCase()}</span></td>
         <td>${accStr}</td>
         <td><span class="change-pos">+${b.predicted_pct.toFixed(2)}%</span></td>
         <td>${fmt(b.current_price)}</td>
         <td><strong>${b.qty}</strong></td>
         <td><strong>${fmt(b.estimated_cost)}</strong></td>
-        <td class="reasoning-cell">${b.reasoning}</td>
-        <td><button class="btn-buy" onclick="executePaperBuy('${b.ticker}', ${b.qty}, ${b.current_price})">Execute Buy</button></td>
+        <td class="reasoning-cell">${safe(b.reasoning)}</td>
       </tr>`;
     }).join("");
   } else {
@@ -964,44 +965,6 @@ function renderRecommendations(data) {
 }
 
 document.getElementById("btn-load-recs").addEventListener("click", loadRecommendations);
-
-async function executePaperSell(ticker, qty, price) {
-  if (!confirm(`Execute sell: ${qty} shares of ${ticker} at ${fmt(price)}?`)) return;
-  try {
-    const res = await authFetch(`${API}/api/paper/execute-sell`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticker, qty, price })
-    });
-    if (res.ok) {
-      loadRecommendations();
-    } else {
-      const d = await res.json();
-      alert("Error: " + (d.detail || "Failed to execute sell"));
-    }
-  } catch (err) {
-    alert("Error: " + err.message);
-  }
-}
-
-async function executePaperBuy(ticker, qty, price) {
-  if (!confirm(`Execute buy: ${qty} shares of ${ticker} at ${fmt(price)}?`)) return;
-  try {
-    const res = await authFetch(`${API}/api/paper/execute-buy`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticker, qty, price })
-    });
-    if (res.ok) {
-      loadRecommendations();
-    } else {
-      const d = await res.json();
-      alert("Error: " + (d.detail || "Failed to execute buy"));
-    }
-  } catch (err) {
-    alert("Error: " + err.message);
-  }
-}
 
 // ── Alerts ────────────────────────────────────────────────────
 
@@ -1057,7 +1020,7 @@ function renderAlertsTable(alerts) {
     const signals = a.signals || [];
     const primarySignal = signals[0] || {};
     const allSignals = signals.map(s =>
-      `<span class="signal-tag signal-${s.type}">${s.signal}</span>`
+      `<span class="signal-tag signal-${s.type}">${safe(s.signal)}</span>`
     ).join(" ");
     const type = signals.map(s => SIGNAL_LABELS[s.type] || s.type).join(", ");
 
@@ -1068,7 +1031,7 @@ function renderAlertsTable(alerts) {
     return `
       <tr>
         <td style="white-space:nowrap;font-size:0.82rem">${time}</td>
-        <td><strong>${a.ticker}</strong><br><span style="color:var(--text-muted);font-size:0.78rem">${a.name || ""}</span></td>
+        <td><strong>${safe(a.ticker)}</strong><br><span style="color:var(--text-muted);font-size:0.78rem">${safe(a.name || "")}</span></td>
         <td>${priceHtml}</td>
         <td>${allSignals}</td>
         <td style="font-size:0.82rem;color:var(--text-muted)">${type}</td>
@@ -1261,17 +1224,17 @@ document.getElementById("import-pdf-input").addEventListener("change", async (e)
     tbody.innerHTML = (data.preview || []).map(r => {
       const typeCls = r.type === "buy" ? "change-pos" : "change-neg";
       return `<tr>
-        <td><span class="${typeCls}">${r.type.toUpperCase()}</span></td>
-        <td><strong>${r.ticker}</strong></td>
-        <td style="color:var(--text-muted);font-size:0.85rem">${r.name}</td>
+        <td><span class="${typeCls}">${safe(r.type.toUpperCase())}</span></td>
+        <td><strong>${safe(r.ticker)}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${safe(r.name)}</td>
         <td>${r.qty}</td>
         <td>$${r.price.toFixed(2)}</td>
-        <td>${r.date}</td>
+        <td>${safe(r.date)}</td>
       </tr>`;
     }).join("");
 
     errorsEl.innerHTML = data.errors.length > 0
-      ? "<strong>Skipped rows:</strong><br>" + data.errors.join("<br>")
+      ? safe("<strong>Skipped rows:</strong><br>" + data.errors.map(e => String(e)).join("<br>"))
       : "";
 
     overlay.classList.remove("hidden");
