@@ -795,15 +795,20 @@ confidence: "low" | "medium" | "high"."""
     claude_preds = json.loads(raw)
     price_map = {s["ticker"]: s["price"] for s in stocks_data}
     new_preds = []
+    seen_today = {p["ticker"] for p in predictions if p["date"] == today}
     for cp in claude_preds:
+        ticker = cp["ticker"].upper()
+        if ticker in seen_today:
+            continue  # skip duplicates
+        seen_today.add(ticker)
         entry = {
             "date": today,
-            "ticker": cp["ticker"],
+            "ticker": ticker,
             "predicted_pct": cp["predicted_pct"],
             "confidence": cp.get("confidence", "medium"),
             "reasoning": cp.get("reasoning", ""),
             "actual_pct": None,
-            "price_at_prediction": price_map.get(cp["ticker"]),
+            "price_at_prediction": price_map.get(ticker),
             "generated_at": datetime.utcnow().isoformat(),
         }
         predictions.append(entry)
