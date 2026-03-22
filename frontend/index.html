@@ -77,31 +77,31 @@
           </select>
         </div>
         <div class="filter-group">
-          <label>Max P/E</label>
+          <label>Max P/E <span class="tip" data-tip="Price-to-Earnings Ratio&#10;&#10;Share price ÷ earnings per share. Tells you how much investors pay for £1 of profit.&#10;&#10;✅ Good: &lt;15 = cheap, 15–25 = fair value&#10;⚠️ Caution: &gt;30 = expensive, may be priced for perfection&#10;&#10;Note: negative P/E means the company is losing money.">ⓘ</span></label>
           <input type="number" id="filter-pe" placeholder="e.g. 25" min="0" />
         </div>
         <div class="filter-group">
-          <label>Max PEG</label>
+          <label>Max PEG <span class="tip" data-tip="Price/Earnings-to-Growth Ratio&#10;&#10;P/E ÷ expected earnings growth rate. Adjusts P/E for how fast the company is growing — a cheaper way to spot value in growth stocks.&#10;&#10;✅ Good: &lt;1.0 = undervalued relative to growth&#10;✅ Fair: 1.0–2.0 = reasonably priced&#10;⚠️ Caution: &gt;2.0 = paying a lot for growth">ⓘ</span></label>
           <input type="number" id="filter-peg" placeholder="e.g. 1.5" min="0" step="0.1" />
         </div>
         <div class="filter-group">
-          <label>Max P/B</label>
+          <label>Max P/B <span class="tip" data-tip="Price-to-Book Ratio&#10;&#10;Share price ÷ net assets per share (what the company owns minus what it owes). Shows if you are paying more than the company's accounting value.&#10;&#10;✅ Good: &lt;1.5 = trading near or below asset value&#10;✅ Fair: 1.5–3.0 = moderate premium&#10;⚠️ Caution: &gt;5 = very expensive vs. assets (common in asset-light tech)">ⓘ</span></label>
           <input type="number" id="filter-pb" placeholder="e.g. 3" min="0" step="0.1" />
         </div>
         <div class="filter-group">
-          <label>Max EV/EBITDA</label>
+          <label>Max EV/EBITDA <span class="tip" data-tip="Enterprise Value ÷ Earnings Before Interest, Tax, Depreciation &amp; Amortisation&#10;&#10;Compares the total cost to buy the whole business against its operating profit. More comprehensive than P/E as it accounts for debt and is not distorted by accounting choices.&#10;&#10;✅ Good: &lt;10 = potentially undervalued&#10;✅ Fair: 10–15 = reasonable&#10;⚠️ Caution: &gt;20 = expensive on this measure">ⓘ</span></label>
           <input type="number" id="filter-ev" placeholder="e.g. 15" min="0" />
         </div>
         <div class="filter-group">
-          <label>Min FCF Yield %</label>
+          <label>Min FCF Yield % <span class="tip" data-tip="Free Cash Flow Yield&#10;&#10;Free cash flow ÷ market cap × 100. Shows how much real cash the company generates relative to its price — often seen as harder to fake than reported earnings.&#10;&#10;✅ Good: &gt;5% = strong cash generation&#10;✅ Decent: 2–5%&#10;⚠️ Caution: &lt;2% or negative = limited or no free cash">ⓘ</span></label>
           <input type="number" id="filter-fcf" placeholder="e.g. 4" min="0" step="0.5" />
         </div>
         <div class="filter-group">
-          <label>Min Market Cap ($B)</label>
+          <label>Min Market Cap ($B) <span class="tip" data-tip="Market Capitalisation&#10;&#10;Total market value of all shares outstanding. Indicates the size of the company.&#10;&#10;🏢 Mega-cap: &gt;$200B (e.g. Apple, Microsoft)&#10;🏢 Large-cap: $10B–$200B&#10;📈 Mid-cap: $2B–$10B (higher growth potential, more risk)&#10;📉 Small-cap: &lt;$2B (higher risk, higher reward)">ⓘ</span></label>
           <input type="number" id="filter-cap" placeholder="e.g. 10" min="0" />
         </div>
         <div class="filter-group">
-          <label>Min Avg Volume (M)</label>
+          <label>Min Avg Volume (M) <span class="tip" data-tip="Average Daily Trading Volume&#10;&#10;How many shares trade hands on an average day (in millions). Higher volume means it is easier to buy or sell without moving the price.&#10;&#10;✅ Good: &gt;1M shares/day = liquid, easy to trade&#10;⚠️ Caution: &lt;500K = thinly traded, wider bid/ask spreads">ⓘ</span></label>
           <input type="number" id="filter-vol" placeholder="e.g. 1" min="0" />
         </div>
         <button id="btn-screen" class="btn-primary">Run Screen</button>
@@ -117,12 +117,12 @@
               <th>Name</th>
               <th>Sector</th>
               <th>Price</th>
-              <th>P/E</th>
-              <th>PEG</th>
-              <th>P/B</th>
-              <th>EV/EBITDA</th>
-              <th>FCF Yield</th>
-              <th>Mkt Cap</th>
+              <th>P/E <span class="tip tip-left" data-tip="Price-to-Earnings&#10;Share price ÷ EPS&#10;&#10;✅ &lt;15 cheap  ✅ 15–25 fair&#10;⚠️ &gt;30 expensive">ⓘ</span></th>
+              <th>PEG <span class="tip tip-left" data-tip="P/E ÷ Growth Rate&#10;Adjusts P/E for growth speed&#10;&#10;✅ &lt;1 undervalued  ✅ 1–2 fair&#10;⚠️ &gt;2 expensive for growth">ⓘ</span></th>
+              <th>P/B <span class="tip tip-left" data-tip="Price-to-Book&#10;Share price ÷ net assets per share&#10;&#10;✅ &lt;1.5 near asset value&#10;✅ 1.5–3 moderate&#10;⚠️ &gt;5 high premium">ⓘ</span></th>
+              <th>EV/EBITDA <span class="tip tip-left" data-tip="Enterprise Value ÷ Operating Profit&#10;Total cost to buy the business vs. earnings&#10;&#10;✅ &lt;10 undervalued  ✅ 10–15 fair&#10;⚠️ &gt;20 expensive">ⓘ</span></th>
+              <th>FCF Yield <span class="tip tip-left" data-tip="Free Cash Flow ÷ Market Cap&#10;Real cash generated relative to price&#10;&#10;✅ &gt;5% strong  ✅ 2–5% decent&#10;⚠️ &lt;2% or negative = weak cash">ⓘ</span></th>
+              <th>Mkt Cap <span class="tip tip-left" data-tip="Total market value of all shares&#10;&#10;🏢 &gt;$200B Mega-cap&#10;🏢 $10–200B Large-cap&#10;📈 $2–10B Mid-cap&#10;📉 &lt;$2B Small-cap">ⓘ</span></th>
               <th></th>
             </tr>
           </thead>
