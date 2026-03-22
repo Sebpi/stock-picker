@@ -624,7 +624,8 @@ textarea:focus { border-color: var(--accent); }
   color: #1a1e30;
   font-size: 0.82rem;
   line-height: 1.7;
-  white-space: pre;
+  white-space: pre-wrap;
+  word-break: break-word;
   padding: 0.9rem 1.1rem;
   border-radius: 10px;
   box-shadow: 0 12px 32px rgba(0,0,0,0.45);
@@ -633,8 +634,8 @@ textarea:focus { border-color: var(--accent); }
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.15s, visibility 0.15s;
-  width: 310px;
-  max-width: 310px;
+  width: 300px;
+  max-width: 300px;
 }
 .tip::before {
   content: "";
