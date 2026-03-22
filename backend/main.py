@@ -871,6 +871,37 @@ def fetch_macro_data() -> dict:
     return macro
 
 
+def compute_calibration(predictions: list[dict]) -> dict:
+    """
+    Per-stock calibration from completed predictions.
+    Returns mean_bias (actual - predicted), directional accuracy, and inversion flag.
+    Requires >= 3 samples to include a stock; inversion requires >= 5.
+    """
+    completed = [
+        p for p in predictions
+        if p.get("actual_pct") is not None and p.get("predicted_pct") is not None
+    ]
+    by_stock: dict[str, list] = {}
+    for p in completed:
+        by_stock.setdefault(p["ticker"], []).append(p)
+
+    cal = {}
+    for ticker, preds in by_stock.items():
+        if len(preds) < 3:
+            continue
+        biases = [p["actual_pct"] - p["predicted_pct"] for p in preds]
+        mean_bias = round(sum(biases) / len(biases), 3)
+        correct = sum(1 for p in preds if (p["predicted_pct"] > 0) == (p["actual_pct"] > 0))
+        acc = correct / len(preds)
+        cal[ticker] = {
+            "count":        len(preds),
+            "mean_bias":    mean_bias,       # positive = we under-predict; negative = over-predict
+            "accuracy_pct": round(acc * 100, 1),
+            "inverted":     acc < 0.45 and len(preds) >= 5,
+        }
+    return cal
+
+
 _POSITIVE_KEYWORDS = {"upgrade", "beat", "beats", "strong", "raised", "record", "buyback",
                        "partnership", "growth", "acquisition", "outperform", "buy", "bullish",
                        "rally", "surge", "profit", "dividend", "approved", "wins"}
@@ -1041,14 +1072,32 @@ async def generate_predictions():
         except Exception:
             continue
 
+    calibration = compute_calibration(predictions)
+
     completed = [p for p in predictions if p.get("actual_pct") is not None]
-    accuracy_summary = ""
+    accuracy_summary = "\n=== HISTORICAL CALIBRATION — apply these corrections to your predictions ===\n"
+    if calibration:
+        for ticker, c in calibration.items():
+            if abs(c["mean_bias"]) >= 0.1:
+                bias_note = (f"you under-predict by {c['mean_bias']:+.2f}% on avg — add this to your prediction"
+                             if c["mean_bias"] > 0
+                             else f"you over-predict by {abs(c['mean_bias']):.2f}% on avg — subtract this")
+            else:
+                bias_note = "magnitude well-calibrated"
+            inv_note = " *** SIGNAL INVERTED — flip your direction for this stock ***" if c["inverted"] else ""
+            accuracy_summary += (
+                f"  {ticker}: {c['count']} predictions, {c['accuracy_pct']}% directional accuracy, "
+                f"mean bias {c['mean_bias']:+.3f}% ({bias_note}){inv_note}\n"
+            )
+    else:
+        accuracy_summary += "  No completed predictions yet — no calibration data available.\n"
+
     if completed:
         correct_dir = sum(1 for p in completed if (p["predicted_pct"] > 0) == (p["actual_pct"] > 0))
         pct_acc = correct_dir / len(completed) * 100
-        accuracy_summary = (
-            f"\nYour historical directional accuracy: {pct_acc:.0f}% over {len(completed)} predictions.\n"
-            "Most recent prediction outcomes (learn from these):\n"
+        accuracy_summary += (
+            f"\nOverall directional accuracy: {pct_acc:.0f}% over {len(completed)} resolved predictions.\n"
+            "Most recent outcomes:\n"
         )
         for p in completed[-10:]:
             direction = "CORRECT" if (p["predicted_pct"] > 0) == (p["actual_pct"] > 0) else "WRONG"
@@ -1147,16 +1196,39 @@ confidence: "low" | "medium" | "high"."""
         if ticker in seen_today:
             continue  # skip duplicates
         seen_today.add(ticker)
+
+        raw_pct = cp["predicted_pct"]
+        cal     = calibration.get(ticker, {})
+
+        # 1. Bias correction — shift prediction by historical mean error
+        bias         = cal.get("mean_bias", 0.0)
+        bias_applied = abs(bias) >= 0.1   # only correct if systematic (>=0.1%)
+        corrected    = round(raw_pct + bias, 2) if bias_applied else raw_pct
+
+        # 2. Signal inversion — flip direction if model has been consistently wrong
+        inverted  = cal.get("inverted", False)
+        final_pct = round(-corrected, 2) if inverted else corrected
+
+        # Append calibration notes to reasoning
+        cal_note = ""
+        if bias_applied:
+            cal_note += f" [Bias corrected {bias:+.2f}%: raw={raw_pct:+.2f}%]"
+        if inverted:
+            cal_note += f" [Direction INVERTED — historical accuracy {cal['accuracy_pct']}%, signal flipped]"
+
         entry = {
-            "date": today,
-            "ticker": ticker,
-            "name": name_map.get(ticker, ""),
-            "predicted_pct": cp["predicted_pct"],
-            "confidence": cp.get("confidence", "medium"),
-            "reasoning": cp.get("reasoning", ""),
-            "actual_pct": None,
+            "date":               today,
+            "ticker":             ticker,
+            "name":               name_map.get(ticker, ""),
+            "predicted_pct":      final_pct,
+            "raw_predicted_pct":  raw_pct,
+            "bias_correction":    round(bias, 3) if bias_applied else 0.0,
+            "inverted":           inverted,
+            "confidence":         cp.get("confidence", "medium"),
+            "reasoning":          cp.get("reasoning", "") + cal_note,
+            "actual_pct":         None,
             "price_at_prediction": price_map.get(ticker),
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at":       datetime.utcnow().isoformat(),
         }
         predictions.append(entry)
         new_preds.append(entry)
