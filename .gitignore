@@ -2,6 +2,8 @@ backend/.env
 backend/watchlist.json
 backend/predictions.json
 backend/alerts.json
+backend/portfolio.json
+backend/users.json
 __pycache__/
 *.pyc
 *.pyo

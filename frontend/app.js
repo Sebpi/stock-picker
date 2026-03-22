@@ -1,5 +1,163 @@
 const API = "";
 
+// ── Auth helpers ──────────────────────────────────────────────
+const TOKEN_KEY = "sp_token";
+const getToken = () => localStorage.getItem(TOKEN_KEY);
+const setToken = t => localStorage.setItem(TOKEN_KEY, t);
+const clearToken = () => localStorage.removeItem(TOKEN_KEY);
+
+async function authFetch(url, opts = {}) {
+  const token = getToken();
+  opts.headers = { ...(opts.headers || {}), "Authorization": `Bearer ${token}` };
+  const res = await fetch(url, opts);
+  if (res.status === 401) {
+    clearToken();
+    showLogin();
+    throw new Error("Session expired. Please sign in again.");
+  }
+  return res;
+}
+
+function showLogin() {
+  document.getElementById("login-overlay").style.display = "flex";
+  document.body.classList.add("login-active");
+}
+function hideLogin() {
+  document.getElementById("login-overlay").style.display = "none";
+  document.body.classList.remove("login-active");
+}
+
+// ── Login / Reset password flow ───────────────────────────────
+(function initAuth() {
+  const loginWrap   = document.getElementById("login-form-wrap");
+  const forgotWrap  = document.getElementById("forgot-form-wrap");
+  const resetWrap   = document.getElementById("reset-form-wrap");
+
+  function showPanel(panel) {
+    [loginWrap, forgotWrap, resetWrap].forEach(p => p.style.display = "none");
+    panel.style.display = "block";
+  }
+
+  // Check for reset token in URL
+  const urlToken = new URLSearchParams(window.location.search).get("reset_token");
+  if (urlToken) {
+    showLogin();
+    showPanel(resetWrap);
+    document.getElementById("btn-reset").onclick = async () => {
+      const np = document.getElementById("reset-password").value;
+      const cp = document.getElementById("reset-confirm").value;
+      const errEl = document.getElementById("reset-error");
+      errEl.style.display = "none";
+      if (np !== cp) { errEl.textContent = "Passwords do not match."; errEl.style.display = "block"; return; }
+      if (np.length < 6) { errEl.textContent = "Password must be at least 6 characters."; errEl.style.display = "block"; return; }
+      const res = await fetch(`${API}/api/auth/reset-password`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ token: urlToken, new_password: np })
+      });
+      if (res.ok) {
+        history.replaceState(null, "", "/");
+        showPanel(loginWrap);
+        document.getElementById("login-error").style.display = "none";
+        alert("Password updated. Please sign in.");
+      } else {
+        const d = await res.json();
+        errEl.textContent = d.detail || "Reset failed.";
+        errEl.style.display = "block";
+      }
+    };
+  }
+
+  // Check if already logged in
+  const token = getToken();
+  if (token) {
+    fetch(`${API}/api/auth/me`, { headers: { "Authorization": `Bearer ${token}` } })
+      .then(r => r.ok ? hideLogin() : showLogin())
+      .catch(() => showLogin());
+  } else {
+    showLogin();
+  }
+
+  // Sign in
+  document.getElementById("btn-login").onclick = async () => {
+    const u = document.getElementById("login-username").value.trim();
+    const p = document.getElementById("login-password").value;
+    const errEl = document.getElementById("login-error");
+    errEl.style.display = "none";
+    try {
+      const res = await fetch(`${API}/api/auth/login`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ username: u, password: p })
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setToken(d.access_token);
+        hideLogin();
+      } else {
+        const d = await res.json();
+        errEl.textContent = d.detail || "Invalid credentials.";
+        errEl.style.display = "block";
+      }
+    } catch { errEl.textContent = "Cannot connect to server."; errEl.style.display = "block"; }
+  };
+
+  document.getElementById("login-password").addEventListener("keydown", e => {
+    if (e.key === "Enter") document.getElementById("btn-login").click();
+  });
+
+  // Forgot password
+  document.getElementById("link-forgot").onclick = e => { e.preventDefault(); showPanel(forgotWrap); };
+  document.getElementById("link-back-login").onclick = e => { e.preventDefault(); showPanel(loginWrap); };
+  document.getElementById("btn-forgot").onclick = async () => {
+    const u = document.getElementById("forgot-username").value.trim();
+    const msgEl = document.getElementById("forgot-msg");
+    const res = await fetch(`${API}/api/auth/forgot-password`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ username: u })
+    });
+    const d = await res.json();
+    msgEl.textContent = d.message || "Reset link sent if the username exists.";
+    msgEl.style.display = "block";
+  };
+})();
+
+// ── Logout ────────────────────────────────────────────────────
+document.getElementById("btn-logout").onclick = () => { clearToken(); showLogin(); };
+
+// ── Change Password Modal ─────────────────────────────────────
+document.getElementById("btn-logout").addEventListener("contextmenu", e => {
+  e.preventDefault();
+  document.getElementById("change-pw-modal").style.display = "flex";
+});
+document.getElementById("btn-cp-cancel").onclick = () => {
+  document.getElementById("change-pw-modal").style.display = "none";
+  ["cp-current","cp-new","cp-confirm"].forEach(id => document.getElementById(id).value = "");
+};
+document.getElementById("btn-cp-save").onclick = async () => {
+  const cur = document.getElementById("cp-current").value;
+  const np  = document.getElementById("cp-new").value;
+  const cp  = document.getElementById("cp-confirm").value;
+  const errEl = document.getElementById("change-pw-error");
+  const okEl  = document.getElementById("change-pw-ok");
+  errEl.style.display = "none"; okEl.style.display = "none";
+  if (np !== cp) { errEl.textContent = "New passwords do not match."; errEl.style.display = "block"; return; }
+  if (np.length < 6) { errEl.textContent = "Password must be at least 6 characters."; errEl.style.display = "block"; return; }
+  try {
+    const res = await fetch(`${API}/api/auth/change-password`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ current_password: cur, new_password: np })
+    });
+    if (res.ok) {
+      okEl.textContent = "Password updated successfully.";
+      okEl.style.display = "block";
+      ["cp-current","cp-new","cp-confirm"].forEach(id => document.getElementById(id).value = "");
+    } else {
+      const d = await res.json();
+      errEl.textContent = d.detail || "Failed to update password.";
+      errEl.style.display = "block";
+    }
+  } catch (err) { errEl.textContent = err.message; errEl.style.display = "block"; }
+};
+
 let priceChart = null;
 let watchlist = [];
 
@@ -68,7 +226,7 @@ async function runScreen() {
   body.innerHTML = "";
 
   try {
-    const res = await fetch(`${API}/api/screen?${params}`);
+    const res = await authFetch(`${API}/api/screen?${params}`);
     const data = await res.json();
 
     if (data.length === 0) {
@@ -153,7 +311,7 @@ async function loadWatchlist() {
 
   status.textContent = "Loading…";
   try {
-    const res = await fetch(`${API}/api/watchlist`);
+    const res = await authFetch(`${API}/api/watchlist`);
     watchlist = await res.json();
     status.textContent = "";
 
@@ -193,7 +351,7 @@ async function addToWatchlist(e, ticker) {
   const btn = e.target;
   btn.disabled = true;
   try {
-    await fetch(`${API}/api/watchlist/${ticker}`, { method: "POST" });
+    await authFetch(`${API}/api/watchlist/${ticker}`, { method: "POST" });
     btn.textContent = "✓ Added";
     btn.classList.add("added");
   } catch (err) {
@@ -203,7 +361,7 @@ async function addToWatchlist(e, ticker) {
 
 async function removeFromWatchlist(e, ticker) {
   e.stopPropagation();
-  await fetch(`${API}/api/watchlist/${ticker}`, { method: "DELETE" });
+  await authFetch(`${API}/api/watchlist/${ticker}`, { method: "DELETE" });
   loadWatchlist();
 }
 
@@ -257,7 +415,7 @@ async function openDetail(ticker) {
 
   try {
     // Start peers fetch in background — don't block stock panel from rendering
-    fetch(`${API}/api/stock/${ticker}/peers`)
+    authFetch(`${API}/api/stock/${ticker}/peers`)
       .then(r => r.ok ? r.json() : null)
       .then(peers => {
         if (peers && peers.comparison) {
@@ -270,7 +428,7 @@ async function openDetail(ticker) {
       })
       .catch(() => {});
 
-    const res = await fetch(`${API}/api/stock/${ticker}`);
+    const res = await authFetch(`${API}/api/stock/${ticker}`);
     const d = await res.json();
 
     document.getElementById("detail-name").textContent = d.name;
@@ -339,7 +497,7 @@ async function openDetail(ticker) {
     wlBtn.textContent = inWatchlist ? "✓ In Watchlist" : "+ Add to Watchlist";
     wlBtn.onclick = async () => {
       if (inWatchlist) return;
-      await fetch(`${API}/api/watchlist/${ticker}`, { method: "POST" });
+      await authFetch(`${API}/api/watchlist/${ticker}`, { method: "POST" });
       wlBtn.textContent = "✓ In Watchlist";
     };
 
@@ -374,7 +532,7 @@ document.getElementById("btn-ask").addEventListener("click", async () => {
   response.classList.remove("visible");
 
   try {
-    const res = await fetch(`${API}/api/recommend`, {
+    const res = await authFetch(`${API}/api/recommend`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query }),
@@ -405,7 +563,7 @@ async function loadPredictions() {
 
   status.textContent = "Loading predictions…";
   try {
-    const res = await fetch(`${API}/api/predictions`);
+    const res = await authFetch(`${API}/api/predictions`);
     const preds = await res.json();
     status.textContent = "";
 
@@ -493,7 +651,7 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
   status.textContent = "Fetching macro data, news and fundamentals… this takes ~30 seconds.";
 
   try {
-    const res = await fetch(`${API}/api/predictions/generate`, { method: "POST" });
+    const res = await authFetch(`${API}/api/predictions/generate`, { method: "POST" });
     const data = await res.json();
 
     if (data.detail) {
@@ -524,8 +682,8 @@ async function loadAlerts() {
   status.textContent = "Loading…";
   try {
     const [alertsRes, statusRes] = await Promise.all([
-      fetch(`${API}/api/alerts`),
-      fetch(`${API}/api/alerts/status`),
+      authFetch(`${API}/api/alerts`),
+      authFetch(`${API}/api/alerts/status`),
     ]);
     const alerts = await alertsRes.json();
     const monStatus = await statusRes.json();
@@ -601,7 +759,7 @@ document.getElementById("btn-test-alert").addEventListener("click", async () => 
   btn.disabled = true;
   status.textContent = "Sending test alert…";
   try {
-    const res = await fetch(`${API}/api/alerts/test`, { method: "POST" });
+    const res = await authFetch(`${API}/api/alerts/test`, { method: "POST" });
     const data = await res.json();
     const parts = [];
     if (data.email_sent) parts.push("Email sent ✓");
@@ -618,7 +776,7 @@ document.getElementById("btn-test-alert").addEventListener("click", async () => 
 
 document.getElementById("btn-clear-alerts").addEventListener("click", async () => {
   if (!confirm("Clear all alert history?")) return;
-  await fetch(`${API}/api/alerts`, { method: "DELETE" });
+  await authFetch(`${API}/api/alerts`, { method: "DELETE" });
   loadAlerts();
 });
 
@@ -639,7 +797,7 @@ async function loadPortfolio() {
 
   status.textContent = "Loading…";
   try {
-    const res  = await fetch(`${API}/api/portfolio`);
+    const res  = await authFetch(`${API}/api/portfolio`);
     const data = await res.json();
     status.textContent = "";
 
@@ -703,7 +861,7 @@ async function submitTrade(type) {
   status.textContent = `Recording ${type}…`;
 
   try {
-    const res = await fetch(`${API}/api/portfolio/${type}`, {
+    const res = await authFetch(`${API}/api/portfolio/${type}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ticker, qty, price, date: date || null }),

@@ -1,11 +1,12 @@
 import asyncio
 import json
 import os
+import secrets
 import smtplib
 import statistics
 import uuid
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import zoneinfo
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,13 +18,61 @@ import httpx
 import yfinance as yf
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
+import bcrypt as _bcrypt
+from jose import JWTError, jwt
 from pydantic import BaseModel
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+
+# ── Auth setup ─────────────────────────────────────────────────────────────────
+_SECRET_KEY = os.getenv("SECRET_KEY") or secrets.token_hex(32)
+_ALGORITHM  = "HS256"
+_TOKEN_HOURS = 24
+
+def _hash_pw(password: str) -> str:
+    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+
+def _verify_pw(password: str, hashed: str) -> bool:
+    return _bcrypt.checkpw(password.encode(), hashed.encode())
+
+http_bearer = HTTPBearer(auto_error=False)
+USERS_FILE  = Path(__file__).parent / "users.json"
+
+# In-memory password reset tokens: token -> (username, expiry)
+_reset_tokens: dict[str, tuple[str, datetime]] = {}
+
+# Auth public routes — no JWT required
+_AUTH_PUBLIC = {"/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password"}
+
+def load_users() -> dict:
+    if USERS_FILE.exists():
+        return json.loads(USERS_FILE.read_text())
+    return {}
+
+def save_users(users: dict):
+    USERS_FILE.write_text(json.dumps(users, indent=2))
+
+def create_access_token(username: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=_TOKEN_HOURS)
+    return jwt.encode({"sub": username, "exp": expire}, _SECRET_KEY, algorithm=_ALGORITHM)
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(http_bearer)) -> str:
+    exc = HTTPException(status_code=401, detail="Not authenticated")
+    if not credentials:
+        raise exc
+    try:
+        payload = jwt.decode(credentials.credentials, _SECRET_KEY, algorithms=[_ALGORITHM])
+        username: str = payload.get("sub", "")
+        if not username or username not in load_users():
+            raise exc
+        return username
+    except JWTError:
+        raise exc
 
 app = FastAPI(title="Stock Picker API")
 scheduler = AsyncIOScheduler()
@@ -34,6 +83,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # Allow static files, HTML root, and public auth endpoints
+    if not path.startswith("/api/") or path in _AUTH_PUBLIC:
+        return await call_next(request)
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+    token = auth_header[7:]
+    try:
+        payload = jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
+        username = payload.get("sub", "")
+        if not username or username not in load_users():
+            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+    except JWTError:
+        return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
+    return await call_next(request)
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -395,8 +463,41 @@ async def auto_predict():
         print(f"[Predictions] Auto-refresh failed: {e}")
 
 
+# ── Auth & trade request models ───────────────────────────────────────────────
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class ForgotPasswordRequest(BaseModel):
+    username: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
 @app.on_event("startup")
 async def startup():
+    # Create default admin account on first run
+    users = load_users()
+    if not users:
+        default_pass = "stockpicker123"
+        users["admin"] = {
+            "hashed_password": _hash_pw(default_pass),
+            "email": os.getenv("ALERT_EMAIL", ""),
+        }
+        save_users(users)
+        print("\n" + "="*55)
+        print("[Auth] First run — default account created:")
+        print("  Username : admin")
+        print(f"  Password : {default_pass}")
+        print("  Please change this password after first login!")
+        print("="*55 + "\n")
+
     scheduler.add_job(monitor_stocks, "interval", minutes=5,  id="monitor")
     scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
     scheduler.start()
@@ -407,6 +508,63 @@ async def startup():
 async def shutdown():
     scheduler.shutdown()
 
+
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
+    users = load_users()
+    user = users.get(req.username)
+    if not user or not _verify_pw(req.password, user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = create_access_token(req.username)
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.post("/api/auth/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest):
+    users = load_users()
+    user = users.get(req.username)
+    if user:
+        token = secrets.token_urlsafe(32)
+        _reset_tokens[token] = (req.username, datetime.now(timezone.utc) + timedelta(minutes=15))
+        reset_link = f"http://192.168.1.19:8000/?reset_token={token}"
+        send_email(
+            "Stock Picker — Password Reset",
+            f"Click the link below to reset your password (valid 15 minutes):\n\n{reset_link}\n\nIf you did not request this, ignore this email.",
+        )
+    # Always return ok to avoid revealing valid usernames
+    return {"ok": True, "message": "If that username exists, a reset link has been sent to the registered email."}
+
+@app.post("/api/auth/reset-password")
+async def reset_password(req: ResetPasswordRequest):
+    entry = _reset_tokens.get(req.token)
+    if not entry:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    username, expiry = entry
+    if datetime.now(timezone.utc) > expiry:
+        _reset_tokens.pop(req.token, None)
+        raise HTTPException(status_code=400, detail="Reset token has expired")
+    users = load_users()
+    if username not in users:
+        raise HTTPException(status_code=400, detail="User not found")
+    users[username]["hashed_password"] = _hash_pw(req.new_password)
+    save_users(users)
+    _reset_tokens.pop(req.token, None)
+    return {"ok": True}
+
+@app.post("/api/auth/change-password")
+async def change_password(req: ChangePasswordRequest, current_user: str = Depends(get_current_user)):
+    users = load_users()
+    user = users[current_user]
+    if not _verify_pw(req.current_password, user["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    users[current_user]["hashed_password"] = _hash_pw(req.new_password)
+    save_users(users)
+    return {"ok": True}
+
+@app.get("/api/auth/me")
+async def me(current_user: str = Depends(get_current_user)):
+    return {"username": current_user}
 
 # ── Existing endpoints ────────────────────────────────────────────────────────
 
