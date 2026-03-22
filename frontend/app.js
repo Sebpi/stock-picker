@@ -3,7 +3,7 @@ const API = "";
 let priceChart = null;
 let watchlist = [];
 
-const TAB_LOADERS = { watchlist: () => loadWatchlist(), predictions: () => loadPredictions(), alerts: () => loadAlerts() };
+const TAB_LOADERS = { watchlist: () => loadWatchlist(), predictions: () => loadPredictions(), alerts: () => loadAlerts(), portfolio: () => loadPortfolio() };
 const SIGNAL_LABELS = { daily_swing: "Daily Swing", momentum: "Momentum", volume_surge: "Vol Surge" };
 
 document.querySelectorAll(".tab-btn").forEach(btn => {
@@ -621,3 +621,110 @@ document.getElementById("btn-clear-alerts").addEventListener("click", async () =
   await fetch(`${API}/api/alerts`, { method: "DELETE" });
   loadAlerts();
 });
+
+// ── Portfolio ─────────────────────────────────────────────────
+
+function pnlHtml(val) {
+  if (val == null) return "<span>—</span>";
+  const sign = val >= 0 ? "+" : "";
+  const cls  = val >= 0 ? "change-pos" : "change-neg";
+  return `<span class="${cls}">${sign}$${Math.abs(val).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>`;
+}
+
+async function loadPortfolio() {
+  const status  = document.getElementById("portfolio-status");
+  const body    = document.getElementById("portfolio-body");
+  const empty   = document.getElementById("portfolio-empty");
+  const summary = document.getElementById("portfolio-summary");
+
+  status.textContent = "Loading…";
+  try {
+    const res  = await fetch(`${API}/api/portfolio`);
+    const data = await res.json();
+    status.textContent = "";
+
+    const { positions, summary: s } = data;
+
+    if (!positions || positions.length === 0) {
+      body.innerHTML = "";
+      empty.classList.add("visible");
+      summary.classList.add("hidden");
+      return;
+    }
+
+    empty.classList.remove("visible");
+    summary.classList.remove("hidden");
+
+    document.getElementById("port-invested").textContent    = "$" + s.total_invested.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    document.getElementById("port-current").textContent     = "$" + s.total_current_value.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    document.getElementById("port-unrealised").innerHTML    = pnlHtml(s.total_unrealised_pnl);
+    document.getElementById("port-realised").innerHTML      = pnlHtml(s.total_realised_pnl);
+    const totalEl = document.getElementById("port-total");
+    totalEl.innerHTML = pnlHtml(s.total_pnl);
+
+    body.innerHTML = positions.map(p => `
+      <tr data-ticker="${p.ticker}">
+        <td><strong>${p.ticker}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${p.name}</td>
+        <td>${p.shares}</td>
+        <td>$${p.avg_cost.toFixed(2)}</td>
+        <td>$${p.current_price.toFixed(2)}</td>
+        <td>$${p.cost_basis.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+        <td>$${p.current_value.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+        <td>${pnlHtml(p.unrealised_pnl)} <span style="color:var(--text-muted);font-size:0.78rem">(${p.unrealised_pct >= 0 ? "+" : ""}${p.unrealised_pct}%)</span></td>
+        <td>${pnlHtml(p.realised_pnl)}</td>
+      </tr>
+    `).join("");
+
+    body.querySelectorAll("tr").forEach(row => {
+      row.addEventListener("click", () => openDetail(row.dataset.ticker));
+    });
+
+  } catch (err) {
+    status.textContent = "Error loading portfolio. Is the backend running?";
+  }
+}
+
+async function submitTrade(type) {
+  const ticker = document.getElementById("trade-ticker").value.trim().toUpperCase();
+  const qty    = parseFloat(document.getElementById("trade-qty").value);
+  const price  = parseFloat(document.getElementById("trade-price").value);
+  const date   = document.getElementById("trade-date").value;
+  const status = document.getElementById("portfolio-status");
+
+  if (!ticker || !qty || !price) {
+    status.textContent = "Please enter ticker, quantity and price.";
+    return;
+  }
+
+  const btnBuy  = document.getElementById("btn-buy");
+  const btnSell = document.getElementById("btn-sell");
+  btnBuy.disabled = btnSell.disabled = true;
+  status.textContent = `Recording ${type}…`;
+
+  try {
+    const res = await fetch(`${API}/api/portfolio/${type}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, qty, price, date: date || null }),
+    });
+    const data = await res.json();
+    if (data.detail) {
+      status.textContent = "Error: " + data.detail;
+    } else {
+      status.textContent = `${type === "buy" ? "Buy" : "Sell"} recorded for ${ticker}.`;
+      document.getElementById("trade-ticker").value = "";
+      document.getElementById("trade-qty").value    = "";
+      document.getElementById("trade-price").value  = "";
+      loadPortfolio();
+    }
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  } finally {
+    btnBuy.disabled = btnSell.disabled = false;
+  }
+}
+
+document.getElementById("btn-buy").addEventListener("click",  () => submitTrade("buy"));
+document.getElementById("btn-sell").addEventListener("click", () => submitTrade("sell"));
+document.getElementById("btn-refresh-portfolio").addEventListener("click", loadPortfolio);

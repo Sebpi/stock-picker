@@ -46,6 +46,7 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 WATCHLIST_FILE    = Path(__file__).parent / "watchlist.json"
 PREDICTIONS_FILE  = Path(__file__).parent / "predictions.json"
 ALERTS_FILE       = Path(__file__).parent / "alerts.json"
+PORTFOLIO_FILE    = Path(__file__).parent / "portfolio.json"
 
 UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "JNJ",
@@ -144,6 +145,35 @@ def append_alert(entry: dict):
     alerts = load_alerts()
     alerts.insert(0, entry)
     save_alerts(alerts[:500])  # keep latest 500
+
+
+def load_portfolio() -> list[dict]:
+    if PORTFOLIO_FILE.exists():
+        return json.loads(PORTFOLIO_FILE.read_text())
+    return []
+
+def save_portfolio(transactions: list[dict]):
+    PORTFOLIO_FILE.write_text(json.dumps(transactions, indent=2))
+
+def compute_positions(transactions: list[dict]) -> dict:
+    """Average cost basis P&L per ticker."""
+    positions: dict[str, dict] = {}
+    for tx in sorted(transactions, key=lambda x: x["timestamp"]):
+        t = tx["ticker"]
+        if t not in positions:
+            positions[t] = {"shares": 0.0, "avg_cost": 0.0, "realised_pnl": 0.0, "name": tx.get("name", t)}
+        pos = positions[t]
+        if tx["type"] == "buy":
+            total = pos["shares"] * pos["avg_cost"] + tx["qty"] * tx["price"]
+            pos["shares"] += tx["qty"]
+            pos["avg_cost"] = total / pos["shares"] if pos["shares"] > 0 else 0.0
+        elif tx["type"] == "sell":
+            sell_qty = min(tx["qty"], pos["shares"])
+            pos["realised_pnl"] += (tx["price"] - pos["avg_cost"]) * sell_qty
+            pos["shares"] -= sell_qty
+            if pos["shares"] <= 0:
+                pos["shares"] = 0.0
+    return positions
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
@@ -591,6 +621,12 @@ def remove_from_watchlist(ticker: str):
 class RecommendRequest(BaseModel):
     query: str
 
+class TradeRequest(BaseModel):
+    ticker: str
+    qty: float
+    price: float
+    date: Optional[str] = None
+
 @app.post("/api/recommend")
 def recommend(req: RecommendRequest):
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -910,6 +946,121 @@ def test_alert():
     )
     texted = send_sms("StockPicker test alert — notifications working!")
     return {"email_sent": emailed, "sms_sent": texted}
+
+
+# ── Portfolio endpoints ───────────────────────────────────────────────────────
+
+@app.get("/api/portfolio")
+async def get_portfolio():
+    transactions = load_portfolio()
+    positions = compute_positions(transactions)
+
+    # Fetch current prices for all held tickers concurrently
+    held = [t for t, p in positions.items() if p["shares"] > 0]
+    if held:
+        infos = await asyncio.gather(*[get_info(t) for t in held], return_exceptions=True)
+        price_map = {}
+        for ticker, info in zip(held, infos):
+            if not isinstance(info, Exception):
+                price_map[ticker] = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+    else:
+        price_map = {}
+
+    result = []
+    total_invested = 0.0
+    total_current = 0.0
+    total_realised = 0.0
+
+    for ticker, pos in positions.items():
+        current_price = price_map.get(ticker, 0)
+        cost_basis = pos["shares"] * pos["avg_cost"]
+        current_value = pos["shares"] * current_price
+        unrealised_pnl = current_value - cost_basis
+
+        total_invested += cost_basis
+        total_current += current_value
+        total_realised += pos["realised_pnl"]
+
+        result.append({
+            "ticker": ticker,
+            "name": pos["name"],
+            "shares": round(pos["shares"], 4),
+            "avg_cost": round(pos["avg_cost"], 2),
+            "current_price": round(current_price, 2),
+            "cost_basis": round(cost_basis, 2),
+            "current_value": round(current_value, 2),
+            "unrealised_pnl": round(unrealised_pnl, 2),
+            "unrealised_pct": round((unrealised_pnl / cost_basis * 100) if cost_basis else 0, 2),
+            "realised_pnl": round(pos["realised_pnl"], 2),
+        })
+
+    return {
+        "positions": sorted(result, key=lambda x: x["ticker"]),
+        "summary": {
+            "total_invested": round(total_invested, 2),
+            "total_current_value": round(total_current, 2),
+            "total_unrealised_pnl": round(total_current - total_invested, 2),
+            "total_realised_pnl": round(total_realised, 2),
+            "total_pnl": round((total_current - total_invested) + total_realised, 2),
+        },
+    }
+
+
+@app.post("/api/portfolio/buy")
+async def portfolio_buy(req: TradeRequest):
+    transactions = load_portfolio()
+    ticker = req.ticker.upper()
+    info = await get_info(ticker)
+    name = info.get("shortName", ticker) if not isinstance(info, Exception) else ticker
+    transactions.append({
+        "id": str(uuid.uuid4()),
+        "type": "buy",
+        "ticker": ticker,
+        "name": name,
+        "qty": req.qty,
+        "price": req.price,
+        "date": req.date or str(date.today()),
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    save_portfolio(transactions)
+    return {"ok": True}
+
+
+@app.post("/api/portfolio/sell")
+async def portfolio_sell(req: TradeRequest):
+    transactions = load_portfolio()
+    ticker = req.ticker.upper()
+    positions = compute_positions(transactions)
+    held = positions.get(ticker, {}).get("shares", 0)
+    if req.qty > held:
+        raise HTTPException(status_code=400, detail=f"Cannot sell {req.qty} shares — only {held} held")
+    info = await get_info(ticker)
+    name = info.get("shortName", ticker) if not isinstance(info, Exception) else ticker
+    transactions.append({
+        "id": str(uuid.uuid4()),
+        "type": "sell",
+        "ticker": ticker,
+        "name": name,
+        "qty": req.qty,
+        "price": req.price,
+        "date": req.date or str(date.today()),
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    save_portfolio(transactions)
+    return {"ok": True}
+
+
+@app.get("/api/portfolio/transactions")
+def get_transactions():
+    return load_portfolio()
+
+
+@app.delete("/api/portfolio/transaction/{tx_id}")
+def delete_transaction(tx_id: str):
+    transactions = load_portfolio()
+    transactions = [t for t in transactions if t["id"] != tx_id]
+    save_portfolio(transactions)
+    return {"ok": True}
 
 
 @app.delete("/api/alerts")
