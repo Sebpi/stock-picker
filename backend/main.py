@@ -535,13 +535,14 @@ async def login(req: LoginRequest):
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/api/auth/forgot-password")
-async def forgot_password(req: ForgotPasswordRequest):
+async def forgot_password(req: ForgotPasswordRequest, request: Request):
     users = load_users()
     user = users.get(req.username)
     if user:
         token = secrets.token_urlsafe(32)
         _reset_tokens[token] = (req.username, datetime.now(timezone.utc) + timedelta(minutes=15))
-        reset_link = f"http://192.168.1.19:8000/?reset_token={token}"
+        base_url = str(request.base_url).rstrip("/")
+        reset_link = f"{base_url}/?reset_token={token}"
         result = send_email(
             "Stock Picker - Password Reset",
             f"Click the link below to reset your password (valid 15 minutes):\n\n{reset_link}\n\nIf you did not request this, ignore this email.",
