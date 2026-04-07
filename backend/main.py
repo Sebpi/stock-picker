@@ -811,11 +811,6 @@ class TradeRequest(BaseModel):
     price: float
     date: Optional[str] = None
 
-class PaperTradeRequest(BaseModel):
-    ticker: str
-    qty: float
-    price: float
-
 @app.post("/api/recommend")
 def recommend(req: RecommendRequest):
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -2179,15 +2174,16 @@ def clear_alerts():
 PAPER_PORTFOLIO_FILE = Path(__file__).parent / "paper_portfolio.json"
 
 def load_paper_portfolio() -> list:
-    if PAPER_PORTFOLIO_FILE.exists():
+    try:
         return json.loads(PAPER_PORTFOLIO_FILE.read_text())
-    return []
+    except FileNotFoundError:
+        return []
 
 def save_paper_portfolio(txs: list):
-    _atomic_write(PAPER_PORTFOLIO_FILE, json.dumps(txs, indent=2))
+    PAPER_PORTFOLIO_FILE.write_text(json.dumps(txs, indent=2))
 
 @app.post("/api/paper/execute-buy")
-async def paper_execute_buy(req: PaperTradeRequest, current_user: str = Depends(get_current_user)):
+async def paper_execute_buy(req: TradeRequest, current_user: str = Depends(get_current_user)):
     ticker = req.ticker.upper()
     txs = load_paper_portfolio()
     txs.append({
@@ -2201,18 +2197,10 @@ async def paper_execute_buy(req: PaperTradeRequest, current_user: str = Depends(
     return {"ok": True, "message": f"Bought {req.qty} shares of {ticker} at {req.price}"}
 
 @app.post("/api/paper/execute-sell")
-async def paper_execute_sell(req: PaperTradeRequest, current_user: str = Depends(get_current_user)):
+async def paper_execute_sell(req: TradeRequest, current_user: str = Depends(get_current_user)):
     ticker = req.ticker.upper()
     txs = load_paper_portfolio()
-    # Compute current holdings
-    held: dict[str, float] = {}
-    for tx in txs:
-        t = tx.get("ticker", "")
-        if tx.get("type") == "buy":
-            held[t] = held.get(t, 0) + float(tx.get("qty", 0))
-        elif tx.get("type") == "sell":
-            held[t] = held.get(t, 0) - float(tx.get("qty", 0))
-    shares_held = held.get(ticker, 0)
+    shares_held = compute_positions(txs).get(ticker, {}).get("shares", 0)
     if req.qty > shares_held:
         raise HTTPException(status_code=400, detail=f"Cannot sell {req.qty} shares — only {shares_held:.4f} held")
     txs.append({

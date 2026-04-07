@@ -924,7 +924,7 @@ function renderRecommendations(data) {
         <td><span class="${pnlCls}">${s.unrealised_pnl >= 0 ? "+" : ""}${fmt(s.unrealised_pnl)} (${s.unrealised_pct >= 0 ? "+" : ""}${s.unrealised_pct.toFixed(1)}%)</span></td>
         <td>${predStr}</td>
         <td class="reasoning-cell">${s.reasoning}</td>
-        <td><button class="btn-sell" onclick="executePaperSell('${s.ticker}', ${s.qty}, ${s.current_price})">Execute Sell</button></td>
+        <td><button class="btn-sell" onclick="executePaperTrade('sell','${s.ticker}',${s.qty},${s.current_price})">Execute Sell</button></td>
       </tr>`;
     }).join("");
   } else {
@@ -949,7 +949,7 @@ function renderRecommendations(data) {
         <td><strong>${b.qty}</strong></td>
         <td><strong>${fmt(b.estimated_cost)}</strong></td>
         <td class="reasoning-cell">${b.reasoning}</td>
-        <td><button class="btn-buy" onclick="executePaperBuy('${b.ticker}', ${b.qty}, ${b.current_price})">Execute Buy</button></td>
+        <td><button class="btn-buy" onclick="executePaperTrade('buy','${b.ticker}',${b.qty},${b.current_price})">Execute Buy</button></td>
       </tr>`;
     }).join("");
   } else {
@@ -965,10 +965,10 @@ function renderRecommendations(data) {
 
 document.getElementById("btn-load-recs").addEventListener("click", loadRecommendations);
 
-async function executePaperSell(ticker, qty, price) {
-  if (!confirm(`Execute sell: ${qty} shares of ${ticker} at ${fmt(price)}?`)) return;
+async function executePaperTrade(action, ticker, qty, price) {
+  if (!confirm(`Execute ${action}: ${qty} shares of ${ticker} at ${fmt(price)}?`)) return;
   try {
-    const res = await authFetch(`${API}/api/paper/execute-sell`, {
+    const res = await authFetch(`${API}/api/paper/execute-${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ticker, qty, price })
@@ -977,26 +977,7 @@ async function executePaperSell(ticker, qty, price) {
       loadRecommendations();
     } else {
       const d = await res.json();
-      alert("Error: " + (d.detail || "Failed to execute sell"));
-    }
-  } catch (err) {
-    alert("Error: " + err.message);
-  }
-}
-
-async function executePaperBuy(ticker, qty, price) {
-  if (!confirm(`Execute buy: ${qty} shares of ${ticker} at ${fmt(price)}?`)) return;
-  try {
-    const res = await authFetch(`${API}/api/paper/execute-buy`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticker, qty, price })
-    });
-    if (res.ok) {
-      loadRecommendations();
-    } else {
-      const d = await res.json();
-      alert("Error: " + (d.detail || "Failed to execute buy"));
+      alert("Error: " + (d.detail || `Failed to execute ${action}`));
     }
   } catch (err) {
     alert("Error: " + err.message);
