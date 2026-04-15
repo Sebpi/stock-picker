@@ -2116,7 +2116,7 @@ document.getElementById("sim-size-compact")?.addEventListener("click", () => set
 document.getElementById("sim-size-default")?.addEventListener("click", () => setSimChartSize("default"));
 document.getElementById("sim-size-large")?.addEventListener("click", () => setSimChartSize("large"));
 
-document.getElementById("btn-simulate").addEventListener("click", async () => {
+document.getElementById("btn-simulate")?.addEventListener("click", async () => {
   const btn    = document.getElementById("btn-simulate");
   const status = document.getElementById("sim-status");
   const results = document.getElementById("sim-results");
@@ -2175,9 +2175,11 @@ document.getElementById("btn-simulate").addEventListener("click", async () => {
     const p50Path    = mc.sample_paths[4] || [];
     const p90Path    = mc.sample_paths[9] || [];
 
-    if (simChart) simChart.destroy();
+    if (simChart) { simChart.destroy(); simChart = null; }
     setSimChartSize("default");
-    const ctx = document.getElementById("sim-chart").getContext("2d");
+    const simCanvas = document.getElementById("sim-chart");
+    if (!simCanvas) { status.textContent = "Chart canvas not found — please open the Backtest tab and try again."; return; }
+    const ctx = simCanvas.getContext("2d");
     simChart = new Chart(ctx, {
       type: "line",
       data: {
