@@ -132,7 +132,7 @@ _reset_tokens: dict[str, tuple[str, datetime]] = {}
 # Auth public routes — no JWT required
 _AUTH_PUBLIC = {"/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/unlock-test", "/api/alerts/log"}
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001").strip() or "claude-haiku-4-5-20251001"
-STOCK_RESEARCH_MAX_TOKENS = max(256, int(os.getenv("STOCK_RESEARCH_MAX_TOKENS", "3000")))
+STOCK_RESEARCH_MAX_TOKENS = max(256, int(os.getenv("STOCK_RESEARCH_MAX_TOKENS", "6000")))
 RECOMMEND_MAX_TOKENS = max(256, int(os.getenv("RECOMMEND_MAX_TOKENS", "800")))
 SEARCH_RESULTS_LIMIT = max(1, int(os.getenv("SEARCH_RESULTS_LIMIT", "12")))
 SEARCH_INFO_TIMEOUT_SEC = max(0.5, float(os.getenv("SEARCH_INFO_TIMEOUT_SEC", "2.5")))
@@ -2600,6 +2600,20 @@ def _stock_research_impl(req: RecommendRequest):
                 sma_200     = float(hist["Close"].iloc[-200:].mean()) if len(hist) >= 200 else None
                 avg_vol_30  = int(hist["Volume"].iloc[-30:].mean()) if "Volume" in hist.columns and len(hist) >= 30 else None
                 last_vol    = int(hist["Volume"].iloc[-1])           if "Volume" in hist.columns else None
+                vol_ratio   = round(last_vol / avg_vol_30, 2) if last_vol and avg_vol_30 else None
+
+                # RSI-14
+                rsi_14 = None
+                try:
+                    closes = hist["Close"]
+                    delta  = closes.diff()
+                    gain   = delta.clip(lower=0).rolling(14).mean()
+                    loss   = (-delta.clip(upper=0)).rolling(14).mean()
+                    rs     = gain / loss.replace(0, float("nan"))
+                    rsi_series = 100 - (100 / (1 + rs))
+                    rsi_14 = round(float(rsi_series.iloc[-1]), 1)
+                except Exception:
+                    pass
 
                 rec_key = info.get("recommendationKey") or ""
                 lines += [
@@ -2630,6 +2644,10 @@ def _stock_research_impl(req: RecommendRequest):
                     f"**200-Day SMA**: {'${:.2f}'.format(sma_200) if sma_200 else 'N/A'}",
                     f"**Avg Volume (30d)**: {avg_vol_30:,}" if avg_vol_30 else "**Avg Volume (30d)**: N/A",
                     f"**Last Session Volume**: {last_vol:,}" if last_vol else "**Last Session Volume**: N/A",
+                    f"**Volume vs 30d Avg**: {vol_ratio}x" if vol_ratio else "**Volume vs 30d Avg**: N/A",
+                    f"**RSI (14)**: {rsi_14}" + (" — overbought" if rsi_14 and rsi_14 > 70 else " — oversold" if rsi_14 and rsi_14 < 30 else " — neutral") if rsi_14 else "**RSI (14)**: N/A",
+                    f"**Price vs 50d SMA**: {'above' if current_price > sma_50 else 'below'} (${abs(current_price - sma_50):.2f} {'above' if current_price > sma_50 else 'below'})" if sma_50 else "**Price vs 50d SMA**: N/A",
+                    f"**Price vs 200d SMA**: {'above' if current_price > sma_200 else 'below'} (${abs(current_price - sma_200):.2f} {'above' if current_price > sma_200 else 'below'})" if sma_200 else "**Price vs 200d SMA**: N/A",
                 ]
         except Exception as _e:
             logger.warning("price/info fetch failed for %s: %s", query, _e)
