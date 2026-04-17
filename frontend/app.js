@@ -1,5 +1,84 @@
 const API = "";
 
+// ── Tooltip system (fixed-position, never clipped) ────────────
+(function () {
+  let popup = null;
+  document.addEventListener("mouseover", e => {
+    const tip = e.target.closest(".tip");
+    if (!tip) return;
+    const text = tip.getAttribute("data-tip");
+    if (!text) return;
+    if (!popup) {
+      popup = document.createElement("div");
+      popup.className = "tip-popup";
+      document.body.appendChild(popup);
+    }
+    popup.textContent = text;
+    popup.classList.remove("visible");
+    const rect = tip.getBoundingClientRect();
+    const pw = 300;
+    let left = rect.left + rect.width / 2 - pw / 2;
+    let top  = rect.bottom + 10;
+    left = Math.max(10, Math.min(left, window.innerWidth - pw - 10));
+    popup.style.left = left + "px";
+    popup.style.top  = top + "px";
+    requestAnimationFrame(() => {
+      const ph = popup.offsetHeight;
+      if (top + ph > window.innerHeight - 10) {
+        popup.style.top = Math.max(10, rect.top - ph - 10) + "px";
+      }
+      popup.classList.add("visible");
+    });
+  });
+  document.addEventListener("mouseout", e => {
+    const tip = e.target.closest(".tip");
+    if (!tip || !popup) return;
+    popup.classList.remove("visible");
+  });
+})();
+
+// ── Loading overlay ───────────────────────────────────────────
+const _loaderMsgs = [
+  "Crunching the numbers…",
+  "Consulting the oracle…",
+  "Bribing the market makers…",
+  "Asking the bull and the bear…",
+  "Reading the tea leaves…",
+  "Scanning 10-Ks at warp speed…",
+  "Waking up the quants…",
+  "Calculating alpha…",
+  "Checking under the sofa for returns…",
+  "Decoding Fed speak…",
+  "Negotiating with yfinance…",
+  "Running the DCF… again…",
+  "Trying to time the market (irresponsibly)…",
+  "Praying to the chart gods…",
+];
+let _loaderTimer = null;
+let _loaderMsgTimer = null;
+
+function showLoader(msg) {
+  const overlay = document.getElementById("loader-overlay");
+  const msgEl   = document.getElementById("loader-msg");
+  if (!overlay) return;
+  overlay.classList.add("active");
+  msgEl.textContent = msg || _loaderMsgs[Math.floor(Math.random() * _loaderMsgs.length)];
+  // Rotate messages every 3s
+  _loaderMsgTimer = setInterval(() => {
+    msgEl.style.animation = "none";
+    requestAnimationFrame(() => {
+      msgEl.style.animation = "";
+      msgEl.textContent = _loaderMsgs[Math.floor(Math.random() * _loaderMsgs.length)];
+    });
+  }, 3000);
+}
+
+function hideLoader() {
+  const overlay = document.getElementById("loader-overlay");
+  if (overlay) overlay.classList.remove("active");
+  clearInterval(_loaderMsgTimer);
+}
+
 // ── XSS protection ────────────────────────────────────────────
 const safe = html => (typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(String(html ?? "")) : String(html ?? ""));
 
@@ -19,6 +98,13 @@ async function authFetch(url, opts = {}) {
     throw new Error("Session expired. Please sign in again.");
   }
   return res;
+}
+
+function describeRequestError(err, fallback) {
+  const msg = err && err.message ? err.message : "";
+  if (!msg) return fallback;
+  if (msg.includes("Session expired")) return msg;
+  return `${msg}. ${fallback}`;
 }
 
 function showLogin() {
@@ -113,13 +199,29 @@ function hideLogin() {
   document.getElementById("btn-forgot").onclick = async () => {
     const u = document.getElementById("forgot-username").value.trim();
     const msgEl = document.getElementById("forgot-msg");
-    const res = await fetch(`${API}/api/auth/forgot-password`, {
-      method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ username: u })
-    });
-    const d = await res.json();
-    msgEl.textContent = d.message || "Reset link sent if the username exists.";
-    msgEl.style.display = "block";
+    msgEl.style.display = "none";
+    if (!u) {
+      msgEl.textContent = "Enter your username first.";
+      msgEl.style.display = "block";
+      return;
+    }
+    try {
+      const res = await fetch(`${API}/api/auth/forgot-password`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ username: u })
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        msgEl.textContent = d.detail || d.message || `Reset request failed (${res.status}).`;
+        msgEl.style.display = "block";
+        return;
+      }
+      msgEl.textContent = d.message || "Reset link sent if the username exists.";
+      msgEl.style.display = "block";
+    } catch (err) {
+      msgEl.textContent = err?.message || "Cannot connect to the password reset service.";
+      msgEl.style.display = "block";
+    }
   };
 })();
 
@@ -163,9 +265,21 @@ document.getElementById("btn-cp-save").onclick = async () => {
 
 let priceChart = null;
 let watchlist = [];
+let sentimentWatchlist = [];
+let predictionReasoningMap = {};
+let recReasoningMap = {};
 
-const TAB_LOADERS = { watchlist: () => loadWatchlist(), predictions: () => loadPredictions(), recommendations: () => loadRecommendations(), alerts: () => loadAlerts(), portfolio: () => loadPortfolio(), backtest: () => {} };
-const SIGNAL_LABELS = { daily_swing: "Daily Swing", momentum: "Momentum", volume_surge: "Vol Surge" };
+const TAB_LOADERS = {
+  watchlist: () => loadWatchlist(),
+  predictions: () => loadPredictions(),
+  recommendations: () => loadRecommendations(),
+  alerts: () => loadAlerts(),
+  portfolio: () => loadPortfolio(),
+  backtest: () => {},
+  sentiment: () => loadSentiment(),
+  paper: () => loadPaperPortfolio(),
+};
+const SIGNAL_LABELS = { buy_opportunity: "BUY Opportunity", sell_signal: "SELL Signal", daily_swing: "Daily Swing", momentum: "Momentum", volume_surge: "Vol Surge" };
 
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -190,6 +304,14 @@ function fmt(n) {
   return "$" + n.toLocaleString();
 }
 
+function fmtScreenerMarketCap(n) {
+  if (n == null) return "â€”";
+  const bn = n / 1e9;
+  if (bn >= 100) return `${Math.round(bn)}BN`;
+  if (bn >= 10) return `${bn.toFixed(1)}BN`;
+  return `${bn.toFixed(2)}BN`;
+}
+
 function changeHtml(pct) {
   if (pct == null) return "<span>—</span>";
   const sign = pct >= 0 ? "+" : "";
@@ -198,46 +320,501 @@ function changeHtml(pct) {
 }
 
 // ── Screener ──────────────────────────────────────────────────
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatInlineMarkdown(text) {
+  return escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function slugify(text) {
+  return String(text || "section")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "section";
+}
+
+function looksLikeTableSeparator(line) {
+  return /^\s*\|?[\s:-]+\|[\s|:-]*$/.test(line || "");
+}
+
+function parseMarkdownTable(lines, startIndex) {
+  const tableLines = [];
+  let i = startIndex;
+  while (i < lines.length && /^\s*\|.+\|\s*$/.test(lines[i])) {
+    tableLines.push(lines[i].trim());
+    i += 1;
+  }
+  if (tableLines.length < 2 || !looksLikeTableSeparator(tableLines[1])) return null;
+
+  const splitRow = line => line.split("|").slice(1, -1).map(cell => cell.trim());
+  const headers = splitRow(tableLines[0]);
+  const rows = tableLines.slice(2).map(splitRow).filter(row => row.some(Boolean));
+  return { table: { headers, rows }, nextIndex: i };
+}
+
+function getSectionIcon(title = "") {
+  const label = title.toLowerCase();
+  if (label.includes("overview")) return "OV";
+  if (label.includes("news") || label.includes("catalyst")) return "NW";
+  if (label.includes("financial")) return "FN";
+  if (label.includes("technical")) return "TA";
+  if (label.includes("bull")) return "UP";
+  if (label.includes("bear") || label.includes("risk")) return "RS";
+  if (label.includes("verdict") || label.includes("outlook")) return "VD";
+  if (label.includes("summary")) return "SM";
+  return "RD";
+}
+
+const _NON_TICKER_WORDS = new Set([
+  // Financial/accounting terms
+  "TTM","YOY","QOQ","EPS","PE","PEG","ROE","ROA","EBIT","EBITDA","FCF","DCF","NAV",
+  "IPO","ETF","REIT","SPV","AUM","AUM","MOM","YTD","WTD","MTD","CAGR","WACC","IRR",
+  "NII","NIM","LTV","CET","RWA","NPL","NOI","FFO","AFFO","BPS","DPS","SPS","OCF",
+  "CFO","CTO","CEO","COO","CFO","CIO","EVP","SVP","VP","MD","GM",
+  // Common English words often uppercased in financial text
+  "AI","ML","US","UK","EU","UN","GDP","CPI","PPI","PMI","ISM","FED","ECB","BOE","BOJ",
+  "USD","GBP","EUR","JPY","CAD","AUD","CHF","HKD","CNY","INR",
+  "Q1","Q2","Q3","Q4","H1","H2","FY","NY","LA","SF","DC",
+  "S","P","A","B","C","E","R","T","I","N","M","F",
+  "AND","FOR","THE","BUT","NOT","ARE","WAS","HAS","ITS","MAY","CAN","YET","NEW","NOW",
+  "HIGH","LOW","BUY","SELL","HOLD","LONG","SHORT","CALL","PUT","OTC",
+  "NOTE","NOTES","RISK","RISKS","DATA","RATE","RATES","DEBT","CASH","NET","GROSS",
+]);
+
+function extractTickersFromText(text) {
+  const matches = String(text || "").match(/\b[A-Z]{1,5}(?:\.[A-Z])?\b/g) || [];
+  return [...new Set(matches)].filter(t => !_NON_TICKER_WORDS.has(t) && t.length >= 2).slice(0, 6);
+}
+
+function extractEntityCards(rawText, sections) {
+  const entities = [];
+  const seen = new Set();
+
+  sections.forEach(section => {
+    const source = section.title || section.lines.join(" ");
+    const ticker = (source.match(/\(([A-Z]{1,5}(?:\.[A-Z])?)\)/) || [])[1]
+      || (section.title.match(/\b[A-Z]{1,5}(?:\.[A-Z])?\b/) || [])[0];
+    if (!ticker || seen.has(ticker)) return;
+
+    seen.add(ticker);
+    const joined = section.lines.join("\n");
+    const outlookMatch = joined.match(/\*\*Outlook\*\*:\s*([^\n]+)/i) || joined.match(/Outlook:\s*([^\n]+)/i);
+    const catalystMatch = joined.match(/\*\*Key (?:thing to watch|catalyst)\*\*:\s*([^\n]+)/i)
+      || joined.match(/Key (?:thing to watch|catalyst):\s*([^\n]+)/i);
+    const priceMatch = joined.match(/\*\*Current Price\*\*:\s*([^\n]+)/i) || joined.match(/Current Price:\s*([^\n]+)/i);
+    const marketCapMatch = joined.match(/\*\*Market Cap\*\*:\s*([^\n]+)/i) || joined.match(/Market Cap:\s*([^\n]+)/i);
+
+    entities.push({
+      ticker,
+      title: section.title,
+      outlook: outlookMatch?.[1]?.trim() || "Under review",
+      catalyst: catalystMatch?.[1]?.trim() || "Watch upcoming catalysts and guidance.",
+      price: priceMatch?.[1]?.trim() || "Price not parsed",
+      marketCap: marketCapMatch?.[1]?.trim() || "Market cap not parsed",
+    });
+  });
+
+  if (entities.length > 0) return entities.slice(0, 4);
+
+  return extractTickersFromText(rawText).map(ticker => ({
+    ticker,
+    title: ticker,
+    outlook: "Research report loaded",
+    catalyst: "Scan the sections below for catalysts and risks.",
+    price: "See report",
+    marketCap: "See report",
+  }));
+}
+
+function buildTickerArt(ticker, outlook = "") {
+  const key = ticker.split("").reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
+  const hue = key % 360;
+  const tone = /bull/i.test(outlook) ? "#22c55e" : /bear/i.test(outlook) ? "#ef4444" : "#4f8ef7";
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="hsl(${hue} 75% 18%)" />
+          <stop offset="100%" stop-color="#111727" />
+        </linearGradient>
+        <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="0.25" />
+          <stop offset="100%" stop-color="${tone}" stop-opacity="0.95" />
+        </linearGradient>
+      </defs>
+      <rect width="320" height="180" rx="28" fill="url(#bg)" />
+      <circle cx="252" cy="42" r="34" fill="${tone}" opacity="0.18" />
+      <circle cx="280" cy="18" r="54" fill="#ffffff" opacity="0.05" />
+      <path d="M26 132 C62 130, 78 66, 118 84 S180 154, 224 102 S270 60, 294 72" fill="none" stroke="url(#line)" stroke-width="8" stroke-linecap="round"/>
+      <text x="26" y="52" fill="#f8fafc" font-family="Arial, sans-serif" font-size="42" font-weight="700">${escapeHtml(ticker)}</text>
+      <text x="28" y="154" fill="#cbd5e1" font-family="Arial, sans-serif" font-size="18">Research snapshot</text>
+    </svg>
+  `.trim();
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+function parseResearchResponse(rawText) {
+  const lines = String(rawText || "").replace(/\r/g, "").split("\n");
+  const sections = [];
+  let current = { title: "Executive Summary", level: 2, lines: [] };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    // Skip horizontal rules (--- or ***)
+    if (/^\s*[-*]{3,}\s*$/.test(line)) continue;
+    // Match h1-h4 headings (# through ####)
+    const heading = line.match(/^(#{1,4})\s+(.+)/);
+    if (heading) {
+      if (current.lines.length || current.title) sections.push(current);
+      current = { title: heading[2].trim(), level: Math.max(2, heading[1].length), lines: [] };
+      continue;
+    }
+    current.lines.push(line);
+  }
+  if (current.lines.length || current.title) sections.push(current);
+
+  sections.forEach(section => {
+    const blocks = [];
+    for (let i = 0; i < section.lines.length; i += 1) {
+      const line = section.lines[i];
+      if (!line.trim()) continue;
+
+      const table = parseMarkdownTable(section.lines, i);
+      if (table) {
+        blocks.push({ type: "table", ...table.table });
+        i = table.nextIndex - 1;
+        continue;
+      }
+
+      const bulletMatch = line.match(/^\s*[-*]\s+(.+)/);
+      if (bulletMatch) {
+        const items = [bulletMatch[1]];
+        while (i + 1 < section.lines.length) {
+          const next = section.lines[i + 1].match(/^\s*[-*]\s+(.+)/);
+          if (!next) break;
+          items.push(next[1]);
+          i += 1;
+        }
+        blocks.push({ type: "list", items });
+        continue;
+      }
+
+      const keyValMatch = line.match(/^\s*\*\*(.+?)\*\*:\s*(.+)$/);
+      if (keyValMatch) {
+        blocks.push({ type: "metric", label: keyValMatch[1].trim(), value: keyValMatch[2].trim() });
+        continue;
+      }
+
+      blocks.push({ type: "paragraph", text: line.trim() });
+    }
+    section.blocks = blocks;
+  });
+
+  return {
+    sections,
+    entities: extractEntityCards(rawText, sections),
+  };
+}
+
+function renderResearchResponse(rawText, query) {
+  const { sections } = parseResearchResponse(rawText);
+
+  // Filter out sections with no real content (e.g. empty "Executive Summary" default)
+  const visibleSections = sections.filter(s => s.blocks && s.blocks.length > 0);
+
+  const sectionHtml = visibleSections.map(section => `
+    <section class="research-block research-block-level-${section.level}">
+      <div class="research-block-head">
+        <span class="research-block-icon">${getSectionIcon(section.title)}</span>
+        <h3 id="${slugify(section.title)}">${formatInlineMarkdown(section.title)}</h3>
+      </div>
+      <div class="research-block-body">
+        ${section.blocks.map(block => {
+          if (block.type === "metric") {
+            return `<div class="research-metric"><span class="research-metric-label">${formatInlineMarkdown(block.label)}</span><span class="research-metric-value">${formatInlineMarkdown(block.value)}</span></div>`;
+          }
+          if (block.type === "list") {
+            return `<ul class="research-list">${block.items.map(item => `<li>${formatInlineMarkdown(item)}</li>`).join("")}</ul>`;
+          }
+          if (block.type === "table") {
+            return `<div class="research-table-wrap"><table class="research-table"><thead><tr>${block.headers.map(h => `<th>${formatInlineMarkdown(h)}</th>`).join("")}</tr></thead><tbody>${block.rows.map(row => `<tr>${row.map(cell => `<td>${formatInlineMarkdown(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+          }
+          return `<p class="research-paragraph">${formatInlineMarkdown(block.text)}</p>`;
+        }).join("")}
+      </div>
+    </section>
+  `).join("");
+
+  const toc = visibleSections.length > 2 ? `
+    <div class="research-toc">
+      ${visibleSections.map(s => `<a href="#${slugify(s.title)}">${formatInlineMarkdown(s.title)}</a>`).join("")}
+    </div>
+  ` : "";
+
+  return safe(`
+    <div class="research-rendered">
+      <div class="research-banner">
+        <div>
+          <div class="research-banner-label">AI Research Report</div>
+          <h2>${formatInlineMarkdown(query || "Stock research")}</h2>
+        </div>
+      </div>
+      ${toc}
+      <div class="research-sections">
+        ${sectionHtml || `<p class="research-paragraph">${formatInlineMarkdown(rawText)}</p>`}
+      </div>
+    </div>
+  `);
+}
+
+// ── Sector-aware screener tooltips & placeholders ─────────────
+const SECTOR_FILTER_CONFIG = {
+  "": {
+    pe:        { tip: "Price-to-Earnings Ratio\n\nShare price ÷ earnings per share. Tells you how much investors pay for £1 of profit.\n\n✅ Good: <15 = cheap, 15–25 = fair value\n⚠️ Caution: >30 = expensive, may be priced for perfection\n\nNote: negative P/E means the company is losing money.", ph: "e.g. 25" },
+    peg:       { tip: "Price/Earnings-to-Growth Ratio\n\nP/E ÷ expected earnings growth rate. Adjusts P/E for how fast the company is growing — a cheaper way to spot value in growth stocks.\n\n✅ Good: <1.0 = undervalued relative to growth\n✅ Fair: 1.0–2.0 = reasonably priced\n⚠️ Caution: >2.0 = paying a lot for growth", ph: "e.g. 1.5" },
+    pb:        { tip: "Price-to-Book Ratio\n\nShare price ÷ net assets per share (what the company owns minus what it owes). Shows if you are paying more than the company's accounting value.\n\n✅ Good: <1.5 = trading near or below asset value\n✅ Fair: 1.5–3.0 = moderate premium\n⚠️ Caution: >5 = very expensive vs. assets (common in asset-light tech)", ph: "e.g. 3" },
+    ev:        { tip: "Enterprise Value ÷ Earnings Before Interest, Tax, Depreciation & Amortisation\n\nCompares the total cost to buy the whole business against its operating profit. More comprehensive than P/E as it accounts for debt and is not distorted by accounting choices.\n\n✅ Good: <10 = potentially undervalued\n✅ Fair: 10–15 = reasonable\n⚠️ Caution: >20 = expensive on this measure", ph: "e.g. 15" },
+    fcf:       { tip: "Free Cash Flow Yield\n\nFree cash flow ÷ market cap × 100. Shows how much real cash the company generates relative to its price — often seen as harder to fake than reported earnings.\n\n✅ Good: >5% = strong cash generation\n✅ Decent: 2–5%\n⚠️ Caution: <2% or negative = limited or no free cash", ph: "e.g. 4" },
+    revgrowth: { tip: "Year-over-Year Revenue Growth\n\nHow fast the company's sales are growing compared to the same period last year.\n\n✅ Good: >10% = strong growth\n✅ Decent: 5–10%\n⚠️ Caution: <5% = slow growth  ❌ Negative = shrinking revenue", ph: "e.g. 10" },
+  },
+  "Technology": {
+    pe:        { tip: "P/E Ratio — Technology Sector\n\nTech companies often command premium valuations due to high growth and scalable business models. Use alongside PEG and revenue growth for context.\n\n✅ Good: <25 = attractively valued for tech\n✅ Fair: 25–45 = normal growth premium\n⚠️ Caution: >50 = priced for perfection, high risk if growth slows", ph: "e.g. 35" },
+    peg:       { tip: "PEG Ratio — Technology Sector\n\nParticularly useful in tech where high P/Es are only justified by high growth. A PEG under 1 is rare and valuable here.\n\n✅ Good: <1.0 = undervalued relative to growth\n✅ Fair: 1.0–2.0 = growth is reasonably priced\n⚠️ Caution: >2.5 = expensive even for a fast-grower", ph: "e.g. 1.5" },
+    pb:        { tip: "P/B Ratio — Technology Sector\n\nAsset-light tech companies (software, platforms) carry minimal physical assets, so high P/B is normal. Focus on earnings power and FCF instead.\n\n✅ Context: <8 = modest for tech\n✅ Normal: 8–20 = typical for profitable software firms\n⚠️ Caution: >30 = very richly priced vs. book (look for strong FCF to justify)", ph: "e.g. 10" },
+    ev:        { tip: "EV/EBITDA — Technology Sector\n\nHigher multiples are the norm in tech. Cloud, SaaS and semiconductor firms often trade at significant premiums due to recurring revenue and margin expansion.\n\n✅ Good: <18 = reasonable for tech\n✅ Fair: 18–30 = typical growth-stock range\n⚠️ Caution: >35 = very expensive, needs exceptional growth to justify", ph: "e.g. 22" },
+    fcf:       { tip: "FCF Yield — Technology Sector\n\nFree cash flow is the gold standard in tech — software and platform businesses can be highly cash-generative once scaled.\n\n✅ Good: >3% = healthy for a growth-stage tech firm\n✅ Mature tech: >5% = excellent\n⚠️ Caution: <1% = still burning cash or re-investing heavily (acceptable in early growth, not in maturity)", ph: "e.g. 3" },
+    revgrowth: { tip: "Revenue Growth — Technology Sector\n\nGrowth is the primary value driver in tech. Markets will forgive low earnings today for strong, compounding top-line growth.\n\n✅ Strong: >20% = high-growth tech\n✅ Solid: 10–20% = healthy expansion\n⚠️ Caution: <8% = slowing — re-rate risk if the market was pricing in higher growth", ph: "e.g. 15" },
+  },
+  "Healthcare": {
+    pe:        { tip: "P/E Ratio — Healthcare Sector\n\nHealthcare spans pharma, biotech, medtech and services — each with very different earnings profiles. Biotech may have no earnings; large pharma typically trades at moderate multiples.\n\n✅ Good: <18 = value territory for established healthcare\n✅ Fair: 18–30 = reasonable for high-quality names\n⚠️ Caution: >35 = rich; validate with pipeline strength or recurring revenue", ph: "e.g. 22" },
+    peg:       { tip: "PEG Ratio — Healthcare Sector\n\nUseful for pharma and healthcare services with predictable earnings. Less meaningful for loss-making biotech.\n\n✅ Good: <1.0 = undervalued vs. growth\n✅ Fair: 1.0–2.0 = reasonably priced\n⚠️ Caution: >2.5 = high premium; justify with pipeline or patent moat", ph: "e.g. 1.5" },
+    pb:        { tip: "P/B Ratio — Healthcare Sector\n\nLarge pharma and medtech carry significant intangible assets (patents, IP) not always reflected in book value, so moderate-to-high P/B is normal.\n\n✅ Good: <3 = modest premium for healthcare\n✅ Fair: 3–6 = normal for established names\n⚠️ Caution: >8 = very expensive vs. assets; look for durable IP or recurring revenue", ph: "e.g. 4" },
+    ev:        { tip: "EV/EBITDA — Healthcare Sector\n\nA reliable metric for healthcare services and medtech where EBITDA is consistent. Less useful for clinical-stage biotech with no EBITDA.\n\n✅ Good: <12 = potentially undervalued\n✅ Fair: 12–20 = reasonable for quality healthcare\n⚠️ Caution: >25 = expensive; requires strong pipeline or high-margin recurring business", ph: "e.g. 15" },
+    fcf:       { tip: "FCF Yield — Healthcare Sector\n\nEstablished pharma and healthcare services generate strong, predictable cash flows. R&D-heavy firms may have lower FCF due to pipeline investment.\n\n✅ Good: >5% = strong cash generation\n✅ Decent: 2–5% = adequate\n⚠️ Caution: <2% = likely reinvesting heavily in R&D or clinical trials (check pipeline value)", ph: "e.g. 4" },
+    revgrowth: { tip: "Revenue Growth — Healthcare Sector\n\nGrowth is driven by drug launches, aging demographics and procedure volumes. Watch for patent cliffs that can sharply reduce revenues.\n\n✅ Strong: >12% = strong pipeline or market share gains\n✅ Solid: 5–12% = healthy for established healthcare\n⚠️ Caution: <5% = mature or facing patent expiry risk", ph: "e.g. 8" },
+  },
+  "Financial Services": {
+    pe:        { tip: "P/E Ratio — Financial Services Sector\n\nBanks, insurers and asset managers tend to trade at lower multiples than the broader market due to slower growth and cyclical earnings.\n\n✅ Good: <10 = cheap for financials\n✅ Fair: 10–16 = normal range\n⚠️ Caution: >20 = expensive relative to peers; check ROE and credit quality", ph: "e.g. 12" },
+    peg:       { tip: "PEG Ratio — Financial Services Sector\n\nLess widely used in financials where earnings are lumpy. P/B and ROE are generally more informative for banks.\n\n✅ Good: <1.0 = undervalued vs. growth\n✅ Fair: 1.0–1.8\n⚠️ Caution: >2.0 = high for a sector with structurally limited growth", ph: "e.g. 1.2" },
+    pb:        { tip: "P/B Ratio — Financial Services Sector\n\nThe primary valuation metric for banks. Book value represents the net asset base; trading near or below it can signal value or distress.\n\n✅ Good: <1.0 = trading below book — deep value if quality is solid\n✅ Fair: 1.0–1.8 = typical for healthy bank\n⚠️ Caution: >2.5 = rich for a bank; only justified by high ROE (>15%)", ph: "e.g. 1.5" },
+    ev:        { tip: "EV/EBITDA — Financial Services Sector\n\nGenerally not meaningful for banks and insurers — their 'debt' is a core operating input (deposits, float), not just financing. Use P/E and P/B instead.\n\n✅ Applicable to: asset managers, exchanges, fintech\n⚠️ Not useful for: retail banks, insurance companies", ph: "e.g. 10" },
+    fcf:       { tip: "FCF Yield — Financial Services Sector\n\nFree cash flow is harder to define cleanly for banks (capital requirements differ). Dividend yield and payout ratio are often more useful signals.\n\n✅ Asset managers / exchanges: >5% = strong\n✅ Insurers: >4% = healthy\n⚠️ Banks: use dividend yield and CET1 ratio instead", ph: "e.g. 4" },
+    revgrowth: { tip: "Revenue Growth — Financial Services Sector\n\nRevenue in financials is driven by loan growth, fee income and interest rate margins. Growth above 8% is strong for this sector.\n\n✅ Good: >8% = strong for financials\n✅ Decent: 3–8%\n⚠️ Caution: <3% = stagnant; check net interest margin trend", ph: "e.g. 6" },
+  },
+  "Consumer Cyclical": {
+    pe:        { tip: "P/E Ratio — Consumer Cyclical Sector\n\nEarnings are tied to economic cycles — P/E can look high at cycle peaks and low at troughs. Consider normalised earnings to avoid misleading signals.\n\n✅ Good: <15 = cheap on current earnings\n✅ Fair: 15–25 = reasonable mid-cycle\n⚠️ Caution: >28 = expensive; check if earnings are near a cyclical peak", ph: "e.g. 20" },
+    peg:       { tip: "PEG Ratio — Consumer Cyclical Sector\n\nUseful when earnings growth is driven by structural factors (brand, market share) rather than just the cycle. Be wary of PEG based on peak earnings.\n\n✅ Good: <1.0\n✅ Fair: 1.0–2.0\n⚠️ Caution: >2.5 = expensive for a cyclical business", ph: "e.g. 1.5" },
+    pb:        { tip: "P/B Ratio — Consumer Cyclical Sector\n\nRetailers and automakers carry significant tangible assets; luxury brands have large intangible brand value. Context matters by sub-sector.\n\n✅ Good: <2.0 = conservative valuation\n✅ Fair: 2.0–4.0 = moderate brand premium\n⚠️ Caution: >5 = high; ensure brand equity or recurring revenue justifies it", ph: "e.g. 3" },
+    ev:        { tip: "EV/EBITDA — Consumer Cyclical Sector\n\nA key metric for retail, autos and leisure. Accounts for the capital-intensive nature of physical retail better than P/E.\n\n✅ Good: <9 = potentially undervalued\n✅ Fair: 9–15 = normal range\n⚠️ Caution: >18 = expensive for a cyclical; margin of safety is thin", ph: "e.g. 12" },
+    fcf:       { tip: "FCF Yield — Consumer Cyclical Sector\n\nStrong FCF is a hallmark of quality cyclicals — it allows buybacks and dividends through downturns. Retailers with inventory risk tend to have lumpier FCF.\n\n✅ Good: >5% = strong\n✅ Decent: 2–5%\n⚠️ Caution: <2% = thin cushion for a cyclical business heading into a slowdown", ph: "e.g. 4" },
+    revgrowth: { tip: "Revenue Growth — Consumer Cyclical Sector\n\nGrowth reflects consumer confidence and discretionary spending. Strong organic growth (ex-price increases) is the quality signal.\n\n✅ Good: >8% = outperforming the consumer\n✅ Decent: 3–8%\n⚠️ Caution: <3% = barely keeping up with inflation", ph: "e.g. 6" },
+  },
+  "Consumer Defensive": {
+    pe:        { tip: "P/E Ratio — Consumer Defensive Sector\n\nStaples (food, beverages, household goods) command a stability premium — investors pay up for predictable earnings through downturns. Expect higher-than-market multiples.\n\n✅ Good: <18 = attractively priced for a defensive\n✅ Fair: 18–25 = typical for quality staples\n⚠️ Caution: >28 = expensive; limited upside unless brand/pricing power is exceptional", ph: "e.g. 20" },
+    peg:       { tip: "PEG Ratio — Consumer Defensive Sector\n\nGrowth is inherently modest in staples, so PEG will naturally be higher. Focus on dividend yield and FCF as primary quality indicators.\n\n✅ Good: <1.5 = fair value in this slow-growth sector\n✅ Fair: 1.5–2.5\n⚠️ Caution: >3.0 = very expensive for a low-growth business", ph: "e.g. 2.0" },
+    pb:        { tip: "P/B Ratio — Consumer Defensive Sector\n\nEstablished consumer brands carry enormous intangible value (brand equity, distribution networks) not fully captured in book value.\n\n✅ Good: <3.0\n✅ Fair: 3.0–6.0 = normal for blue-chip staples\n⚠️ Caution: >8 = very expensive; requires pricing power and dominant market position", ph: "e.g. 4" },
+    ev:        { tip: "EV/EBITDA — Consumer Defensive Sector\n\nReliable metric for staples with consistent EBITDA. Higher multiples than cyclicals are warranted given earnings resilience.\n\n✅ Good: <12 = value territory\n✅ Fair: 12–18 = typical for quality defensives\n⚠️ Caution: >22 = fully priced; limited downside protection at this valuation", ph: "e.g. 15" },
+    fcf:       { tip: "FCF Yield — Consumer Defensive Sector\n\nStrong, consistent FCF is the hallmark of great consumer staples — it funds dividends, buybacks and acquisitions through all market conditions.\n\n✅ Good: >5% = excellent quality signal\n✅ Decent: 3–5%\n⚠️ Caution: <2% = unusually low for a staples business; investigate margin pressure", ph: "e.g. 4" },
+    revgrowth: { tip: "Revenue Growth — Consumer Defensive Sector\n\nStaples grow slowly by nature — pricing power and volume growth of 3–5% is considered healthy. Focus on margin stability over top-line heroics.\n\n✅ Good: >6% = strong (likely gaining market share)\n✅ Decent: 2–6%\n⚠️ Caution: <2% = barely treading water; check if pricing is masking volume decline", ph: "e.g. 4" },
+  },
+  "Energy": {
+    pe:        { tip: "P/E Ratio — Energy Sector\n\nEnergy earnings are highly cyclical and commodity-driven — P/E can be misleading (very low at oil price peaks, very high or negative in downturns). Use EV/EBITDA and FCF yield as primary metrics.\n\n✅ Good: <10 = cheap on current commodity prices\n✅ Fair: 10–18 = reasonable mid-cycle\n⚠️ Caution: >22 = likely near a commodity peak — earnings may not be sustainable", ph: "e.g. 12" },
+    peg:       { tip: "PEG Ratio — Energy Sector\n\nLeast reliable metric in energy due to earnings volatility from commodity price swings. FCF yield and balance sheet strength are far more informative.\n\n✅ Context: use as a supplementary signal only\n✅ Good: <1.0 = undervalued relative to growth cycle\n⚠️ Note: growth figures in energy can be artificially high at cycle peaks", ph: "e.g. 1.0" },
+    pb:        { tip: "P/B Ratio — Energy Sector\n\nEnergy companies have large tangible asset bases (reserves, infrastructure). Trading near or below book can signal deep value — or a value trap if reserves are impaired.\n\n✅ Good: <1.2 = trading near asset value\n✅ Fair: 1.2–2.0\n⚠️ Caution: >2.5 = expensive for a capital-intensive, commodity-exposed business", ph: "e.g. 1.5" },
+    ev:        { tip: "EV/EBITDA — Energy Sector\n\nThe preferred valuation metric in energy. Accounts for the heavy debt loads common in the sector and strips out the distortions of D&A on capital-intensive assets.\n\n✅ Good: <5 = potentially undervalued\n✅ Fair: 5–8 = mid-cycle norm\n⚠️ Caution: >10 = expensive for energy; implies high commodity price expectations", ph: "e.g. 6" },
+    fcf:       { tip: "FCF Yield — Energy Sector\n\nThe most important metric in energy today. After years of over-investment, the sector now prioritises returning cash to shareholders. High FCF yield = strong capital discipline.\n\n✅ Good: >8% = excellent capital return story\n✅ Decent: 4–8%\n⚠️ Caution: <4% = either commodity prices are weak or capex is high — check breakeven oil price", ph: "e.g. 6" },
+    revgrowth: { tip: "Revenue Growth — Energy Sector\n\nRevenue tracks commodity prices closely — high growth in a bull market can quickly reverse. Focus on production growth and cost per barrel, not just top-line revenue.\n\n✅ Good: >10% = production growth or commodity tailwind\n✅ Decent: 0–10%\n⚠️ Caution: Negative = commodity downturn or volume decline; check hedge book and breakeven", ph: "e.g. 5" },
+  },
+  "Industrials": {
+    pe:        { tip: "P/E Ratio — Industrials Sector\n\nIndustrials (aerospace, defence, logistics, machinery) are moderately cyclical. Quality names with recurring service revenues deserve a premium over pure equipment manufacturers.\n\n✅ Good: <15 = value territory\n✅ Fair: 15–22 = reasonable for quality industrials\n⚠️ Caution: >25 = expensive; validate with order backlog and margin trends", ph: "e.g. 18" },
+    peg:       { tip: "PEG Ratio — Industrials Sector\n\nUseful for identifying compounders in industrials — businesses with durable pricing power and long-cycle order books.\n\n✅ Good: <1.0 = undervalued vs. growth\n✅ Fair: 1.0–2.0\n⚠️ Caution: >2.5 = expensive for the sector", ph: "e.g. 1.5" },
+    pb:        { tip: "P/B Ratio — Industrials Sector\n\nIndustrials carry significant physical assets. Trading at a large premium to book is only justified by high ROE and durable competitive moats (e.g. switching costs, regulatory barriers).\n\n✅ Good: <2.0 = modest premium\n✅ Fair: 2.0–4.0\n⚠️ Caution: >5 = expensive vs. asset base; requires consistently high returns on capital", ph: "e.g. 3" },
+    ev:        { tip: "EV/EBITDA — Industrials Sector\n\nStandard valuation metric for industrials. Useful for comparing capital-intensive businesses where EBITDA is a cleaner measure of operating performance than net income.\n\n✅ Good: <9 = potentially undervalued\n✅ Fair: 9–14 = normal range\n⚠️ Caution: >16 = expensive; margin of safety is limited unless order backlog is very strong", ph: "e.g. 11" },
+    fcf:       { tip: "FCF Yield — Industrials Sector\n\nCapex cycles can make FCF lumpy in industrials. Look for businesses with asset-light models or long-term service contracts that generate consistent free cash.\n\n✅ Good: >5% = strong and consistent\n✅ Decent: 2–5%\n⚠️ Caution: <2% = likely in a heavy capex phase or facing margin pressure", ph: "e.g. 4" },
+    revgrowth: { tip: "Revenue Growth — Industrials Sector\n\nGrowth is driven by capital expenditure cycles, infrastructure spending and global trade. Backlog and book-to-bill ratio are leading indicators.\n\n✅ Good: >8% = strong organic growth or cycle tailwind\n✅ Decent: 3–8%\n⚠️ Caution: <3% = late-cycle signal; check order intake trend", ph: "e.g. 6" },
+  },
+  "Communication Services": {
+    pe:        { tip: "P/E Ratio — Communication Services Sector\n\nSpans telecom (low growth, high yield) and media/internet platforms (high growth, low yield). Valuations vary enormously — always compare within sub-sector.\n\n✅ Telecom: <14 = cheap, 14–20 = fair\n✅ Platforms/media: <25 = reasonable, 25–40 = growth premium\n⚠️ Caution: >45 = expensive for platform; check user growth and ARPU trends", ph: "e.g. 22" },
+    peg:       { tip: "PEG Ratio — Communication Services Sector\n\nMost useful for internet platforms and streaming businesses where growth is the primary value driver. Less relevant for mature telecoms.\n\n✅ Good: <1.0 = undervalued relative to growth\n✅ Fair: 1.0–2.0\n⚠️ Caution: >2.5 = high for the sector", ph: "e.g. 1.5" },
+    pb:        { tip: "P/B Ratio — Communication Services Sector\n\nPlatform businesses have minimal tangible assets, making P/B less useful. Telecoms have large physical network assets — higher P/B signals confidence in returns on that infrastructure.\n\n✅ Telecom: <2.0 = reasonable\n✅ Platforms: <8 = fair for asset-light model\n⚠️ Caution: >15 for platforms = very richly priced vs. book value", ph: "e.g. 5" },
+    ev:        { tip: "EV/EBITDA — Communication Services Sector\n\nThe standard metric for telecoms where EBITDA margins are high and stable. Less reliable for loss-making or fast-growing platforms.\n\n✅ Telecom: <7 = value, 7–12 = fair\n✅ Media/platforms: <15 = reasonable\n⚠️ Caution: >22 = expensive; validate with subscriber growth and churn rates", ph: "e.g. 14" },
+    fcf:       { tip: "FCF Yield — Communication Services Sector\n\nTelecoms are capital-intensive (network build-out) so FCF after capex is the key metric. Platforms can be highly cash-generative once scaled.\n\n✅ Telecom: >6% = strong after high capex\n✅ Platforms: >4% = healthy\n⚠️ Caution: <2% = network investment phase or margin pressure; check capex cycle timing", ph: "e.g. 4" },
+    revgrowth: { tip: "Revenue Growth — Communication Services Sector\n\nTelecom revenue is mature and slow; platform/media revenue can grow rapidly via advertising, subscriptions and user expansion.\n\n✅ Platforms: >12% = strong\n✅ Telecom: >3% = solid for mature network\n⚠️ Caution: Flat or negative telecom revenue = pricing pressure or subscriber loss", ph: "e.g. 8" },
+  },
+  "Basic Materials": {
+    pe:        { tip: "P/E Ratio — Basic Materials Sector\n\nMining, chemicals and materials are highly cyclical — earnings spike with commodity prices. P/E based on peak earnings is misleading; use mid-cycle or normalised earnings.\n\n✅ Good: <10 = cheap on current prices\n✅ Fair: 10–18\n⚠️ Caution: >22 = likely near commodity price peak — use EV/EBITDA and FCF yield instead", ph: "e.g. 12" },
+    peg:       { tip: "PEG Ratio — Basic Materials Sector\n\nLeast reliable in this sector due to earnings cyclicality. Growth can look exceptional at commodity peaks and collapse rapidly. Use as supplementary context only.\n\n✅ Good: <1.0 (at mid-cycle earnings)\n⚠️ Note: PEG based on peak earnings will mislead — always check where we are in the commodity cycle", ph: "e.g. 1.0" },
+    pb:        { tip: "P/B Ratio — Basic Materials Sector\n\nMining companies hold real assets (reserves, infrastructure). Buying near or below book value limits downside. High P/B in a commodity up-cycle can quickly unwind.\n\n✅ Good: <1.2 = conservative, asset-backed value\n✅ Fair: 1.2–2.5\n⚠️ Caution: >3 = expensive for a cyclical; requires sustained high commodity prices", ph: "e.g. 1.5" },
+    ev:        { tip: "EV/EBITDA — Basic Materials Sector\n\nPreferred valuation metric in mining and chemicals. Strips out D&A distortions on large physical asset bases and accounts for debt typical in capital-intensive businesses.\n\n✅ Good: <6 = potentially undervalued\n✅ Fair: 6–10\n⚠️ Caution: >12 = expensive for materials; commodity price assumptions are likely optimistic", ph: "e.g. 7" },
+    fcf:       { tip: "FCF Yield — Basic Materials Sector\n\nDisciplined capital allocation is key in materials — look for miners generating FCF at mid-cycle prices, not just at price spikes.\n\n✅ Good: >7% = strong capital return story\n✅ Decent: 3–7%\n⚠️ Caution: <3% = heavy capex or weak commodity environment; check breakeven costs", ph: "e.g. 5" },
+    revgrowth: { tip: "Revenue Growth — Basic Materials Sector\n\nRevenue tracks commodity prices — headline growth can be misleading. Volume growth and cost curve position are more durable quality indicators.\n\n✅ Good: >8% = volume growth or commodity tailwind\n✅ Decent: 0–8%\n⚠️ Caution: Negative = commodity downturn; assess balance sheet strength and cost position", ph: "e.g. 5" },
+  },
+  "Utilities": {
+    pe:        { tip: "P/E Ratio — Utilities Sector\n\nUtilities are slow-growth, high-yield businesses — lower P/E multiples reflect lower growth, not poor quality. They are valued primarily for income and capital stability.\n\n✅ Good: <13 = cheap for utilities\n✅ Fair: 13–20 = typical range\n⚠️ Caution: >22 = expensive; dividend yield will be low at this price — compare to bond yields", ph: "e.g. 15" },
+    peg:       { tip: "PEG Ratio — Utilities Sector\n\nLeast useful in utilities — growth is deliberately slow and regulated. Focus on dividend yield, payout ratio and RAB (Regulated Asset Base) instead.\n\n✅ Context: utilities rarely have PEG <1 — that is not the investment thesis\n✅ If applicable: <2.5 = fair for regulated utility\n⚠️ Note: earnings growth is mostly driven by regulatory rate reviews, not operational expansion", ph: "e.g. 2.0" },
+    pb:        { tip: "P/B Ratio — Utilities Sector\n\nLarge regulated asset bases make P/B meaningful here. Premium to book is justified by a favourable regulatory environment and stable returns.\n\n✅ Good: <1.3 = near asset value — potential value if regulation is stable\n✅ Fair: 1.3–2.2 = normal premium for quality utility\n⚠️ Caution: >2.5 = expensive; regulatory risk or rate cut could reprice significantly", ph: "e.g. 1.8" },
+    ev:        { tip: "EV/EBITDA — Utilities Sector\n\nKey metric for utilities given high, stable EBITDA margins from regulated or contracted revenues. Also captures the significant debt typical in capital-intensive utility businesses.\n\n✅ Good: <7 = value territory\n✅ Fair: 7–11 = normal for regulated utility\n⚠️ Caution: >13 = expensive; implies optimistic assumptions about regulatory outcomes or rate increases", ph: "e.g. 9" },
+    fcf:       { tip: "FCF Yield — Utilities Sector\n\nUtilities are capital-intensive — ongoing infrastructure investment means FCF after capex can be modest despite high EBITDA. Focus on dividend coverage rather than raw FCF yield.\n\n✅ Good: >4% = healthy after infrastructure capex\n✅ Decent: 2–4%\n⚠️ Caution: <2% = heavy investment cycle or stretched balance sheet; check dividend cover ratio", ph: "e.g. 3" },
+    revgrowth: { tip: "Revenue Growth — Utilities Sector\n\nRevenue is set by regulators or long-term contracts — growth is modest by design. Tariff increases, electrification and renewable build-out are the main growth levers.\n\n✅ Good: >4% = above-average for utilities (likely tariff increases or M&A)\n✅ Decent: 1–4% = in line with regulated rate of return\n⚠️ Caution: Flat or negative = regulatory headwind or volume decline; check RAB growth", ph: "e.g. 3" },
+  },
+  "Real Estate": {
+    pe:        { tip: "P/E Ratio — Real Estate / REITs\n\nTraditional P/E is largely irrelevant for REITs — depreciation heavily distorts reported earnings. Use Price/FFO (Funds From Operations) or Price/AFFO instead, which add back D&A to reflect true cash earnings.\n\n✅ Context: a 'low' P/E in a REIT may simply reflect high depreciation charges\n✅ Use instead: Price/FFO <15 = good value; 15–22 = fair; >25 = expensive\n⚠️ Note: if the screener shows P/E, treat it as a rough guide only", ph: "e.g. 20" },
+    peg:       { tip: "PEG Ratio — Real Estate / REITs\n\nNot a standard metric for REITs. FFO growth rate relative to Price/FFO is more relevant. Use this filter with caution in this sector.\n\n✅ If using: <2.0 = reasonable\n⚠️ Preferred metric: Price/FFO relative to FFO growth rate", ph: "e.g. 2.0" },
+    pb:        { tip: "P/B Ratio — Real Estate / REITs\n\nBook value approximates NAV (Net Asset Value) for real estate. Buying below book suggests the market is discounting the asset base — a key value signal for REITs.\n\n✅ Good: <0.9 = trading at a discount to NAV — potential value\n✅ Fair: 0.9–1.5 = modest premium to NAV\n⚠️ Caution: >2.0 = significant premium; only justified by trophy assets or strong rental growth outlook", ph: "e.g. 1.2" },
+    ev:        { tip: "EV/EBITDA — Real Estate / REITs\n\nUseful for property companies with operating businesses (hotels, logistics, retail). For pure-play REITs, EV/EBITDA is less standard than cap rate or Price/FFO.\n\n✅ Good: <14 = reasonable for diversified REIT\n✅ Fair: 14–22\n⚠️ Caution: >25 = expensive; implies very low cap rate or speculative premium on asset appreciation", ph: "e.g. 18" },
+    fcf:       { tip: "FCF Yield — Real Estate / REITs\n\nFor REITs, AFFO yield (Adjusted Funds From Operations ÷ market cap) is the closest equivalent to FCF yield and is the primary income metric.\n\n✅ Good: AFFO yield >5% = attractive income\n✅ Decent: 3–5%\n⚠️ Caution: <3% = low yield relative to interest rates; also check dividend payout as % of AFFO (should be <90%)", ph: "e.g. 5" },
+    revgrowth: { tip: "Revenue Growth — Real Estate / REITs\n\nRental income growth driven by occupancy rates, lease renewals and new development. Same-store NOI (Net Operating Income) growth is the purest quality signal.\n\n✅ Good: >6% = strong rental growth or acquisitions\n✅ Decent: 2–6% = in line with inflation-linked leases\n⚠️ Caution: <2% = occupancy pressure or lease expiry risk; check vacancy rates and WAULT (weighted average unexpired lease term)", ph: "e.g. 4" },
+  },
+};
+
+function applyScreenerSectorConfig(sector) {
+  const cfg = SECTOR_FILTER_CONFIG[sector] || SECTOR_FILTER_CONFIG[""];
+  const fields = { pe: "pe", peg: "peg", pb: "pb", ev: "ev", fcf: "fcf", revgrowth: "rev-growth" };
+  for (const [key, inputId] of Object.entries(fields)) {
+    const c = cfg[key];
+    if (!c) continue;
+    const tip = document.querySelector(`.filter-group:has(#filter-${inputId}) .tip`);
+    const input = document.getElementById(`filter-${inputId}`);
+    if (tip) tip.setAttribute("data-tip", c.tip);
+    if (input) input.placeholder = c.ph;
+  }
+}
+
+document.getElementById("filter-sector").addEventListener("change", function () {
+  applyScreenerSectorConfig(this.value);
+});
+applyScreenerSectorConfig("");
+
+// Toggle ≤ / ≥ on filter operator buttons
+document.querySelectorAll(".filter-op-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (btn.dataset.op === "max") {
+      btn.dataset.op = "min";
+      btn.textContent = "≥";
+    } else {
+      btn.dataset.op = "max";
+      btn.textContent = "≤";
+    }
+  });
+});
+
 document.getElementById("btn-screen").addEventListener("click", runScreen);
+
+document.getElementById("screener-search").addEventListener("input", function () {
+  const q = this.value.trim().toLowerCase();
+  const rows = document.querySelectorAll("#screen-body tr");
+  if (rows.length === 0) return; // nothing loaded yet — wait for Enter
+  let visible = 0;
+  rows.forEach(row => {
+    const ticker = (row.dataset.ticker || "").toLowerCase();
+    const name   = row.cells[1]?.textContent.toLowerCase() || "";
+    const match  = !q || ticker.includes(q) || name.includes(q);
+    row.style.display = match ? "" : "none";
+    if (match) visible++;
+  });
+  const status = document.getElementById("screen-status");
+  status.textContent = q
+    ? `${visible} of ${rows.length} stock${rows.length !== 1 ? "s" : ""} shown.`
+    : `${rows.length} stock${rows.length !== 1 ? "s" : ""} found.`;
+});
+
+document.getElementById("screener-search").addEventListener("keydown", async function (e) {
+  if (e.key !== "Enter") return;
+  const q = this.value.trim();
+  if (!q) return;
+  const status = document.getElementById("screen-status");
+  const body   = document.getElementById("screen-body");
+  status.textContent = `Searching for "${q}"…`;
+  body.innerHTML = "";
+  showLoader(`Searching for "${q}"…`);
+  try {
+    const res  = await authFetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    if (data.length === 0) {
+      status.textContent = `No stocks found matching "${q}".`;
+      return;
+    }
+    status.textContent = `${data.length} result${data.length !== 1 ? "s" : ""} for "${q}".`;
+    body.innerHTML = data.map(s => `
+      <tr data-ticker="${s.ticker}">
+        <td><strong>${s.ticker}</strong></td>
+        <td>${s.name}</td>
+        <td>${s.sector || "—"}</td>
+        <td>${s.price != null ? "$" + s.price : "—"}</td>
+        <td>${s.pe ?? "—"}</td>
+        <td>${s.peg ?? "—"}</td>
+        <td>${s.pb ?? "—"}</td>
+        <td>${s.ev_ebitda ?? "—"}</td>
+        <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}</td>
+        <td>${fmtScreenerMarketCap(s.market_cap)}</td>
+        <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
+      </tr>`).join("");
+  } catch (err) {
+    status.textContent = "Search failed. Please try again.";
+  } finally {
+    hideLoader();
+  }
+});
 
 async function runScreen() {
   const btn = document.getElementById("btn-screen");
   const status = document.getElementById("screen-status");
   const body = document.getElementById("screen-body");
 
-  const sector   = document.getElementById("filter-sector").value;
-  const maxPe    = document.getElementById("filter-pe").value;
-  const maxPeg   = document.getElementById("filter-peg").value;
-  const maxPb    = document.getElementById("filter-pb").value;
-  const maxEv    = document.getElementById("filter-ev").value;
-  const minFcf   = document.getElementById("filter-fcf").value;
-  const minCap   = document.getElementById("filter-cap").value;
-  const minVol   = document.getElementById("filter-vol").value;
+  const index  = document.getElementById("filter-index").value;
+  const sector = document.getElementById("filter-sector").value;
+  const query  = document.getElementById("screener-search").value.trim();
+
+  function opParam(filterId, backendKey, scale) {
+    const val = document.getElementById("filter-" + filterId).value;
+    if (val === "") return null;
+    const btn = document.querySelector(`.filter-op-btn[data-filter="${filterId}"]`);
+    const op  = btn ? btn.dataset.op : "min";
+    const num = parseFloat(val) * (scale || 1);
+    return [op + "_" + backendKey, num];
+  }
 
   const params = new URLSearchParams();
+  if (index)  params.set("index", index);
+  if (query)  params.set("q", query);
   if (sector) params.set("sector", sector);
-  if (maxPe)  params.set("max_pe", maxPe);
-  if (maxPeg) params.set("max_peg", maxPeg);
-  if (maxPb)  params.set("max_pb", maxPb);
-  if (maxEv)  params.set("max_ev_ebitda", maxEv);
-  if (minFcf) params.set("min_fcf_yield", minFcf);
-  if (minCap) params.set("min_market_cap", parseFloat(minCap) * 1e9);
-  if (minVol) params.set("min_volume", parseFloat(minVol) * 1e6);
+  [
+    opParam("pe",         "pe"),
+    opParam("peg",        "peg"),
+    opParam("pb",         "pb"),
+    opParam("ev",         "ev_ebitda"),
+    opParam("fcf",        "fcf_yield"),
+    opParam("cap",        "market_cap", 1e9),
+    opParam("vol",        "volume",     1e6),
+    opParam("rev-growth", "rev_growth"),
+  ].forEach(p => { if (p) params.set(p[0], p[1]); });
 
   btn.disabled = true;
-  status.textContent = "Screening stocks… this may take a moment.";
+  status.textContent = query ? `Screening stocks for "${query}"…` : "Screening stocks… this may take a moment.";
   body.innerHTML = "";
+  showLoader(query ? `Screening for "${query}"…` : "Screening stocks…");
 
   try {
     const res = await authFetch(`${API}/api/screen?${params}`);
     const data = await res.json();
 
     if (data.length === 0) {
-      status.textContent = "No stocks matched your criteria.";
+      status.textContent = query ? `No stocks matched "${query}" and your criteria.` : "No stocks matched your criteria.";
       return;
     }
 
-    status.textContent = `${data.length} stock${data.length !== 1 ? "s" : ""} found.`;
+    status.textContent = query
+      ? `${data.length} stock${data.length !== 1 ? "s" : ""} found for "${query}".`
+      : `${data.length} stock${data.length !== 1 ? "s" : ""} found.`;
 
     // Compute sector medians from screener results for inline arrows
     const sectorGroups = {};
@@ -256,35 +833,50 @@ async function runScreen() {
     for (const [sec, stocks] of Object.entries(sectorGroups)) {
       if (stocks.length < 2) continue; // need peers to compare
       sectorMedians[sec] = {
-        pe:        calcMedian(stocks, 'pe'),
-        peg:       calcMedian(stocks, 'peg'),
-        pb:        calcMedian(stocks, 'pb'),
-        ev_ebitda: calcMedian(stocks, 'ev_ebitda'),
-        fcf_yield: calcMedian(stocks, 'fcf_yield'),
+        pe:         calcMedian(stocks, 'pe'),
+        peg:        calcMedian(stocks, 'peg'),
+        pb:         calcMedian(stocks, 'pb'),
+        ev_ebitda:  calcMedian(stocks, 'ev_ebitda'),
+        fcf_yield:  calcMedian(stocks, 'fcf_yield'),
+        rev_growth: calcMedian(stocks, 'rev_growth'),
       };
     }
-    function sArrow(val, median, higherIsBetter = false) {
+    function fmtMedian(val, isPct = false) {
+      if (val == null) return "n/a";
+      return isPct ? `${val}%` : `${val}`;
+    }
+    function escapeAttr(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+    function sArrow(val, median, higherIsBetter = false, label = "metric", sectorName = "sector") {
       if (val == null || median == null) return '';
       const under = higherIsBetter ? val > median : val < median;
+      const title = `${under ? "Stronger" : "Weaker"} vs ${sectorName} median ${label}: ${fmtMedian(median, higherIsBetter)}`;
       return under
-        ? '<span class="val-arrow arrow-undervalued" title="Undervalued vs sector peers">▲</span>'
-        : '<span class="val-arrow arrow-overvalued" title="Overvalued vs sector peers">▼</span>';
+        ? `<span class="val-arrow arrow-undervalued" title="${escapeAttr(title)}">▲</span>`
+        : `<span class="val-arrow arrow-overvalued" title="${escapeAttr(title)}">▼</span>`;
     }
 
     body.innerHTML = data.map(s => {
-      const m = sectorMedians[s.sector] || {};
+      const sectorName = s.sector || "Unknown";
+      const m = sectorMedians[sectorName] || {};
       return `
       <tr data-ticker="${s.ticker}">
         <td><strong>${s.ticker}</strong></td>
         <td>${s.name}</td>
-        <td>${s.sector || "—"}</td>
+        <td>${sectorName || "—"}</td>
         <td>${s.price != null ? "$" + s.price : "—"}</td>
-        <td>${s.pe ?? "—"}${sArrow(s.pe, m.pe)}</td>
-        <td>${s.peg ?? "—"}${sArrow(s.peg, m.peg)}</td>
-        <td>${s.pb ?? "—"}${sArrow(s.pb, m.pb)}</td>
-        <td>${s.ev_ebitda ?? "—"}${sArrow(s.ev_ebitda, m.ev_ebitda)}</td>
-        <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true)}</td>
-        <td>${fmt(s.market_cap)}</td>
+        <td>${s.pe ?? "—"}${sArrow(s.pe, m.pe, false, "P/E", sectorName)}</td>
+        <td>${s.peg ?? "—"}${sArrow(s.peg, m.peg, false, "PEG", sectorName)}</td>
+        <td>${s.pb ?? "—"}${sArrow(s.pb, m.pb, false, "P/B", sectorName)}</td>
+        <td>${s.ev_ebitda ?? "—"}${sArrow(s.ev_ebitda, m.ev_ebitda, false, "EV/EBITDA", sectorName)}</td>
+        <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true, "FCF yield", sectorName)}</td>
+        <td>${s.rev_growth != null ? s.rev_growth + "%" : "—"}${sArrow(s.rev_growth, m.rev_growth, true, "Revenue growth", sectorName)}</td>
+        <td>${fmtScreenerMarketCap(s.market_cap)}</td>
         <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
       </tr>
     `}).join("");
@@ -303,6 +895,7 @@ async function runScreen() {
     status.textContent = "Error: " + err.message + ". Is the backend running?";
   } finally {
     btn.disabled = false;
+    hideLoader();
   }
 }
 
@@ -349,6 +942,197 @@ async function loadWatchlist() {
 
 document.getElementById("btn-refresh-watchlist").addEventListener("click", loadWatchlist);
 
+async function loadSentiment() {
+  const status = document.getElementById("sentiment-status");
+  const result = document.getElementById("sentiment-result");
+  status.textContent = "Loading watchlist...";
+  result.innerHTML = '<div class="sentiment-empty-state">Loading your watchlist for sentiment analysis...</div>';
+  try {
+    const res = await authFetch(`${API}/api/sentiment?watchlist=true`);
+    const data = await res.json();
+    if (data.detail) {
+      status.textContent = "Error: " + data.detail;
+      result.innerHTML = '<div class="sentiment-empty-state">Watchlist could not be loaded.</div>';
+      return;
+    }
+    sentimentWatchlist = Array.isArray(data.watchlist) ? data.watchlist : [];
+    status.textContent = sentimentWatchlist.length > 0
+      ? `Ready. ${sentimentWatchlist.length} watchlist stock${sentimentWatchlist.length !== 1 ? "s" : ""} available for scanning.`
+      : "Your watchlist is empty.";
+    result.innerHTML = renderSentimentWatchlist(data);
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+    result.innerHTML = '<div class="sentiment-empty-state">Watchlist could not be loaded.</div>';
+  }
+}
+
+function sentimentToneClass(sentiment, score = 0) {
+  const label = String(sentiment || "").toLowerCase();
+  if (label === "bullish" || score > 0) return "sentiment-positive";
+  if (label === "bearish" || score < 0) return "sentiment-negative";
+  if (label === "error") return "sentiment-negative";
+  return "sentiment-neutral";
+}
+
+function sentimentScoreHtml(score) {
+  const cls = score > 0 ? "change-pos" : score < 0 ? "change-neg" : "";
+  const sign = score > 0 ? "+" : "";
+  return `<span class="${cls}">${sign}${score}</span>`;
+}
+
+function renderSentimentWatchlist(data) {
+  const watchlist = Array.isArray(data?.watchlist) ? data.watchlist : [];
+  sentimentWatchlist = watchlist;
+  if (watchlist.length === 0) {
+    return '<div class="sentiment-empty-state">Your watchlist is empty. Add stocks first, then run a scan.</div>';
+  }
+
+  return `
+    <div class="sentiment-list-wrap">
+      <div class="sentiment-summary-card">
+        <div class="sentiment-summary-label">Tracked symbols</div>
+        <div class="sentiment-summary-value">${watchlist.length}</div>
+      </div>
+      <div class="sentiment-chip-row">
+        ${watchlist.map(ticker => `<span class="sentiment-chip">${safe(ticker)}</span>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderSentimentResults(data, ticker) {
+  const results = Array.isArray(data?.results) ? data.results : (data?.ticker ? [data] : []);
+  if (results.length === 0) {
+    return '<div class="sentiment-empty-state">No sentiment results returned yet.</div>';
+  }
+
+  const positive = results.filter(item => (item.sentiment_score || 0) > 0).length;
+  const negative = results.filter(item => (item.sentiment_score || 0) < 0).length;
+  const neutral = results.length - positive - negative;
+
+  return `
+    <div class="sentiment-dashboard">
+      <div class="sentiment-summary-grid">
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">${ticker ? "Ticker" : "Scanned"}</div>
+          <div class="sentiment-summary-value">${ticker ? safe(ticker) : results.length}</div>
+        </div>
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">Bullish</div>
+          <div class="sentiment-summary-value change-pos">${positive}</div>
+        </div>
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">Neutral</div>
+          <div class="sentiment-summary-value">${neutral}</div>
+        </div>
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">Bearish</div>
+          <div class="sentiment-summary-value change-neg">${negative}</div>
+        </div>
+      </div>
+      <div class="sentiment-card-grid">
+        ${results.map(item => `
+          <article class="sentiment-card ${sentimentToneClass(item.sentiment, item.sentiment_score)}">
+            <div class="sentiment-card-head">
+              <div>
+                <div class="sentiment-card-ticker">${safe(item.ticker || "N/A")}</div>
+                <div class="sentiment-card-name">${safe(item.name || item.ticker || "Unknown")}</div>
+              </div>
+              <div class="sentiment-badge ${sentimentToneClass(item.sentiment, item.sentiment_score)}">${safe(item.sentiment || "neutral")}</div>
+            </div>
+            <div class="sentiment-metrics">
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Score</span>
+                <strong>${sentimentScoreHtml(item.sentiment_score || 0)}</strong>
+              </div>
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Price</span>
+                <strong>${item.price != null ? `$${item.price}` : "—"}</strong>
+              </div>
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Change</span>
+                <strong>${item.change_pct != null ? changeHtml(item.change_pct) : "—"}</strong>
+              </div>
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Analyst</span>
+                <strong>${safe(item.recommendation || "n/a")}</strong>
+              </div>
+            </div>
+            ${(item.headlines || []).length > 0 ? `
+              <div class="sentiment-headlines">
+                <div class="sentiment-headlines-title">Recent headlines</div>
+                <ul>
+                  ${(item.headlines || []).map(headline => `<li>${safe(headline)}</li>`).join("")}
+                </ul>
+              </div>
+            ` : ""}
+            ${item.error ? `<div class="sentiment-error">${safe(item.error)}</div>` : ""}
+          </article>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+document.getElementById("btn-sentiment-list").addEventListener("click", async () => {
+  const status = document.getElementById("sentiment-status");
+  const result = document.getElementById("sentiment-result");
+  status.textContent = "Loading watchlist…";
+  try {
+    const res = await authFetch(`${API}/api/sentiment?watchlist=true`);
+    const data = await res.json();
+    if (data.detail) {
+      status.textContent = "Error: " + data.detail;
+      return;
+    }
+    status.textContent = "Watchlist loaded.";
+    result.innerHTML = renderSentimentWatchlist(data);
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  }
+});
+
+async function runSentimentScan(ticker) {
+  const status = document.getElementById("sentiment-status");
+  const result = document.getElementById("sentiment-result");
+  status.textContent = ticker ? `Scanning ticker ${ticker}…` : "Scanning watchlist…";
+  result.innerHTML = '<div class="sentiment-empty-state">Scanning live sentiment data...</div>';
+  if (!ticker && sentimentWatchlist.length === 0) {
+    status.textContent = "Your watchlist is empty.";
+    result.innerHTML = '<div class="sentiment-empty-state">Add stocks to the watchlist first, then run a watchlist scan.</div>';
+    return;
+  }
+  if (!ticker) {
+    status.textContent = `Scanning ${sentimentWatchlist.length} watchlist stock${sentimentWatchlist.length !== 1 ? "s" : ""}...`;
+  }
+  showLoader(status.textContent);
+  try {
+    const url = ticker
+      ? `${API}/api/sentiment?ticker=${encodeURIComponent(ticker)}`
+      : `${API}/api/sentiment`;
+    const res = await authFetch(url);
+    const data = await res.json();
+    status.textContent = "Done.";
+    result.innerHTML = renderSentimentResults(data, ticker);
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+    result.innerHTML = '<div class="sentiment-empty-state">Sentiment data could not be loaded.</div>';
+  } finally {
+    hideLoader();
+  }
+}
+
+document.getElementById("btn-sentiment-scan").addEventListener("click", () => runSentimentScan());
+
+document.getElementById("btn-sentiment-ticker").addEventListener("click", () => {
+  const ticker = document.getElementById("sentiment-ticker").value.trim().toUpperCase();
+  if (!ticker) {
+    document.getElementById("sentiment-status").textContent = "Enter a ticker symbol first.";
+    return;
+  }
+  runSentimentScan(ticker);
+});
+
 async function addToWatchlist(e, ticker) {
   e.stopPropagation();
   const btn = e.target;
@@ -357,6 +1141,9 @@ async function addToWatchlist(e, ticker) {
     await authFetch(`${API}/api/watchlist/${ticker}`, { method: "POST" });
     btn.textContent = "✓ Added";
     btn.classList.add("added");
+    if (document.getElementById("tab-sentiment")?.classList.contains("active")) {
+      loadSentiment();
+    }
   } catch (err) {
     btn.disabled = false;
   }
@@ -366,6 +1153,9 @@ async function removeFromWatchlist(e, ticker) {
   e.stopPropagation();
   await authFetch(`${API}/api/watchlist/${ticker}`, { method: "DELETE" });
   loadWatchlist();
+  if (document.getElementById("tab-sentiment")?.classList.contains("active")) {
+    loadSentiment();
+  }
 }
 
 function refreshWatchButtons() {
@@ -402,6 +1192,7 @@ async function openDetail(ticker) {
   const overlay = document.getElementById("detail-overlay");
   overlay.classList.remove("hidden");
 
+  showLoader("Loading stock data…");
   document.getElementById("detail-name").textContent = "Loading…";
   document.getElementById("detail-ticker").textContent = ticker;
   document.getElementById("detail-sector").textContent = "";
@@ -506,6 +1297,8 @@ async function openDetail(ticker) {
 
   } catch (err) {
     document.getElementById("detail-name").textContent = "Failed to load stock data.";
+  } finally {
+    hideLoader();
   }
 }
 
@@ -522,6 +1315,75 @@ document.getElementById("detail-overlay").addEventListener("click", e => {
 });
 
 // ── AI Advisor ───────────────────────────────────────────────
+document.getElementById("btn-research").addEventListener("click", async () => {
+  const query = document.getElementById("research-query").value.trim();
+  if (!query) return;
+
+  const btn = document.getElementById("btn-research");
+  const status = document.getElementById("research-status");
+  const response = document.getElementById("research-response");
+  const loader = document.getElementById("research-loader");
+
+  let stageTimer = null;
+  const stages = [
+    "Building research query from input...",
+    "Collecting live fundamentals (yfinance)...",
+    "Gathering news, analyst, social and technical signals...",
+    "Sending prompt to Claude and synthesizing insights...",
+    "Compiling final narrative and risk summary...",
+  ];
+  let currentStage = 0;
+
+  function advanceStage() {
+    if (currentStage < stages.length) {
+      status.textContent = stages[currentStage];
+      currentStage += 1;
+      stageTimer = setTimeout(advanceStage, 2400);
+    }
+  }
+
+  btn.disabled = true;
+  response.classList.remove("visible");
+  loader.classList.remove("hidden");
+  status.textContent = "Starting research flow…";
+  currentStage = 0;
+  advanceStage();
+
+  try {
+    const res = await authFetch(`${API}/api/stock-research`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      const text = await res.text().catch(() => "Unknown error");
+      throw new Error(res.status === 500 ? (text.includes("API key") ? "Invalid Anthropic API key — check your .env file" : "Backend error: " + text.slice(0, 120)) : text.slice(0, 120));
+    }
+
+    clearTimeout(stageTimer);
+    loader.classList.add("hidden");
+
+    if (data.detail) {
+      status.textContent = "Error: " + data.detail;
+      response.textContent = "";
+    } else {
+      status.textContent = "Research complete. Insights ready below.";
+      response.innerHTML = renderResearchResponse(data.response, query);
+      response.classList.add("visible");
+    }
+  } catch (err) {
+    clearTimeout(stageTimer);
+    loader.classList.add("hidden");
+    status.textContent = "Error: " + err.message + ". Is the backend running?";
+    response.textContent = "";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById("btn-ask").addEventListener("click", async () => {
   const query = document.getElementById("ai-query").value.trim();
   if (!query) return;
@@ -558,38 +1420,124 @@ document.getElementById("btn-ask").addEventListener("click", async () => {
 
 // ── Predictions ───────────────────────────────────────────────
 
-async function loadPredictions() {
+let predictionsSnapshotCache = null;
+let predictionsRenderedCache = null;
+
+function invalidatePredictionsSnapshotCache() {
+  predictionsSnapshotCache = null;
+  predictionsRenderedCache = null;
+}
+
+async function loadPredictions(forceRefresh = false) {
   const status = document.getElementById("pred-status");
   const body = document.getElementById("pred-body");
   const empty = document.getElementById("pred-empty");
   const bar = document.getElementById("accuracy-bar");
 
-  status.textContent = "Loading predictions…";
-  try {
-    const res = await authFetch(`${API}/api/predictions`);
-    const preds = await res.json();
+  if (!forceRefresh && predictionsRenderedCache) {
     status.textContent = "";
+    body.innerHTML = predictionsRenderedCache.bodyHtml;
+    empty.classList.toggle("visible", !!predictionsRenderedCache.emptyVisible);
+    bar.classList.toggle("hidden", !!predictionsRenderedCache.barHidden);
+    if (predictionsRenderedCache.barHtml != null) {
+      bar.innerHTML = predictionsRenderedCache.barHtml;
+    }
+    return;
+  }
 
-    if (preds.length === 0) {
+  if (!forceRefresh && Array.isArray(predictionsSnapshotCache)) {
+    status.textContent = "";
+    if (predictionsSnapshotCache.length === 0) {
       body.innerHTML = "";
       empty.classList.add("visible");
       bar.classList.add("hidden");
+      predictionsRenderedCache = {
+        bodyHtml: "",
+        emptyVisible: true,
+        barHidden: true,
+        barHtml: bar.innerHTML,
+      };
+      return;
+    }
+    empty.classList.remove("visible");
+    const bodyHtml = renderPredictionsTable(predictionsSnapshotCache);
+    const barState = renderAccuracyBar(predictionsSnapshotCache);
+    predictionsRenderedCache = {
+      bodyHtml,
+      emptyVisible: false,
+      barHidden: !!barState?.hidden,
+      barHtml: bar.innerHTML,
+    };
+    return;
+  }
+
+  status.textContent = "Loading predictions…";
+  showLoader("Loading predictions…");
+  try {
+    const res = await authFetch(`${API}/api/predictions`);
+    const preds = await res.json();
+    predictionsSnapshotCache = Array.isArray(preds) ? preds : [];
+    status.textContent = "";
+
+    if (predictionsSnapshotCache.length === 0) {
+      body.innerHTML = "";
+      empty.classList.add("visible");
+      bar.classList.add("hidden");
+      predictionsRenderedCache = {
+        bodyHtml: "",
+        emptyVisible: true,
+        barHidden: true,
+        barHtml: bar.innerHTML,
+      };
       return;
     }
 
     empty.classList.remove("visible");
-    renderPredictionsTable(preds);
-    renderAccuracyBar(preds);
+    const bodyHtml = renderPredictionsTable(predictionsSnapshotCache);
+    const barState = renderAccuracyBar(predictionsSnapshotCache);
+    predictionsRenderedCache = {
+      bodyHtml,
+      emptyVisible: false,
+      barHidden: !!barState?.hidden,
+      barHtml: bar.innerHTML,
+    };
   } catch (err) {
-    status.textContent = "Error loading predictions. Is the backend running?";
+    status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
+  } finally {
+    hideLoader();
   }
 }
 
 function renderPredictionsTable(preds) {
   const body = document.getElementById("pred-body");
+  predictionReasoningMap = {};
   body.innerHTML = preds.map(p => {
-    const predCls = p.predicted_pct >= 0 ? "change-pos" : "change-neg";
-    const predStr = p.predicted_pct != null ? `<span class="${predCls}">${p.predicted_pct >= 0 ? "+" : ""}${p.predicted_pct.toFixed(2)}%</span>` : "—";
+    const fmtProjectedPct = val => {
+      if (val == null) return "—";
+      const cls = val >= 0 ? "change-pos" : "change-neg";
+      return `<span class="${cls}">${val >= 0 ? "+" : ""}${Number(val).toFixed(2)}%</span>`;
+    };
+    const scoreValue = p.score != null ? p.score : (p.predicted_pct != null ? Math.max(0, Math.min(100, Math.round(50 + p.predicted_pct * 14))) : null);
+    const directionValue = p.direction || (p.predicted_pct == null ? "pending" : (p.predicted_pct >= 0.35 ? "bullish" : p.predicted_pct <= -0.35 ? "bearish" : "neutral"));
+    const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
+    predictionReasoningMap[rowKey] = {
+      ticker: p.ticker || "—",
+      name: p.name || p.ticker || "—",
+      date: p.date || "—",
+      confidence: p.confidence || "pending",
+      direction: directionValue,
+      score: scoreValue,
+      predicted_pct: p.predicted_pct,
+      predicted_3m_pct: p.predicted_3m_pct,
+      predicted_6m_pct: p.predicted_6m_pct,
+      predicted_12m_pct: p.predicted_12m_pct,
+      predicted_24m_pct: p.predicted_24m_pct,
+      predicted_36m_pct: p.predicted_36m_pct,
+      actual_pct: p.actual_pct,
+      reasoning: p.reasoning || "No reasoning available.",
+    };
+    const scoreCls = scoreValue >= 61 ? "change-pos" : scoreValue <= 39 ? "change-neg" : "";
+    const scoreStr = scoreValue != null ? `<span class="${scoreCls}">${scoreValue}/100</span>` : "—";
 
     let actualStr = '<span class="result-pending">Pending</span>';
     let varianceStr = '<span class="result-pending">—</span>';
@@ -597,28 +1545,60 @@ function renderPredictionsTable(preds) {
     if (p.actual_pct != null) {
       const actCls = p.actual_pct >= 0 ? "change-pos" : "change-neg";
       actualStr = `<span class="${actCls}">${p.actual_pct >= 0 ? "+" : ""}${p.actual_pct.toFixed(2)}%</span>`;
-      const variance = p.actual_pct - p.predicted_pct;
-      const varCls = variance >= 0 ? "change-pos" : "change-neg";
-      varianceStr = `<span class="${varCls}">${variance >= 0 ? "+" : ""}${variance.toFixed(2)}%</span>`;
-      const correct = (p.predicted_pct > 0) === (p.actual_pct > 0);
+      const actualDirection = p.actual_pct >= 0.35 ? "bullish" : p.actual_pct <= -0.35 ? "bearish" : "neutral";
+      varianceStr = `<span>${actualDirection.toUpperCase()}</span>`;
+      const correct = directionValue === actualDirection || (directionValue === "neutral" && Math.abs(p.actual_pct) < 0.35);
       resultStr = correct
         ? '<span class="result-correct">✓ Correct</span>'
         : '<span class="result-wrong">✗ Wrong</span>';
     }
 
-    const isPending = p.confidence === "pending" || p.predicted_pct == null;
-    const direction = isPending ? "" : (p.predicted_pct >= 0 ? "▲ BULLISH" : "▼ BEARISH");
-    const dirClass  = isPending ? "" : (p.predicted_pct >= 0 ? "dir-bull" : "dir-bear");
+    const isPending = p.confidence === "pending" || scoreValue == null;
+    const direction = isPending ? "" : (directionValue === "bullish" ? "▲ BULLISH" : directionValue === "bearish" ? "▼ BEARISH" : "• NEUTRAL");
+    const dirClass  = isPending ? "" : (directionValue === "bullish" ? "dir-bull" : directionValue === "bearish" ? "dir-bear" : "");
+    const suppressedBadge = p.suppressed
+      ? `<span class="badge-suppressed" title="Model has no reliable signal for this stock (≥10 predictions, &lt;40% accuracy). Treat with extreme caution.">⚠ SUPPRESSED</span> `
+      : "";
+    const earningsBadge = (p.days_to_earnings != null && p.days_to_earnings >= 0 && p.days_to_earnings <= 7)
+      ? `<span class="badge-earnings" title="Earnings in ${p.days_to_earnings} day${p.days_to_earnings !== 1 ? 's' : ''} — binary event, prediction is low-confidence">📅 EARNINGS ${p.days_to_earnings}d</span> `
+      : "";
     const confBadge = isPending
       ? `<span class="badge-pending">NOT ANALYSED</span>`
-      : `<span class="badge-${p.confidence || 'medium'}">${(p.confidence || 'medium').toUpperCase()}</span> <span class="${dirClass}">${direction}</span>`;
+      : `${suppressedBadge}${earningsBadge}<span class="badge-${p.confidence || 'medium'}">${(p.confidence || 'medium').toUpperCase()}</span> <span class="${dirClass}">${direction}</span>`;
+
+    // Factor badges
+    const fs = p.factor_scores || {};
+    const factorBadge = (label, key, title) => {
+      const val = fs[key];
+      if (val == null) return `<span class="factor-badge factor-na" title="${title}">—</span>`;
+      const cls = val >= 70 ? "factor-green" : val >= 45 ? "factor-amber" : "factor-red";
+      return `<span class="factor-badge ${cls}" title="${title}: ${val}/100">${label}<span class="factor-val">${val}</span></span>`;
+    };
+    const dcfMoS = p.dcf && p.dcf.margin_of_safety_pct != null
+      ? (() => { const v = p.dcf.margin_of_safety_pct; const cls = v >= 0 ? "change-pos" : "change-neg"; return `<span class="${cls}" title="MoS (Margin of Safety) — DCF intrinsic value vs current price. ▲ = undervalued (upside), ▼ = overvalued (priced above intrinsic value). Null = suppressed when earnings are negative or cash flows are distorted.">${v >= 0 ? "▲" : "▼"}${Math.abs(v).toFixed(0)}%</span>`; })()
+      : "";
+    // Sub-score detail line
+    const subScores = (() => {
+      const parts = [];
+      if (fs._rsi != null)            parts.push(`<span title="RSI (Relative Strength Index) — measures overbought/oversold momentum. >70 = overbought, <30 = oversold, 40–60 = neutral.">RSI ${fs._rsi.toFixed(0)}</span>`);
+      if (fs._52w_position != null)   parts.push(`<span title="52-Week Position — where the price sits between its 52-week low and high. 100% = at the high, 0% = at the low, 50% = midpoint.">52w ${fs._52w_position.toFixed(0)}%</span>`);
+      if (fs._price_vs_50sma != null) parts.push(`<span title="Price vs 50-Day SMA (Simple Moving Average) — how far above (+) or below (−) the stock is trading relative to its 50-day average. Positive = bullish trend, negative = bearish.">SMA ${fs._price_vs_50sma >= 0 ? "+" : ""}${fs._price_vs_50sma.toFixed(1)}%</span>`);
+      if (fs._fcf_yield != null)      parts.push(`<span title="FCF Yield (Free Cash Flow Yield) — free cash generated as a % of the stock price. >8% = strong, <3% = weak/expensive, negative = cash burn.">FCF ${fs._fcf_yield.toFixed(1)}%</span>`);
+      return parts.length ? `<div class="factor-subscores">${parts.join(" · ")}</div>` : "";
+    })();
 
     return `
       <tr>
         <td>${p.date}</td>
         <td><strong>${p.ticker}</strong></td>
         <td style="color:var(--text-muted);font-size:0.85rem">${safe(p.name || "—")}</td>
-        <td>${predStr}</td>
+        <td>${scoreStr}</td>
+        <td class="factor-cell">${factorBadge("V","value","Value — P/E, P/B, EV/EBITDA, FCF yield, PEG ratio. High score = stock is cheap vs fundamentals")}${factorBadge("M","momentum","Momentum — RSI, 52-week position, price vs 50-day SMA, 5-day change. High score = bullish trend")}${factorBadge("Q","quality","Quality — ROE, gross & net margin, debt/equity, current ratio. High score = strong balance sheet")}${factorBadge("G","growth","Growth — revenue growth, EPS growth, fwd P/E trend, operating margin. High score = accelerating earnings")}${factorBadge("⊕","composite","Composite — average of Value + Momentum + Quality + Growth. Single headline score to compare stocks. ≥70 = broad conviction across all pillars")}${dcfMoS ? `<br><span style="font-size:0.75rem">${dcfMoS} MoS</span>` : ""}${subScores}</td>
+        <td>${fmtProjectedPct(p.predicted_3m_pct)}</td>
+        <td>${fmtProjectedPct(p.predicted_6m_pct)}</td>
+        <td>${fmtProjectedPct(p.predicted_12m_pct)}</td>
+        <td>${fmtProjectedPct(p.predicted_24m_pct)}</td>
+        <td>${fmtProjectedPct(p.predicted_36m_pct)}</td>
         <td>${actualStr}</td>
         <td>${varianceStr}</td>
         <td>${resultStr}</td>
@@ -627,6 +1607,56 @@ function renderPredictionsTable(preds) {
       </tr>
     `;
   }).join("");
+
+  body.querySelectorAll("tr").forEach((row, index) => {
+    const p = preds[index];
+    if (!p) return;
+    const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
+    const cell = row.lastElementChild;
+    if (!cell) return;
+    cell.className = "pred-reasoning-col";
+    cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`;
+  });
+  return body.innerHTML;
+}
+
+function openPredictionReasoning(rowKey) {
+  const item = predictionReasoningMap[rowKey];
+  if (!item) return;
+
+  const overlay = document.getElementById("pred-reasoning-overlay");
+  document.getElementById("pred-reasoning-title").textContent = `${item.ticker} thesis`;
+  document.getElementById("pred-reasoning-company").textContent = item.name || item.ticker;
+  document.getElementById("pred-reasoning-meta").innerHTML = `
+    <span>${safe(item.date)}</span>
+    <span>${safe((item.confidence || "pending").toUpperCase())}</span>
+    <span>${item.score != null ? `${item.score}/100 ${safe((item.direction || "pending").toUpperCase())}` : "Pending"}</span>
+    <span>${item.predicted_12m_pct != null ? `${item.predicted_12m_pct >= 0 ? "+" : ""}${Number(item.predicted_12m_pct).toFixed(2)}% 12M` : "12M pending"}</span>
+    <span>${item.actual_pct != null ? `${item.actual_pct >= 0 ? "+" : ""}${item.actual_pct.toFixed(2)}% actual` : "Actual pending"}</span>
+  `;
+  document.getElementById("pred-reasoning-body").textContent = item.reasoning || "No reasoning available.";
+  overlay.classList.remove("hidden");
+}
+
+document.getElementById("pred-reasoning-close").addEventListener("click", () => {
+  document.getElementById("pred-reasoning-overlay").classList.add("hidden");
+});
+
+document.getElementById("pred-reasoning-overlay").addEventListener("click", e => {
+  if (e.target === document.getElementById("pred-reasoning-overlay")) {
+    document.getElementById("pred-reasoning-overlay").classList.add("hidden");
+  }
+});
+
+function openRecReasoning(key) {
+  const item = recReasoningMap[key];
+  if (!item) return;
+  const overlay = document.getElementById("pred-reasoning-overlay");
+  document.getElementById("pred-reasoning-title").textContent = `${item.ticker} reasoning`;
+  document.getElementById("pred-reasoning-company").textContent = item.name || item.ticker;
+  document.getElementById("pred-reasoning-meta").innerHTML = `<span>${safe(item.type)}</span>`;
+  document.getElementById("pred-reasoning-body").textContent = item.reasoning || "No reasoning available.";
+  overlay.classList.remove("hidden");
 }
 
 function renderAccuracyBar(preds) {
@@ -635,23 +1665,29 @@ function renderAccuracyBar(preds) {
 
   if (completed.length === 0) {
     bar.classList.add("hidden");
-    return;
+    return { hidden: true, html: bar.innerHTML };
   }
 
   bar.classList.remove("hidden");
 
-  const correct = completed.filter(p => (p.predicted_pct > 0) === (p.actual_pct > 0)).length;
+  const classifyDirection = item => item.direction || (item.predicted_pct == null ? "pending" : (item.predicted_pct >= 0.35 ? "bullish" : item.predicted_pct <= -0.35 ? "bearish" : "neutral"));
+  const correct = completed.filter(p => {
+    const predictedDirection = classifyDirection(p);
+    const actualDirection = p.actual_pct >= 0.35 ? "bullish" : p.actual_pct <= -0.35 ? "bearish" : "neutral";
+    return predictedDirection === actualDirection;
+  }).length;
   const accPct = (correct / completed.length * 100).toFixed(0);
-  const avgPred = (completed.reduce((s, p) => s + p.predicted_pct, 0) / completed.length).toFixed(2);
+  const avgPred = (completed.reduce((s, p) => s + (p.score ?? (p.predicted_pct != null ? (50 + p.predicted_pct * 14) : 50)), 0) / completed.length).toFixed(0);
   const avgActual = (completed.reduce((s, p) => s + p.actual_pct, 0) / completed.length).toFixed(2);
 
   document.getElementById("acc-pct").textContent = accPct + "%";
   document.getElementById("acc-total").textContent = completed.length + " resolved";
-  document.getElementById("acc-avg-pred").textContent = (avgPred >= 0 ? "+" : "") + avgPred + "%";
+  document.getElementById("acc-avg-pred").textContent = avgPred + "/100";
   document.getElementById("acc-avg-actual").textContent = (avgActual >= 0 ? "+" : "") + avgActual + "%";
 
   const accEl = document.getElementById("acc-pct");
   accEl.style.color = accPct >= 60 ? "var(--green)" : accPct >= 40 ? "var(--accent)" : "var(--red)";
+  return { hidden: false, html: bar.innerHTML };
 }
 
 document.getElementById("btn-generate").addEventListener("click", async () => {
@@ -659,11 +1695,23 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
   const status = document.getElementById("pred-status");
 
   btn.disabled = true;
-  status.textContent = "Fetching macro data, news and fundamentals… this takes ~30 seconds.";
+  status.textContent = "Generating predictions from market data and fundamentals…";
+  showLoader("Consulting the oracle…");
 
   try {
     const res = await authFetch(`${API}/api/predictions/generate`, { method: "POST" });
-    const data = await res.json();
+    const rawText = await res.text();
+    let data = {};
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      throw new Error(rawText || `Predictions request failed (${res.status})`);
+    }
+
+    if (!res.ok) {
+      status.textContent = "Error: " + (data.detail || data.error || "Predictions request failed.");
+      return;
+    }
 
     if (data.detail) {
       status.textContent = "Error: " + data.detail;
@@ -676,15 +1724,20 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
       status.textContent = `Generated ${data.predictions.length} prediction(s) for today.`;
     }
 
-    loadPredictions();
+    invalidatePredictionsSnapshotCache();
+    loadPredictions(true);
   } catch (err) {
-    status.textContent = "Error: " + err.message + ". Is the backend running?";
+    status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
   } finally {
     btn.disabled = false;
+    hideLoader();
   }
 });
 
-document.getElementById("btn-refresh-preds").addEventListener("click", loadPredictions);
+document.getElementById("btn-refresh-preds").addEventListener("click", () => {
+  invalidatePredictionsSnapshotCache();
+  loadPredictions(true);
+});
 
 // ── Backtest ───────────────────────────────────────────────────
 
@@ -703,10 +1756,24 @@ document.getElementById("btn-backtest").addEventListener("click", async () => {
 
   try {
     const res  = await authFetch(`${API}/api/predictions/backtest`);
-    const data = await res.json();
+    const rawText = await res.text();
+    let data = {};
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      throw new Error(rawText || `Backtest request failed (${res.status})`);
+    }
+    if (!res.ok) {
+      status.textContent = data.detail || data.error || "Backtest request failed.";
+      return;
+    }
     status.textContent = "";
 
     const s = data.summary;
+    if (!s || typeof s.accuracy_pct !== "number") {
+      status.textContent = data.error || "Backtest could not produce results with the currently available market data.";
+      return;
+    }
     const accCls = s.accuracy_pct >= 60 ? "change-pos" : s.accuracy_pct >= 50 ? "" : "change-neg";
     summary.innerHTML = `
       <div class="acc-item"><span class="acc-label">Directional Accuracy</span><span class="acc-value ${accCls}">${s.accuracy_pct}%</span></div>
@@ -766,6 +1833,25 @@ document.getElementById("btn-backtest").addEventListener("click", async () => {
 
 let simChart = null;
 
+function setSimChartSize(size = "default") {
+  const wrap = document.getElementById("sim-chart-wrap");
+  if (!wrap) return;
+  wrap.classList.remove("sim-chart-wrap-compact", "sim-chart-wrap-default", "sim-chart-wrap-large");
+  wrap.classList.add(`sim-chart-wrap-${size}`);
+
+  [["sim-size-compact", "compact"], ["sim-size-default", "default"], ["sim-size-large", "large"]].forEach(([id, key]) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.classList.toggle("active", key === size);
+  });
+
+  if (simChart) simChart.resize();
+}
+
+document.getElementById("sim-size-compact")?.addEventListener("click", () => setSimChartSize("compact"));
+document.getElementById("sim-size-default")?.addEventListener("click", () => setSimChartSize("default"));
+document.getElementById("sim-size-large")?.addEventListener("click", () => setSimChartSize("large"));
+
 document.getElementById("btn-simulate").addEventListener("click", async () => {
   const btn    = document.getElementById("btn-simulate");
   const status = document.getElementById("sim-status");
@@ -777,7 +1863,18 @@ document.getElementById("btn-simulate").addEventListener("click", async () => {
 
   try {
     const res  = await authFetch(`${API}/api/predictions/simulate`);
-    const data = await res.json();
+    const rawText = await res.text();
+    let data = {};
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      throw new Error(rawText || `Simulator request failed (${res.status})`);
+    }
+
+    if (!res.ok) {
+      status.textContent = data.detail || data.error || "Simulator request failed.";
+      return;
+    }
 
     if (data.error) { status.textContent = data.error; return; }
     status.textContent = "";
@@ -815,6 +1912,7 @@ document.getElementById("btn-simulate").addEventListener("click", async () => {
     const p90Path    = mc.sample_paths[9] || [];
 
     if (simChart) simChart.destroy();
+    setSimChartSize("default");
     const ctx = document.getElementById("sim-chart").getContext("2d");
     simChart = new Chart(ctx, {
       type: "line",
@@ -828,6 +1926,7 @@ document.getElementById("btn-simulate").addEventListener("click", async () => {
       },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         plugins: {
           legend: { labels: { color: "#e8eaf0" } },
           tooltip: {
@@ -865,14 +1964,84 @@ document.getElementById("btn-simulate").addEventListener("click", async () => {
 
 async function loadRecommendations() {
   const status = document.getElementById("rec-status");
-  status.textContent = "Loading recommendations…";
+  const fmtEta = ms => {
+    if (ms <= 0) return "0s";
+    if (ms < 1000) return "<1s";
+    return `${Math.round(ms / 1000)}s`;
+  };
+  status.innerHTML = `
+    <span class="status-loading status-loading-rec">
+      <span class="status-signal" aria-hidden="true">
+        <span class="status-signal-bar"></span>
+        <span class="status-signal-bar"></span>
+        <span class="status-signal-bar"></span>
+      </span>
+      <span class="status-loading-copy">
+        <span id="rec-status-text">Starting recommendations…</span>
+        <span class="status-progress-row">
+          <span class="status-progress-track"><span id="rec-progress-fill" class="status-progress-fill"></span></span>
+          <span id="rec-progress-pct" class="status-progress-pct">0%</span>
+        </span>
+        <span id="rec-status-subtext" class="status-subtext">Preparing estimate…</span>
+      </span>
+    </span>
+  `;
+  const recStatusText = document.getElementById("rec-status-text");
+  const recStatusSubtext = document.getElementById("rec-status-subtext");
+  const recProgressFill = document.getElementById("rec-progress-fill");
+  const recProgressPct = document.getElementById("rec-progress-pct");
+  let pollTimer = null;
   try {
-    const res  = await authFetch(`${API}/api/recommendations`);
-    const data = await res.json();
+    const startRes = await authFetch(`${API}/api/recommendations/start`, { method: "POST" });
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.detail || "Could not start recommendations.");
+    const jobId = startData.job_id;
+    if (!jobId) throw new Error("No recommendation job id returned.");
+
+    const data = await new Promise((resolve, reject) => {
+      pollTimer = setInterval(async () => {
+        try {
+          const progressRes = await authFetch(`${API}/api/recommendations/progress/${jobId}`);
+          const progress = await progressRes.json();
+          if (!progressRes.ok) {
+            reject(new Error(progress.detail || "Could not load recommendation progress."));
+            return;
+          }
+          if (recStatusText) recStatusText.textContent = progress.message || "Loading recommendations…";
+          if (recProgressFill) recProgressFill.style.width = `${Math.max(0, Math.min(100, progress.percent || 0))}%`;
+          if (recProgressPct) recProgressPct.textContent = `${Math.max(0, Math.min(100, progress.percent || 0))}%`;
+          if (recStatusSubtext) {
+            const elapsedMs = progress.elapsed_ms || 0;
+            const remainingMs = progress.remaining_ms || 0;
+            if (progress.status === "running" && remainingMs <= 0) {
+              const progressCounts = progress.total ? ` • ${progress.completed || 0}/${progress.total}` : "";
+              recStatusSubtext.textContent = `Elapsed ${fmtEta(elapsedMs)}${progressCounts} • Finalizing… this is taking longer than usual`;
+            } else {
+              const progressCounts = progress.total ? ` • ${progress.completed || 0}/${progress.total}` : "";
+              recStatusSubtext.textContent = `Elapsed ${fmtEta(elapsedMs)}${progressCounts} • About ${fmtEta(remainingMs)} remaining`;
+            }
+          }
+          if (progress.status === "completed") {
+            clearInterval(pollTimer);
+            resolve(progress.result || {});
+            return;
+          }
+          if (progress.status === "error") {
+            clearInterval(pollTimer);
+            reject(new Error(progress.error || "Recommendations failed."));
+          }
+        } catch (err) {
+          clearInterval(pollTimer);
+          reject(err);
+        }
+      }, 900);
+    });
     status.textContent = "";
     renderRecommendations(data);
   } catch (err) {
-    status.textContent = "Error: " + err.message;
+    status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
+  } finally {
+    if (pollTimer) clearInterval(pollTimer);
   }
 }
 
@@ -914,11 +2083,19 @@ function renderRecommendations(data) {
   if (sells.length > 0) {
     sellsWrap.classList.remove("hidden");
     sellsBody.innerHTML = sells.map(s => {
+      const key = `sell__${s.ticker}`;
+      recReasoningMap[key] = { ticker: s.ticker, name: s.name, type: "Sell", reasoning: s.reasoning };
       const pnlCls   = s.unrealised_pnl >= 0 ? "change-pos" : "change-neg";
-      const predStr  = s.predicted_pct != null ? `<span class="${s.predicted_pct >= 0 ? "change-pos" : "change-neg"}">${s.predicted_pct >= 0 ? "+" : ""}${s.predicted_pct.toFixed(2)}%</span>` : "—";
+      const predStr  = s.score_value != null ? `<span class="${s.score_value >= 61 ? "change-pos" : s.score_value <= 39 ? "change-neg" : ""}">${s.score_value}/100 ${safe((s.direction || "neutral").toUpperCase())}</span>` : "—";
       const trigCls  = s.trigger === "STOP LOSS" ? "badge-low" : s.trigger === "TAKE PROFIT" ? "badge-high" : "badge-medium";
+      const fs = s.factor_scores || {};
+      const riskParts = [];
+      if (s.annualised_vol_pct != null) riskParts.push(`Vol: ${s.annualised_vol_pct.toFixed(0)}%`);
+      if (s.max_drawdown_pct != null) riskParts.push(`DD: ${s.max_drawdown_pct.toFixed(0)}%`);
+      if (fs.quality != null) riskParts.push(`Quality: ${fs.quality}/100`);
+      const riskCtx = riskParts.length ? `<div class="rec-risk-ctx">${riskParts.join(" · ")}</div>` : "";
       return `<tr>
-        <td><strong>${safe(s.ticker)}</strong></td>
+        <td><strong>${safe(s.ticker)}</strong>${riskCtx}</td>
         <td style="color:var(--text-muted);font-size:0.85rem">${safe(s.name)}</td>
         <td><span class="${trigCls}">${safe(s.trigger)}</span></td>
         <td>${s.qty}</td>
@@ -926,7 +2103,8 @@ function renderRecommendations(data) {
         <td><strong>${fmt(s.estimated_proceeds)}</strong></td>
         <td><span class="${pnlCls}">${s.unrealised_pnl >= 0 ? "+" : ""}${fmt(s.unrealised_pnl)} (${s.unrealised_pct >= 0 ? "+" : ""}${s.unrealised_pct.toFixed(1)}%)</span></td>
         <td>${predStr}</td>
-        <td class="reasoning-cell">${safe(s.reasoning)}</td>
+        <td><button class="btn-reasoning" onclick="openRecReasoning('${key}')">View</button></td>
+        <td><button class="btn-paper-sell" onclick="paperTrade(this,'sell','${safe(s.ticker)}',${s.qty},${s.current_price})">− Paper Sell</button></td>
       </tr>`;
     }).join("");
   } else {
@@ -939,18 +2117,33 @@ function renderRecommendations(data) {
   if (buys.length > 0) {
     buysWrap.classList.remove("hidden");
     buysBody.innerHTML = buys.map((b, i) => {
+      const key = `buy__${b.ticker}`;
+      recReasoningMap[key] = { ticker: b.ticker, name: b.name, type: "Buy", reasoning: b.reasoning };
       const accStr = b.accuracy_pct != null ? `${b.accuracy_pct}%` : "<span style='color:var(--text-muted)'>No data</span>";
+      const fs = b.factor_scores || {};
+      const factorLine = (label, key2, title) => {
+        const v = fs[key2];
+        if (v == null) return "";
+        const cls = v >= 70 ? "factor-green" : v >= 45 ? "factor-amber" : "factor-red";
+        return `<span class="factor-badge ${cls}" title="${title}: ${v}/100">${label}:${v}</span>`;
+      };
+      const dcfMoS = b.dcf && b.dcf.margin_of_safety_pct != null
+        ? (() => { const v = b.dcf.margin_of_safety_pct; return `<span class="${v >= 0 ? "change-pos" : "change-neg"}" title="DCF Margin of Safety">DCF:${v >= 0 ? "▲" : "▼"}${Math.abs(v).toFixed(0)}%</span>`; })()
+        : "";
+      const volStr = b.annualised_vol_pct != null ? `<span title="Annualised Volatility">Vol:${b.annualised_vol_pct.toFixed(0)}%</span>` : "";
+      const factorBar = [factorLine("V","value","Value"), factorLine("M","momentum","Momentum"), factorLine("Q","quality","Quality"), factorLine("G","growth","Growth"), dcfMoS, volStr].filter(Boolean).join(" ");
       return `<tr>
         <td style="color:var(--text-muted)">#${i + 1}</td>
-        <td><strong>${safe(b.ticker)}</strong></td>
+        <td><strong>${safe(b.ticker)}</strong>${factorBar ? `<div class="rec-factor-bar">${factorBar}</div>` : ""}</td>
         <td style="color:var(--text-muted);font-size:0.85rem">${safe(b.name)}</td>
         <td><span class="badge-${b.confidence}">${b.confidence.toUpperCase()}</span></td>
         <td>${accStr}</td>
-        <td><span class="change-pos">+${b.predicted_pct.toFixed(2)}%</span></td>
+        <td><span class="${b.score_value >= 61 ? "change-pos" : ""}">${b.score_value}/100 ${safe((b.direction || "bullish").toUpperCase())}</span></td>
         <td>${fmt(b.current_price)}</td>
         <td><strong>${b.qty}</strong></td>
         <td><strong>${fmt(b.estimated_cost)}</strong></td>
-        <td class="reasoning-cell">${safe(b.reasoning)}</td>
+        <td><button class="btn-reasoning" onclick="openRecReasoning('${key}')">View</button></td>
+        <td><button class="btn-paper-buy" onclick="paperTrade(this,'buy','${safe(b.ticker)}',${b.qty},${b.current_price})">+ Paper Buy</button></td>
       </tr>`;
     }).join("");
   } else {
@@ -966,24 +2159,186 @@ function renderRecommendations(data) {
 
 document.getElementById("btn-load-recs").addEventListener("click", loadRecommendations);
 
+// ── Paper Portfolio ───────────────────────────────────────────
+
+function fmtGbp(n) {
+  if (n == null) return "—";
+  return (n < 0 ? "-" : "") + "£" + Math.abs(n).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function loadPaperPortfolio() {
+  const status = document.getElementById("paper-status");
+  status.textContent = "Loading…";
+  try {
+    const res  = await authFetch(`${API}/api/paper-portfolio`);
+    const data = await res.json();
+    status.textContent = "";
+    renderPaperPortfolio(data);
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  }
+}
+
+function renderPaperPortfolio(data) {
+  const summary    = data.summary    || {};
+  const positions  = data.positions  || [];
+  const txs        = data.transactions || [];
+  const empty      = document.getElementById("paper-empty");
+  const summaryEl  = document.getElementById("paper-summary");
+
+  // Summary bar
+  const pnl    = summary.total_pnl ?? 0;
+  const pnlPct = summary.total_pnl_pct ?? 0;
+  const pnlCls = pnl >= 0 ? "change-pos" : "change-neg";
+  const rlsCls = (summary.realised_pnl ?? 0) >= 0 ? "change-pos" : "change-neg";
+
+  document.getElementById("paper-cash").textContent     = fmtGbp(summary.cash);
+  document.getElementById("paper-invested").textContent = fmtGbp(summary.total_invested);
+  document.getElementById("paper-total").textContent    = fmtGbp(summary.total_value);
+
+  const unrealised = (summary.total_value ?? 0) - (summary.cash ?? 0) - (summary.total_invested ?? 0);
+  document.getElementById("paper-unrealised").innerHTML =
+    `<span class="${unrealised >= 0 ? "change-pos" : "change-neg"}">${fmtGbp(unrealised)}</span>`;
+  document.getElementById("paper-realised").innerHTML =
+    `<span class="${rlsCls}">${fmtGbp(summary.realised_pnl)}</span>`;
+  document.getElementById("paper-pnl").innerHTML =
+    `<span class="${pnlCls}">${fmtGbp(pnl)} (${pnl >= 0 ? "+" : ""}${pnlPct}%)</span>`;
+
+  summaryEl.classList.remove("hidden");
+
+  // Positions table
+  const posWrap    = document.getElementById("paper-positions-wrap");
+  const posHeading = document.getElementById("paper-positions-heading");
+  const posBody    = document.getElementById("paper-positions-body");
+  if (positions.length > 0) {
+    posHeading.style.display = "";
+    posWrap.style.display    = "";
+    posBody.innerHTML = positions.map(p => {
+      const uCls = p.unrealised_pnl >= 0 ? "change-pos" : "change-neg";
+      const rCls = p.realised_pnl  >= 0 ? "change-pos" : "change-neg";
+      return `<tr>
+        <td><strong>${safe(p.ticker)}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${safe(p.name)}</td>
+        <td>${p.shares}</td>
+        <td>${fmtGbp(p.avg_cost)}</td>
+        <td>${fmtGbp(p.current_price)}</td>
+        <td>${fmtGbp(p.cost_basis)}</td>
+        <td>${fmtGbp(p.current_value)}</td>
+        <td><span class="${uCls}">${fmtGbp(p.unrealised_pnl)}</span></td>
+        <td><span class="${uCls}">${p.unrealised_pct >= 0 ? "+" : ""}${p.unrealised_pct}%</span></td>
+        <td><span class="${rCls}">${fmtGbp(p.realised_pnl)}</span></td>
+      </tr>`;
+    }).join("");
+  } else {
+    posHeading.style.display = "none";
+    posWrap.style.display    = "none";
+  }
+
+  // Trade history
+  const histWrap    = document.getElementById("paper-history-wrap");
+  const histHeading = document.getElementById("paper-history-heading");
+  const histBody    = document.getElementById("paper-history-body");
+  if (txs.length > 0) {
+    histHeading.style.display = "";
+    histWrap.style.display    = "";
+    histBody.innerHTML = txs.map(tx => {
+      const typeCls = tx.type === "buy" ? "paper-trade-type-buy" : "paper-trade-type-sell";
+      const value   = (tx.qty || 0) * (tx.price || 0);
+      return `<tr>
+        <td>${safe(tx.date)}</td>
+        <td><span class="${typeCls}">${tx.type.toUpperCase()}</span></td>
+        <td><strong>${safe(tx.ticker)}</strong></td>
+        <td>${tx.qty}</td>
+        <td>${fmtGbp(tx.price)}</td>
+        <td>${fmtGbp(value)}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    histHeading.style.display = "none";
+    histWrap.style.display    = "none";
+  }
+
+  empty.style.display = (positions.length === 0 && txs.length === 0) ? "" : "none";
+}
+
+async function paperTrade(btn, type, ticker, qty, price) {
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = type === "buy" ? "Buying…" : "Selling…";
+  try {
+    const res = await authFetch(`${API}/api/paper-portfolio/${type}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, qty, price }),
+    });
+    let data = {};
+    try { data = await res.json(); } catch {}
+    if (!res.ok) {
+      alert("Paper trade failed: " + (data.detail || `HTTP ${res.status}`));
+      btn.textContent = origText;
+      btn.disabled = false;
+      return;
+    }
+    btn.textContent = type === "buy" ? "✓ Bought" : "✓ Sold";
+    btn.style.opacity = "0.6";
+    // Always refresh paper portfolio data
+    loadPaperPortfolio();
+    // Switch to paper tab so user sees the result
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    const paperBtn = document.querySelector('.tab-btn[data-tab="paper"]');
+    if (paperBtn) paperBtn.classList.add("active");
+    document.getElementById("tab-paper")?.classList.add("active");
+  } catch (err) {
+    alert("Error: " + err.message);
+    btn.textContent = origText;
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-refresh-paper").addEventListener("click", loadPaperPortfolio);
+
+document.getElementById("btn-reset-paper").addEventListener("click", async () => {
+  if (!confirm("Reset your entire paper portfolio back to £100,000? This cannot be undone.")) return;
+  try {
+    await authFetch(`${API}/api/paper-portfolio/reset`, { method: "DELETE" });
+    loadPaperPortfolio();
+  } catch (err) {
+    document.getElementById("paper-status").textContent = "Reset failed: " + err.message;
+  }
+});
+
 // ── Alerts ────────────────────────────────────────────────────
 
 async function loadAlerts() {
   const status = document.getElementById("alerts-status");
   status.textContent = "Loading…";
   try {
-    const [alertsRes, statusRes] = await Promise.all([
+    const [alertsRes, statusRes, settingsRes] = await Promise.all([
       authFetch(`${API}/api/alerts`),
       authFetch(`${API}/api/alerts/status`),
+      authFetch(`${API}/api/settings`),
     ]);
     const alerts = await alertsRes.json();
     const monStatus = await statusRes.json();
+    const settings = await settingsRes.json();
     status.textContent = "";
     renderMonitorBar(monStatus);
     renderAlertsTable(alerts);
+    populateAlertSettings(settings);
   } catch (err) {
     status.textContent = "Error loading alerts. Is the backend running?";
   }
+}
+
+function populateAlertSettings(s) {
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
+  set("as-price-swing", s.alert_price_swing_pct);
+  set("as-cooldown",    s.alert_cooldown_hours);
+  set("as-top-buys",    s.alert_top_buys);
+  set("as-top-sells",   s.alert_top_sells);
+  set("as-buy-score",   s.alert_buy_min_score);
+  set("as-sell-score",  s.alert_sell_max_score);
 }
 
 function renderMonitorBar(s) {
@@ -1001,7 +2356,7 @@ function renderMonitorBar(s) {
     s.notifications.email ? '<span class="mon-ok">✓ On</span>' : '<span class="mon-off">✗ Off</span>';
   document.getElementById("mon-sms").innerHTML =
     s.notifications.sms ? '<span class="mon-ok">✓ On</span>' : '<span class="mon-off">✗ Off</span>';
-  document.getElementById("mon-swing").textContent = s.thresholds.daily_swing_pct + "%";
+  document.getElementById("mon-swing").textContent = s.strategy?.focus || "Strong BUY and SELL signals";
 }
 
 function renderAlertsTable(alerts) {
@@ -1016,27 +2371,42 @@ function renderAlertsTable(alerts) {
   empty.classList.remove("visible");
 
   body.innerHTML = alerts.map(a => {
-    const time = new Date(a.timestamp).toLocaleString();
-    const signals = a.signals || [];
-    const primarySignal = signals[0] || {};
-    const allSignals = signals.map(s =>
-      `<span class="signal-tag signal-${s.type}">${safe(s.signal)}</span>`
-    ).join(" ");
-    const type = signals.map(s => SIGNAL_LABELS[s.type] || s.type).join(", ");
+    const dt = new Date(a.timestamp);
+    const dateStr = dt.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
+    const timeStr = dt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
-    const changePct = primarySignal.change_pct;
-    const priceHtml = `$${a.price?.toFixed(2) ?? "—"}` +
-      (changePct != null ? ` <span class="${changePct >= 0 ? "change-pos" : "change-neg"}">${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%</span>` : "");
+    // Message: use stored message field, fall back to building from legacy fields
+    let message = a.message || "";
+    if (!message) {
+      const signals = a.signals || [];
+      const sig = signals[0] || {};
+      const action = a.action || "";
+      const ticker = a.ticker ? `${a.ticker}${a.name ? " (" + a.name + ")" : ""}` : "";
+      message = [action, ticker, sig.signal].filter(Boolean).join(" — ");
+    }
+
+    // Channels: use stored channels array, fall back to legacy notified_* booleans
+    let channels = a.channels;
+    if (!channels || channels.length === 0) {
+      channels = [];
+      if (a.notified_email) channels.push("Email");
+      if (a.notified_sms)   channels.push("WhatsApp");
+      if (channels.length === 0) channels.push("Log only");
+    }
+    const channelBadges = channels.map(ch => {
+      const cls = ch === "WhatsApp" ? "badge-whatsapp" : ch === "Email" ? "badge-email" : "badge-log";
+      return `<span class="alert-channel-badge ${cls}">${safe(ch)}</span>`;
+    }).join(" ");
+
+    // Trigger
+    const trigger = a.trigger || (a.signals?.[0]?.type ? (SIGNAL_LABELS[a.signals[0].type] || a.signals[0].type) : "—");
 
     return `
       <tr>
-        <td style="white-space:nowrap;font-size:0.82rem">${time}</td>
-        <td><strong>${safe(a.ticker)}</strong><br><span style="color:var(--text-muted);font-size:0.78rem">${safe(a.name || "")}</span></td>
-        <td>${priceHtml}</td>
-        <td>${allSignals}</td>
-        <td style="font-size:0.82rem;color:var(--text-muted)">${type}</td>
-        <td class="${a.notified_email ? "notif-yes" : "notif-no"}">${a.notified_email ? "✓ Sent" : "—"}</td>
-        <td class="${a.notified_sms ? "notif-yes" : "notif-no"}">${a.notified_sms ? "✓ Sent" : "—"}</td>
+        <td style="white-space:nowrap;font-size:0.82rem"><strong>${dateStr}</strong><br><span style="color:var(--text-muted)">${timeStr}</span></td>
+        <td style="font-size:0.82rem;max-width:340px">${safe(message)}</td>
+        <td style="white-space:nowrap">${channelBadges}</td>
+        <td style="font-size:0.82rem;color:var(--text-muted);max-width:220px">${safe(trigger)}</td>
       </tr>
     `;
   }).join("");
@@ -1050,7 +2420,7 @@ document.getElementById("btn-test-alert").addEventListener("click", async () => 
   btn.disabled = true;
   status.textContent = "Sending test alert…";
   try {
-    const res = await authFetch(`${API}/api/alerts/test`, { method: "POST" });
+    const res = await authFetch(`${API}/api/alerts/test-preview`, { method: "POST" });
     const data = await res.json();
     const parts = [];
     if (data.email_sent) parts.push("Email sent ✓");
@@ -1071,6 +2441,35 @@ document.getElementById("btn-clear-alerts").addEventListener("click", async () =
   loadAlerts();
 });
 
+document.getElementById("btn-save-alert-settings").addEventListener("click", async () => {
+  const msg = document.getElementById("alert-settings-msg");
+  msg.className = "alert-settings-msg";
+  msg.textContent = "Saving…";
+  try {
+    // Fetch current settings first to preserve non-alert fields (initial_float etc.)
+    const existing = await (await authFetch(`${API}/api/settings`)).json();
+    const updated = {
+      ...existing,
+      alert_price_swing_pct: parseFloat(document.getElementById("as-price-swing").value),
+      alert_cooldown_hours:  parseFloat(document.getElementById("as-cooldown").value),
+      alert_top_buys:        parseInt(document.getElementById("as-top-buys").value, 10),
+      alert_top_sells:       parseInt(document.getElementById("as-top-sells").value, 10),
+      alert_buy_min_score:   parseInt(document.getElementById("as-buy-score").value, 10),
+      alert_sell_max_score:  parseInt(document.getElementById("as-sell-score").value, 10),
+    };
+    await authFetch(`${API}/api/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updated),
+    });
+    msg.textContent = "Saved ✓";
+    setTimeout(() => { msg.textContent = ""; }, 3000);
+  } catch (err) {
+    msg.className = "alert-settings-msg error";
+    msg.textContent = "Error saving settings";
+  }
+});
+
 // ── Portfolio ─────────────────────────────────────────────────
 
 function pnlHtml(val) {
@@ -1078,6 +2477,11 @@ function pnlHtml(val) {
   const sign = val >= 0 ? "+" : "";
   const cls  = val >= 0 ? "change-pos" : "change-neg";
   return `<span class="${cls}">${sign}$${Math.abs(val).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>`;
+}
+
+function fmtUsd(val) {
+  if (val == null || Number.isNaN(Number(val))) return "—";
+  return "$" + Number(val).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 async function loadPortfolio() {
@@ -1094,22 +2498,21 @@ async function loadPortfolio() {
 
     const { positions, summary: s } = data;
 
-    if (!positions || positions.length === 0) {
-      body.innerHTML = "";
-      empty.classList.add("visible");
-      summary.classList.add("hidden");
-      return;
-    }
-
-    empty.classList.remove("visible");
     summary.classList.remove("hidden");
-
-    document.getElementById("port-invested").textContent    = "$" + s.total_invested.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    document.getElementById("port-current").textContent     = "$" + s.total_current_value.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    document.getElementById("port-invested").textContent    = fmtUsd(s.total_invested);
+    document.getElementById("port-current").textContent     = fmtUsd(s.total_current_value);
     document.getElementById("port-unrealised").innerHTML    = pnlHtml(s.total_unrealised_pnl);
     document.getElementById("port-realised").innerHTML      = pnlHtml(s.total_realised_pnl);
     const totalEl = document.getElementById("port-total");
     totalEl.innerHTML = pnlHtml(s.total_pnl);
+
+    if (!positions || positions.length === 0) {
+      body.innerHTML = "";
+      empty.classList.add("visible");
+      return;
+    }
+
+    empty.classList.remove("visible");
 
     body.innerHTML = positions.map(p => `
       <tr data-ticker="${p.ticker}">
@@ -1118,8 +2521,8 @@ async function loadPortfolio() {
         <td>${p.shares}</td>
         <td>$${p.avg_cost.toFixed(2)}</td>
         <td>$${p.current_price.toFixed(2)}</td>
-        <td>$${p.cost_basis.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-        <td>$${p.current_value.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+        <td>${fmtUsd(p.cost_basis)}</td>
+        <td>${fmtUsd(p.current_value)}</td>
         <td>${pnlHtml(p.unrealised_pnl)} <span style="color:var(--text-muted);font-size:0.78rem">(${p.unrealised_pct >= 0 ? "+" : ""}${p.unrealised_pct}%)</span></td>
         <td>${pnlHtml(p.realised_pnl)}</td>
       </tr>
@@ -1130,7 +2533,7 @@ async function loadPortfolio() {
     });
 
   } catch (err) {
-    status.textContent = "Error loading portfolio. Is the backend running?";
+    status.textContent = err?.message || "Error loading portfolio.";
   }
 }
 

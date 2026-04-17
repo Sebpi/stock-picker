@@ -1,0 +1,9 @@
+@echo off
+title StockPicker
+cd /d "%~dp0backend"
+echo Starting StockPicker Backend...
+start "StockPicker Backend" python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+echo Waiting for backend to start...
+timeout /t 3 /nobreak >nul
+echo Opening StockPicker in browser...
+start "" "http://localhost:8000"

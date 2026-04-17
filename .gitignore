@@ -10,3 +10,5 @@ backend/*.log
 __pycache__/
 *.pyc
 *.pyo
+.gstack/
+backend/.tmp_*
