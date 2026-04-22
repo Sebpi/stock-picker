@@ -140,7 +140,7 @@ RECOMMENDATION_INFO_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_INFO_
 RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HISTORY_TIMEOUT_SEC", "4.0")))
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
 PREDICTIONS_UNIVERSE_FILL_LIMIT = max(0, int(os.getenv("PREDICTIONS_UNIVERSE_FILL_LIMIT", "6")))
-PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "2048")))
+PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192")))
 
 def load_users() -> dict:
     if USERS_FILE.exists():
@@ -315,6 +315,13 @@ ALERT_COOLDOWN_FILE  = Path(__file__).parent / "alert_cooldown_state.json"
 
 PAPER_INITIAL_FLOAT = 200_000.0
 
+
+def get_paper_initial_float() -> float:
+    try:
+        return float(load_settings().get("initial_float", PAPER_INITIAL_FLOAT))
+    except Exception:
+        return PAPER_INITIAL_FLOAT
+
 def load_paper_portfolio() -> list[dict]:
     if PAPER_PORTFOLIO_FILE.exists():
         return json.loads(PAPER_PORTFOLIO_FILE.read_text())
@@ -381,7 +388,25 @@ FTSE250_TICKERS = [
     "SXS.L", "TRN.L", "TLW.L", "VCT.L", "VTY.L", "VSVS.L", "WKP.L", "WOSG.L",
 ]
 
-UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
+FTSE100_TICKERS = [
+    "AAL.L", "ABF.L", "ADM.L", "AHT.L", "ANTO.L", "AUTO.L", "AV.L", "AZN.L",
+    "BA.L", "BARC.L", "BATS.L", "BP.L", "BT-A.L", "CCEP.L", "CPG.L", "CRDA.L",
+    "DGE.L", "ENT.L", "EXPN.L", "FLTR.L", "FRES.L", "GSK.L", "HLMA.L", "HSBA.L",
+    "HSX.L", "IMB.L", "INF.L", "III.L", "IHG.L", "ITRK.L", "JD.L", "KGF.L",
+    "LAND.L", "LGEN.L", "LLOY.L", "LSEG.L", "MKS.L", "NG.L", "NWG.L", "OCDO.L",
+    "PHNX.L", "PRU.L", "PSH.L", "PSON.L", "REL.L", "RIO.L", "RKT.L", "RMV.L",
+    "RR.L", "SBRY.L", "SDR.L", "SHEL.L", "SMIN.L", "SMT.L", "SN.L", "SPX.L",
+    "SSE.L", "STAN.L", "SVT.L", "TSCO.L", "ULVR.L", "UU.L", "VOD.L", "WEIR.L",
+    "WTB.L",
+]
+
+SCREENER_EXTRA_TICKERS = [
+    "TSM", "BE", "ASML", "NVO", "SAP", "SHOP", "ARM", "RYCEY", "RKLB",
+]
+
+UNIVERSE = list(dict.fromkeys(
+    SP500_TICKERS + NASDAQ100_TICKERS + FTSE100_TICKERS + FTSE250_TICKERS + SCREENER_EXTRA_TICKERS
+))
 
 
 _WIKI_HEADERS = {
@@ -425,6 +450,40 @@ def _fetch_nasdaq100_from_wiki() -> list:
         logger.warning(f"Failed to fetch NASDAQ 100 from Wikipedia: {e}")
         return []
 
+
+def _fetch_ftse100_from_wiki() -> list:
+    try:
+        import pandas as pd
+        import requests
+        html = requests.get(
+            "https://en.wikipedia.org/wiki/FTSE_100_Index",
+            headers=_WIKI_HEADERS, timeout=15
+        ).text
+        tables = pd.read_html(io.StringIO(html), header=0)
+        for table in tables:
+            cols = {str(c).strip().lower(): c for c in table.columns}
+            symbol_col = cols.get("epic") or cols.get("ticker") or cols.get("symbol")
+            if not symbol_col:
+                continue
+            tickers = []
+            for raw in table[symbol_col].tolist():
+                ticker = str(raw).strip().upper()
+                if not ticker or ticker == "NAN":
+                    continue
+                if not ticker.endswith(".L"):
+                    ticker = f"{ticker}.L"
+                tickers.append(ticker)
+            if tickers:
+                return tickers
+        return []
+    except Exception as e:
+        logger.warning(f"Failed to fetch FTSE 100 from Wikipedia: {e}")
+        return []
+
+
+def _normalize_search_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
 TICKER_NAMES = {
     "AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation", "GOOGL": "Alphabet Inc.",
     "AMZN": "Amazon.com Inc.", "NVDA": "NVIDIA Corporation", "META": "Meta Platforms Inc.",
@@ -445,6 +504,10 @@ TICKER_NAMES = {
     "ISRG": "Intuitive Surgical Inc.", "GILD": "Gilead Sciences Inc.", "CI": "The Cigna Group",
     "TSM": "Taiwan Semiconductor Manufacturing Company Limited",
     "BE": "Bloom Energy Corporation",
+    "RR.L": "Rolls-Royce Holdings plc",
+    "RYCEY": "Rolls-Royce Holdings plc ADR",
+    "BT-A.L": "BT Group plc",
+    "SHEL.L": "Shell plc",
 }
 
 SEARCH_ALIASES = {
@@ -455,6 +518,13 @@ SEARCH_ALIASES = {
     "FACEBOOK": "META",
     "BLOOM ENERGY": "BE",
     "BLOOM": "BE",
+    "ROLLS ROYCE": "RR.L",
+    "ROLLS-ROYCE": "RR.L",
+    "ROLLSROYCE": "RR.L",
+    "ROLLS ROYCE HOLDINGS": "RR.L",
+    "ROLLS-ROYCE HOLDINGS": "RR.L",
+    "RYCEY": "RYCEY",
+    "RR.L": "RR.L",
 }
 
 MACRO_SYMBOLS = {
@@ -595,6 +665,85 @@ def legacy_predicted_pct(direction: str | None, score: Optional[float]) -> float
         return round(-magnitude, 2)
     return 0.0
 
+
+def direction_from_score(score: Optional[float]) -> str:
+    if score is None:
+        return "neutral"
+    if score >= 61:
+        return "bullish"
+    if score <= 39:
+        return "bearish"
+    return "neutral"
+
+
+def refine_prediction_signal(
+    raw_pct: Optional[float],
+    raw_direction: str | None,
+    score: Optional[float],
+    confidence: str,
+    stock_data: dict,
+) -> tuple[str, float]:
+    """
+    Separate direction from magnitude so weak or conflicting signals default to neutral
+    instead of producing spurious precise percentages.
+    """
+    llm_direction = (raw_direction or prediction_direction(raw_pct) or "neutral").lower()
+    score_direction = direction_from_score(score)
+    sentiment_score = float(stock_data.get("sentiment_score") or 0.0)
+    factors = stock_data.get("factor_scores") or {}
+    composite = float(factors.get("composite") or 50.0)
+    momentum = float(factors.get("momentum") or 50.0)
+    quality = float(factors.get("quality") or 50.0)
+    vol_pct = float(stock_data.get("annualised_vol_pct") or 0.0)
+    dte = stock_data.get("days_to_earnings")
+
+    quant_direction = "neutral"
+    if sentiment_score >= 0.35 and composite >= 55 and momentum >= 50:
+        quant_direction = "bullish"
+    elif sentiment_score <= -0.35 and composite <= 45 and momentum <= 50:
+        quant_direction = "bearish"
+
+    votes = [d for d in [llm_direction, score_direction, quant_direction] if d in {"bullish", "bearish", "neutral"}]
+    bullish_votes = votes.count("bullish")
+    bearish_votes = votes.count("bearish")
+    neutral_votes = votes.count("neutral")
+
+    final_direction = "neutral"
+    if bullish_votes >= 2:
+        final_direction = "bullish"
+    elif bearish_votes >= 2:
+        final_direction = "bearish"
+    elif neutral_votes >= 2:
+        final_direction = "neutral"
+    elif llm_direction == score_direction and llm_direction in {"bullish", "bearish"}:
+        final_direction = llm_direction
+
+    # Force weaker calls to neutral around major uncertainty or poor quality.
+    if quality < 35:
+        final_direction = "neutral"
+    if dte is not None and 0 <= int(dte) <= 7 and confidence == "low":
+        final_direction = "neutral"
+
+    if final_direction == "neutral":
+        return "neutral", 0.0
+
+    raw_magnitude = abs(float(raw_pct or 0.0))
+    score_magnitude = 0.0 if score is None else min(2.5, abs(float(score) - 50.0) / 18.0)
+    base_magnitude = max(raw_magnitude, score_magnitude)
+    conf_cap = {"low": 0.6, "medium": 1.2, "high": 2.0}.get((confidence or "medium").lower(), 1.0)
+    if composite >= 70 and momentum >= 60:
+        conf_cap += 0.2
+    if composite <= 40 or momentum <= 40:
+        conf_cap = min(conf_cap, 0.8)
+    if vol_pct >= 45:
+        conf_cap = min(conf_cap, 0.8)
+    if dte is not None and 0 <= int(dte) <= 7:
+        conf_cap = min(conf_cap, 0.5)
+
+    final_magnitude = min(max(base_magnitude, 0.35), conf_cap)
+    signed_pct = final_magnitude if final_direction == "bullish" else -final_magnitude
+    return final_direction, round(signed_pct, 2)
+
 PREDICTION_HORIZON_MONTHS = (3, 6, 12, 24, 36)
 
 def prediction_horizon_returns(
@@ -731,6 +880,8 @@ _predictions_cache: dict[str, object] = {
     "data": None,
 }
 _screen_universe_cache: dict[str, tuple[list[dict], datetime]] = {}
+_screen_loading: dict[str, bool] = {}          # pool_key -> True while background fetch is running
+_screen_partial: dict[str, list[dict]] = {}    # pool_key -> partial rows accumulated so far
 
 
 def invalidate_predictions_cache() -> None:
@@ -741,7 +892,7 @@ def invalidate_predictions_cache() -> None:
 
 def save_predictions(predictions: list[dict]):
     invalidate_predictions_cache()
-    _atomic_write(PREDICTIONS_FILE, json.dumps(predictions[:1000], indent=2))
+    _atomic_write(PREDICTIONS_FILE, json.dumps(predictions[-1000:], indent=2))
 
 
 _recommendation_jobs: dict[str, dict] = {}
@@ -1162,7 +1313,7 @@ def send_email(subject: str, body: str, to_email: Optional[str] = None) -> bool:
         return False
 
 
-def send_sms(message: str) -> bool:
+def send_whatsapp_message(message: str) -> dict:
     try:
         from twilio.rest import Client
         account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -1171,14 +1322,29 @@ def send_sms(message: str) -> bool:
         to_number   = os.getenv("TWILIO_TO_NUMBER", "")
 
         if not all([account_sid, auth_token, from_number, to_number]):
-            return False
+            return {"ok": False, "error": "Twilio WhatsApp is not fully configured."}
+
+        if not from_number.startswith("whatsapp:"):
+            from_number = f"whatsapp:{from_number}"
+        if not to_number.startswith("whatsapp:"):
+            to_number = f"whatsapp:{to_number}"
 
         client = Client(account_sid, auth_token)
-        client.messages.create(body=message[:1600], from_=from_number, to=to_number)
-        return True
+        msg = client.messages.create(body=message[:1600], from_=from_number, to=to_number)
+        return {
+            "ok": True,
+            "sid": getattr(msg, "sid", None),
+            "status": getattr(msg, "status", None),
+            "to": to_number,
+            "from": from_number,
+        }
     except Exception as e:
         print(f"[SMS] Failed: {e}")
-        return False
+        return {"ok": False, "error": str(e)}
+
+
+def send_sms(message: str) -> bool:
+    return bool(send_whatsapp_message(message).get("ok"))
 
 
 # ── Market hours helper ───────────────────────────────────────────────────────
@@ -1592,7 +1758,7 @@ async def monitor_stocks():
         sell_alerts = [a for a in pending_alerts if a.get("action") == "SELL"]
         subject, body, sms_body = _build_alert_email(buy_alerts, sell_alerts, time_str)
         emailed = send_email(subject, body)
-        texted  = False  # WhatsApp alerts only via sentiment agent (seismic Mag 7 events)
+        texted  = send_sms(sms_body[:1600])
 
         channels = []
         if emailed:
@@ -1668,17 +1834,23 @@ class ResetPasswordRequest(BaseModel):
 @app.on_event("startup")
 async def startup():
     # Refresh index constituent lists from Wikipedia
-    global SP500_TICKERS, NASDAQ100_TICKERS, UNIVERSE
+    global SP500_TICKERS, NASDAQ100_TICKERS, FTSE100_TICKERS, UNIVERSE
     loop = asyncio.get_event_loop()
     sp500   = await loop.run_in_executor(None, _fetch_sp500_from_wiki)
     nasdaq  = await loop.run_in_executor(None, _fetch_nasdaq100_from_wiki)
+    ftse100 = await loop.run_in_executor(None, _fetch_ftse100_from_wiki)
     if sp500:
         SP500_TICKERS = sp500
         logger.info(f"S&P 500 tickers refreshed from Wikipedia ({len(sp500)} stocks)")
     if nasdaq:
         NASDAQ100_TICKERS = nasdaq
         logger.info(f"NASDAQ 100 tickers refreshed from Wikipedia ({len(nasdaq)} stocks)")
-    UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
+    if ftse100:
+        FTSE100_TICKERS = ftse100
+        logger.info(f"FTSE 100 tickers refreshed from Wikipedia ({len(ftse100)} stocks)")
+    UNIVERSE = list(dict.fromkeys(
+        SP500_TICKERS + NASDAQ100_TICKERS + FTSE100_TICKERS + FTSE250_TICKERS + SCREENER_EXTRA_TICKERS
+    ))
 
     # Create default admin account on first run
     users = load_users()
@@ -1699,9 +1871,11 @@ async def startup():
 
     scheduler.add_job(monitor_stocks, "interval", minutes=5,  id="monitor")
     scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
+    scheduler.add_job(lambda: asyncio.create_task(prewarm_screener_cache(force=True)), "interval", hours=3, id="screener_prewarm")
     scheduler.start()
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
+    asyncio.create_task(prewarm_screener_cache())
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -1811,27 +1985,44 @@ async def search_stocks(q: str = ""):
     if not q or len(q) < 1:
         return []
     q_upper = q.upper()
+    q_norm = _normalize_search_text(q)
+    alias_target = SEARCH_ALIASES.get(q_upper)
+
+    def _is_query_match(ticker: str) -> bool:
+        lowered = ticker.lower()
+        name = str(TICKER_NAMES.get(ticker, ticker)).lower()
+        ticker_norm = _normalize_search_text(ticker)
+        name_norm = _normalize_search_text(name)
+        return (
+            q in lowered
+            or q in name
+            or q_norm in ticker_norm
+            or q_norm in name_norm
+            or alias_target == ticker
+        )
 
     def _search_rank(ticker: str) -> tuple[int, int, str]:
         lowered = ticker.lower()
         name = str(TICKER_NAMES.get(ticker, ticker)).lower()
-        alias_exact = SEARCH_ALIASES.get(q_upper) == ticker
-        if lowered == q:
+        ticker_norm = _normalize_search_text(ticker)
+        name_norm = _normalize_search_text(name)
+        alias_exact = alias_target == ticker
+        if lowered == q or ticker_norm == q_norm:
             return (0, len(ticker), ticker)
         if alias_exact:
             return (0, len(ticker), ticker)
-        if lowered.startswith(q):
+        if lowered.startswith(q) or ticker_norm.startswith(q_norm):
             return (1, len(ticker), ticker)
-        if name.startswith(q):
+        if name.startswith(q) or name_norm.startswith(q_norm):
             return (2, len(ticker), ticker)
+        if all(token in name for token in q.split() if token):
+            return (3, len(ticker), ticker)
         return (3, len(ticker), ticker)
 
     # Broad one-letter searches can fan out into dozens of yfinance calls, so cap them.
     matched = sorted((
         t for t in UNIVERSE
-        if q in t.lower()
-        or q in str(TICKER_NAMES.get(t, t)).lower()
-        or SEARCH_ALIASES.get(q_upper) == t
+        if _is_query_match(t)
     ), key=_search_rank)[:SEARCH_RESULTS_LIMIT]
     if not matched:
         return []
@@ -1895,6 +2086,71 @@ async def search_stocks(q: str = ""):
     return results
 
 
+async def _build_screener_row(ticker: str, info: dict) -> dict | None:
+    try:
+        market_cap     = info.get("marketCap")
+        pe             = info.get("trailingPE")
+        peg            = info.get("pegRatio")
+        pb             = info.get("priceToBook")
+        ev_ebitda      = info.get("enterpriseToEbitda")
+        fcf            = info.get("freeCashflow")
+        volume         = info.get("averageVolume")
+        price          = info.get("currentPrice") or info.get("regularMarketPrice")
+        name           = info.get("shortName", ticker)
+        stock_sector   = info.get("sector", "")
+        fcf_yield      = calc_fcf_yield(fcf, market_cap)
+        rev_growth_raw = info.get("revenueGrowth")
+        rev_growth     = round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None
+        return {
+            "ticker": ticker, "name": name, "sector": stock_sector,
+            "price": round(price, 2) if price else None,
+            "pe": round(pe, 2) if pe else None,
+            "peg": round(peg, 2) if peg else None,
+            "pb": round(pb, 2) if pb else None,
+            "ev_ebitda": round(ev_ebitda, 2) if ev_ebitda else None,
+            "fcf_yield": fcf_yield,
+            "rev_growth": rev_growth,
+            "market_cap": market_cap, "volume": volume,
+        }
+    except Exception:
+        return None
+
+
+async def _fetch_universe_bg(pool_key: str, pool: list[str]):
+    BATCH_SIZE = 25
+    try:
+        for i in range(0, len(pool), BATCH_SIZE):
+            batch = pool[i:i + BATCH_SIZE]
+            results = await asyncio.gather(
+                *[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in batch],
+                return_exceptions=True,
+            )
+            for ticker, info in zip(batch, results):
+                if isinstance(info, Exception) or not info:
+                    continue
+                row = await _build_screener_row(ticker, info)
+                if row:
+                    _screen_partial[pool_key].append(row)
+            if i + BATCH_SIZE < len(pool):
+                await asyncio.sleep(0.4)
+        _screen_universe_cache[pool_key] = (list(_screen_partial[pool_key]), datetime.now(timezone.utc))
+        logger.info("Screener cache warm: %d tickers loaded for pool '%s'", len(_screen_partial[pool_key]), pool_key)
+    finally:
+        _screen_loading[pool_key] = False
+
+
+async def prewarm_screener_cache(force: bool = False):
+    """Pre-warm the screener universe cache in the background."""
+    pool_key = "__all__"
+    if not force and (_screen_loading.get(pool_key) or _screen_universe_cache.get(pool_key)):
+        return
+    _screen_universe_cache.pop(pool_key, None)
+    _screen_loading[pool_key] = True
+    _screen_partial[pool_key] = []
+    logger.info("Pre-warming screener cache (%d tickers)…", len(UNIVERSE))
+    asyncio.create_task(_fetch_universe_bg(pool_key, UNIVERSE))
+
+
 @app.get("/api/screen")
 async def screen_stocks(
     index: Optional[str] = None,
@@ -1920,55 +2176,53 @@ async def screen_stocks(
     index_map = {
         "sp500": SP500_TICKERS,
         "nasdaq100": NASDAQ100_TICKERS,
+        "ftse100": FTSE100_TICKERS,
         "ftse250": FTSE250_TICKERS,
     }
     pool_key = index or "__all__"
     cached_universe = _screen_universe_cache.get(pool_key)
     now = datetime.now(timezone.utc)
-    if cached_universe and (now - cached_universe[1]).total_seconds() < 300:
+    loading = False
+
+    if cached_universe and (now - cached_universe[1]).total_seconds() < 1800:
         universe_rows = cached_universe[0]
     else:
         pool = index_map.get(index, UNIVERSE) if index else UNIVERSE
-        infos = await asyncio.gather(*[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in pool], return_exceptions=True)
-        universe_rows = []
-        for ticker, info in zip(pool, infos):
-            if isinstance(info, Exception):
-                continue
-            try:
-                stock_sector = info.get("sector", "")
-                market_cap   = info.get("marketCap")
-                pe           = info.get("trailingPE")
-                peg          = info.get("pegRatio")
-                pb           = info.get("priceToBook")
-                ev_ebitda    = info.get("enterpriseToEbitda")
-                fcf          = info.get("freeCashflow")
-                volume       = info.get("averageVolume")
-                price        = info.get("currentPrice") or info.get("regularMarketPrice")
-                name         = info.get("shortName", ticker)
-                fcf_yield    = calc_fcf_yield(fcf, market_cap)
-                rev_growth_raw = info.get("revenueGrowth")
-                rev_growth   = round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None
-                universe_rows.append({
-                    "ticker": ticker, "name": name, "sector": stock_sector,
-                    "price": round(price, 2) if price else None,
-                    "pe": round(pe, 2) if pe else None,
-                    "peg": round(peg, 2) if peg else None,
-                    "pb": round(pb, 2) if pb else None,
-                    "ev_ebitda": round(ev_ebitda, 2) if ev_ebitda else None,
-                    "fcf_yield": fcf_yield,
-                    "rev_growth": rev_growth,
-                    "market_cap": market_cap, "volume": volume,
-                })
-            except Exception:
-                continue
-        _screen_universe_cache[pool_key] = (universe_rows, now)
+
+        if _screen_loading.get(pool_key):
+            # Background fetch already running — return whatever has loaded so far
+            universe_rows = list(_screen_partial.get(pool_key, []))
+            loading = True
+        else:
+            # Kick off background progressive fetch; return first batch synchronously
+            _screen_loading[pool_key] = True
+            _screen_partial[pool_key] = []
+            asyncio.create_task(_fetch_universe_bg(pool_key, pool))
+            first_batch = pool[:25]
+            first_infos = await asyncio.gather(
+                *[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in first_batch],
+                return_exceptions=True,
+            )
+            first_rows = []
+            for ticker, info in zip(first_batch, first_infos):
+                if isinstance(info, Exception) or not info:
+                    continue
+                row = await _build_screener_row(ticker, info)
+                if row:
+                    first_rows.append(row)
+                    _screen_partial[pool_key].append(row)
+            universe_rows = first_rows
+            loading = True
 
     results = []
     q_norm = (q or "").strip().lower()
+    q_compact = _normalize_search_text(q_norm)
     for row in universe_rows:
         if q_norm:
-            ticker_match = q_norm in str(row.get("ticker", "")).lower()
-            name_match = q_norm in str(row.get("name", "")).lower()
+            ticker_text = str(row.get("ticker", "")).lower()
+            name_text = str(row.get("name", "")).lower()
+            ticker_match = q_norm in ticker_text or q_compact in _normalize_search_text(ticker_text)
+            name_match = q_norm in name_text or q_compact in _normalize_search_text(name_text)
             if not ticker_match and not name_match:
                 continue
         stock_sector = row.get("sector", "")
@@ -2015,7 +2269,7 @@ async def screen_stocks(
         if max_rev_growth is not None and (rev_growth is None or rev_growth > max_rev_growth):
             continue
         results.append(row)
-    return results
+    return {"results": results, "loading": loading, "loaded": len(universe_rows)}
 
 
 @app.get("/api/stock/{ticker}")
@@ -2247,12 +2501,49 @@ def _stock_research_impl(req: RecommendRequest):
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in .env")
     client = anthropic.Anthropic(api_key=api_key)
 
-    # Extract ticker from query if it looks like a ticker
+    # Extract ticker from query if it looks like a ticker or company name
     query = req.query.strip().upper()
     ticker_context = ""
-    
+
+    def _resolve_ticker(q: str) -> str | None:
+        """Try to resolve a company name or partial name to a ticker symbol."""
+        # Already looks like a ticker
+        if len(q) <= 5 and q.replace(".", "").isalnum():
+            return q
+        _STRIP_SUFFIXES = {"technologies", "technology", "inc", "corp", "corporation",
+                           "ltd", "limited", "group", "holdings", "co"}
+        # Try full query, then first word as fallback for multi-word names
+        attempts = [q]
+        if " " in q:
+            attempts.append(q.split()[0])
+        for attempt in attempts:
+            try:
+                results = yf.Search(attempt, max_results=1).quotes
+                if results:
+                    t = results[0].get("symbol", "")
+                    if t:
+                        return t.upper()
+            except Exception:
+                pass
+        # Strip trailing generic suffixes and retry
+        words = q.lower().split()
+        while words and words[-1] in _STRIP_SUFFIXES:
+            words.pop()
+            if not words:
+                break
+            try:
+                results = yf.Search(" ".join(words), max_results=1).quotes
+                if results:
+                    t = results[0].get("symbol", "")
+                    if t:
+                        return t.upper()
+            except Exception:
+                pass
+        return None
+
+    resolved = _resolve_ticker(query)
     # If it looks like a single ticker (1-5 characters, all letters/numbers), fetch live data
-    if len(query) <= 5 and query.replace(".", "").isalnum():
+    if resolved:
         import re as _re
         from datetime import datetime as _dt
 
@@ -2280,6 +2571,7 @@ def _stock_research_impl(req: RecommendRequest):
             except Exception:
                 return "N/A"
 
+        query = resolved  # use resolved ticker (e.g. "MU" even if user typed "Micron")
         lines = [f"## Live Market Data for {query} (as of {date.today()})"]
 
         # ── Core price & market data ─────────────────────────────────────────
@@ -2953,14 +3245,30 @@ async def _generate_predictions_impl():
     if suppressed_tickers:
         logger.info("SUPPRESSED tickers (>=10 predictions, <40%% accuracy): %s", sorted(suppressed_tickers))
 
-    # Watchlist stocks always get a prediction; UNIVERSE fills remaining slots
-    # Suppressed tickers are excluded from universe fill — no reliable signal
+    # Watchlist stocks always get a prediction; held portfolio positions always get one too
+    # so recommendations and P&L have signal. UNIVERSE fills remaining slots.
+    # Suppressed tickers are excluded from universe fill — no reliable signal.
     watchlist_missing = [t for t in watchlist_tickers if t not in already_predicted]
+
+    paper_positions = compute_positions(load_paper_portfolio())
+    real_positions  = compute_positions(load_portfolio())
+    held_tickers = list(dict.fromkeys(
+        [t for t, p in paper_positions.items() if p["shares"] > 0] +
+        [t for t, p in real_positions.items()  if p["shares"] > 0]
+    ))
+    held_missing = [
+        t for t in held_tickers
+        if t not in already_predicted and t not in watchlist_tickers
+    ]
+
+    covered = set(watchlist_tickers) | set(held_tickers)
     universe_fill = [
         t for t in UNIVERSE[:PREDICTIONS_UNIVERSE_FILL_LIMIT]
-        if t not in already_predicted and t not in watchlist_tickers and t not in suppressed_tickers
+        if t not in already_predicted and t not in covered and t not in suppressed_tickers
     ]
-    to_analyze = list(dict.fromkeys(watchlist_missing + universe_fill))[:max(len(watchlist_missing) + PREDICTIONS_UNIVERSE_FILL_LIMIT, 1)]
+    to_analyze = list(dict.fromkeys(watchlist_missing + held_missing + universe_fill))[
+        :max(len(watchlist_missing) + len(held_missing) + PREDICTIONS_UNIVERSE_FILL_LIMIT, 1)
+    ]
 
     if not to_analyze:
         if updated:
@@ -3400,11 +3708,20 @@ Rules:
         if raw_pct is None:
             raw_pct = legacy_predicted_pct(cp_direction, cp_score)
         cal     = calibration.get(ticker, {})
+        stock_data = stock_map.get(ticker, {})
+
+        base_direction, base_pct = refine_prediction_signal(
+            raw_pct,
+            cp_direction,
+            cp_score,
+            cp.get("confidence", "medium"),
+            stock_data,
+        )
 
         # 1. Bias correction — shift prediction by historical mean error
         bias         = cal.get("mean_bias", 0.0)
         bias_applied = abs(bias) >= 0.1   # only correct if systematic (>=0.1%)
-        corrected    = round(raw_pct + bias, 2) if bias_applied else raw_pct
+        corrected    = round(base_pct + bias, 2) if bias_applied else base_pct
 
         # 2. Signal inversion — flip direction if model has been consistently wrong
         inverted  = cal.get("inverted", False)
@@ -3422,14 +3739,14 @@ Rules:
         if is_suppressed:
             cal_note += f" [SUPPRESSED — {cal['accuracy_pct']}% accuracy over {cal['count']} predictions: treat with very low confidence]"
 
-        stock_data = stock_map.get(ticker, {})
         entry = {
             "date":               today,
             "ticker":             ticker,
             "name":               name_map.get(ticker, ""),
             "predicted_pct":      final_pct,
             "raw_predicted_pct":  raw_pct,
-            "direction":          cp_direction or prediction_direction(final_pct),
+            "model_predicted_pct": base_pct,
+            "direction":          prediction_direction(final_pct),
             "score":              cp_score if cp_score is not None else prediction_score(final_pct, cp.get("confidence", "medium")),
             "bias_correction":    round(bias, 3) if bias_applied else 0.0,
             "inverted":           inverted,
@@ -4092,6 +4409,24 @@ def get_monitor_status():
     }
 
 
+@app.get("/api/alerts/debug-snapshot")
+async def get_alert_debug_snapshot(current_user: str = Depends(get_current_user)):
+    _s = load_settings()
+    buy_limit = max(1, int(_s.get("alert_top_buys") or os.getenv("ALERT_TOP_BUYS", "3")))
+    sell_limit = max(1, int(_s.get("alert_top_sells") or os.getenv("ALERT_TOP_SELLS", "3")))
+    snapshot = await _build_recommendation_alert_snapshot(buy_limit=buy_limit, sell_limit=sell_limit)
+    return {
+        "user": current_user,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "buy_count": len(snapshot.get("buys", [])),
+        "sell_count": len(snapshot.get("sells", [])),
+        "buys": snapshot.get("buys", []),
+        "sells": snapshot.get("sells", []),
+        "whatsapp_for_recommendation_alerts": True,
+        "whatsapp_note": "Recommendation monitor will attempt WhatsApp delivery when Twilio is configured.",
+    }
+
+
 @app.post("/api/alerts/test")
 def test_alert():
     emailed = send_email(
@@ -4100,6 +4435,18 @@ def test_alert():
     )
     texted = send_sms("[TEST] StockPicker — notifications working! This is a TEST message.")
     return {"email_sent": emailed, "sms_sent": texted}
+
+
+@app.post("/api/alerts/test-whatsapp")
+def test_whatsapp_alert():
+    result = send_whatsapp_message("[TEST] StockPicker — WhatsApp notifications working. This is a dedicated WhatsApp test message.")
+    return {
+        "sms_sent": bool(result.get("ok")),
+        "sid": result.get("sid"),
+        "status": result.get("status"),
+        "error": result.get("error"),
+        "to": result.get("to"),
+    }
 
 
 @app.post("/api/alerts/test-preview")
@@ -4173,7 +4520,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
     paper_held       = {t for t, p in paper_positions.items() if p["shares"] > 0}
 
     # Paper cash remaining
-    paper_cash = PAPER_INITIAL_FLOAT
+    paper_cash = initial_float
     for tx in paper_txs:
         qty   = float(tx.get("qty", 0))
         price = float(tx.get("price", 0))
@@ -4338,7 +4685,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
         vol_adj = 30.0 / max(30.0, float(vol_pct))
         alloc_pct = alloc_pct * vol_adj
 
-        position_value = min(remaining_cash * alloc_pct, PAPER_INITIAL_FLOAT * 0.15)
+        position_value = min(remaining_cash * alloc_pct, initial_float * 0.15)
         qty = int(position_value / current_price)
         if qty < 1:
             continue
@@ -4414,7 +4761,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
             key=lambda item: (item[0], item[1].get("predicted_pct") or 0),
             reverse=True,
         )[:5]:
-            qty = int(min(remaining_cash * 0.04, PAPER_INITIAL_FLOAT * 0.08) / current_price)
+            qty = int(min(remaining_cash * 0.04, initial_float * 0.08) / current_price)
             if qty < 1:
                 continue
             estimated_cost = round(qty * current_price, 2)
@@ -4638,7 +4985,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
         "sells":           sells,
         "prediction_date": latest_date,
         "summary": {
-            "initial_float":         PAPER_INITIAL_FLOAT,
+            "initial_float":         initial_float,
             "target":                target,
             "target_months":         target_months,
             "available_cash":        round(float(portfolio_summary.get("available_cash") or paper_cash), 2),
@@ -4646,7 +4993,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
             "total_current_value":   round(float(portfolio_summary.get("total_current_value") or 0.0), 2),
             "cash_after_buys":       round(remaining_cash, 2),
             "total_portfolio_value": round(float(portfolio_summary.get("total_portfolio_value") or paper_total_value), 2),
-            "total_pnl":             round(float(portfolio_summary.get("total_pnl") or (paper_total_value - PAPER_INITIAL_FLOAT)), 2),
+            "total_pnl":             round(float(portfolio_summary.get("total_pnl") or (paper_total_value - initial_float)), 2),
             "progress_pct":          progress_pct,
             "remaining_to_target":   round(target - paper_total_value, 2),
         },
@@ -4802,14 +5149,16 @@ async def get_portfolio():
     transactions = load_portfolio()
     positions = compute_positions(transactions)
 
-    # Fetch current prices for all held tickers concurrently
+    # Fetch current prices for all held tickers concurrently (bust info cache for fresh P&L)
     held = [t for t, p in positions.items() if p["shares"] > 0]
+    for t in held:
+        _info_cache.pop(t, None)
     if held:
-        infos = await asyncio.gather(*[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
+        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
         price_map = {}
         for ticker, info in zip(held, infos):
             if not isinstance(info, Exception):
-                price_map[ticker] = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+                price_map[ticker] = _price_from_info_for_alerts(info)
     else:
         price_map = {}
 
@@ -5183,13 +5532,16 @@ PDF TEXT:
 
 @app.get("/api/paper-portfolio")
 async def get_paper_portfolio():
+    initial_float = get_paper_initial_float()
     transactions = load_paper_portfolio()
     positions    = compute_positions(transactions)
     held         = [t for t, p in positions.items() if p["shares"] > 0]
 
+    for t in held:
+        _info_cache.pop(t, None)
     if held:
-        infos = await asyncio.gather(*[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
-        price_map = {t: (i.get("currentPrice") or i.get("regularMarketPrice") or 0)
+        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
+        price_map = {t: _price_from_info_for_alerts(i)
                      for t, i in zip(held, infos) if not isinstance(i, Exception)}
     else:
         price_map = {}
@@ -5201,7 +5553,7 @@ async def get_paper_portfolio():
                 price_map[ticker] = fallback_price
 
     # Cash tracking: start at £100k, subtract buys, add sells
-    cash = PAPER_INITIAL_FLOAT
+    cash = initial_float
     for tx in transactions:
         qty   = float(tx.get("qty", 0))
         price = float(tx.get("price", 0))
@@ -5213,8 +5565,8 @@ async def get_paper_portfolio():
     total_current   = sum(positions[t]["shares"] * price_map.get(t, 0) for t in held)
     total_invested  = sum(positions[t]["shares"] * positions[t]["avg_cost"] for t in held)
     total_value     = cash + total_current
-    total_pnl       = total_value - PAPER_INITIAL_FLOAT
-    total_pnl_pct   = round(total_pnl / PAPER_INITIAL_FLOAT * 100, 2)
+    total_pnl       = total_value - initial_float
+    total_pnl_pct   = round(total_pnl / initial_float * 100, 2) if initial_float else 0.0
     realised_pnl    = sum(positions[t]["realised_pnl"] for t in positions)
 
     result = []
@@ -5242,7 +5594,7 @@ async def get_paper_portfolio():
         "positions": sorted(result, key=lambda x: x["ticker"]),
         "transactions": list(reversed(transactions[-50:])),
         "summary": {
-            "initial_float":   PAPER_INITIAL_FLOAT,
+            "initial_float":   initial_float,
             "cash":            round(cash, 2),
             "total_invested":  round(total_invested, 2),
             "total_value":     round(total_value, 2),
@@ -5253,10 +5605,115 @@ async def get_paper_portfolio():
     }
 
 
+@app.get("/api/portfolio/prices")
+async def get_portfolio_prices():
+    """Lightweight live-price endpoint for near-realtime polling."""
+    transactions = load_portfolio()
+    positions = compute_positions(transactions)
+    held = [t for t, p in positions.items() if p["shares"] > 0]
+    for t in held:
+        _info_cache.pop(t, None)
+    if held:
+        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
+        price_map = {t: _price_from_info_for_alerts(i) for t, i in zip(held, infos) if not isinstance(i, Exception)}
+    else:
+        return {"prices": {}, "totals": {}}
+    for t in held:
+        if not price_map.get(t):
+            price_map[t] = positions[t].get("avg_cost", 0) or 0
+    prices = {}
+    total_current_value = 0.0
+    total_cost_basis = 0.0
+    total_unrealised_pnl = 0.0
+    total_realised_pnl = sum(p["realised_pnl"] for p in positions.values())
+    for ticker, pos in positions.items():
+        if pos["shares"] <= 0:
+            continue
+        current_price = price_map.get(ticker) or pos["avg_cost"]
+        cost_basis = pos["shares"] * pos["avg_cost"]
+        current_value = pos["shares"] * current_price
+        unrealised_pnl = current_value - cost_basis
+        total_current_value += current_value
+        total_cost_basis += cost_basis
+        total_unrealised_pnl += unrealised_pnl
+        prices[ticker] = {
+            "current_price":  round(current_price, 2),
+            "current_value":  round(current_value, 2),
+            "unrealised_pnl": round(unrealised_pnl, 2),
+            "unrealised_pct": round((unrealised_pnl / cost_basis * 100) if cost_basis else 0, 2),
+        }
+    return {
+        "prices": prices,
+        "totals": {
+            "total_current_value":  round(total_current_value, 2),
+            "total_unrealised_pnl": round(total_unrealised_pnl, 2),
+            "total_pnl":            round(total_unrealised_pnl + total_realised_pnl, 2),
+        },
+    }
+
+
+@app.get("/api/paper-portfolio/prices")
+async def get_paper_portfolio_prices():
+    """Lightweight live-price endpoint for near-realtime polling."""
+    initial_float = get_paper_initial_float()
+    transactions = load_paper_portfolio()
+    positions = compute_positions(transactions)
+    held = [t for t, p in positions.items() if p["shares"] > 0]
+    for t in held:
+        _info_cache.pop(t, None)
+    if held:
+        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
+        price_map = {t: _price_from_info_for_alerts(i) for t, i in zip(held, infos) if not isinstance(i, Exception)}
+    else:
+        return {"prices": {}, "totals": {}}
+    for t in held:
+        if not price_map.get(t):
+            price_map[t] = positions[t].get("avg_cost", 0) or 0
+    cash = initial_float
+    for tx in transactions:
+        qty = float(tx.get("qty", 0))
+        price = float(tx.get("price", 0))
+        if tx["type"] == "buy":
+            cash -= qty * price
+        elif tx["type"] == "sell":
+            cash += qty * price
+    prices = {}
+    total_current = 0.0
+    total_invested = 0.0
+    for ticker, pos in positions.items():
+        if pos["shares"] <= 0:
+            continue
+        current_price = price_map.get(ticker) or pos["avg_cost"]
+        cost_basis = pos["shares"] * pos["avg_cost"]
+        current_value = pos["shares"] * current_price
+        unrealised_pnl = current_value - cost_basis
+        total_current += current_value
+        total_invested += cost_basis
+        prices[ticker] = {
+            "current_price":  round(current_price, 2),
+            "current_value":  round(current_value, 2),
+            "unrealised_pnl": round(unrealised_pnl, 2),
+            "unrealised_pct": round((unrealised_pnl / cost_basis * 100) if cost_basis else 0, 2),
+        }
+    total_value = cash + total_current
+    total_pnl = total_value - initial_float
+    unrealised = total_current - total_invested
+    return {
+        "prices": prices,
+        "totals": {
+            "total_value":   round(total_value, 2),
+            "total_pnl":     round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl / initial_float * 100, 2) if initial_float else 0.0,
+            "unrealised":    round(unrealised, 2),
+        },
+    }
+
+
 @app.post("/api/paper-portfolio/buy")
 async def paper_buy(req: TradeRequest):
+    initial_float = get_paper_initial_float()
     transactions = load_paper_portfolio()
-    cash = PAPER_INITIAL_FLOAT
+    cash = initial_float
     for tx in transactions:
         qty   = float(tx.get("qty", 0))
         price = float(tx.get("price", 0))

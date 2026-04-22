@@ -287,6 +287,7 @@
       </div>
 
       <div id="pred-status" class="status-msg"></div>
+      <div id="pred-refresh-info" class="status-msg" style="font-size:0.92rem;color:var(--text-muted);margin-top:-0.25rem"></div>
 
       <!-- Accuracy summary -->
       <div id="accuracy-bar" class="accuracy-bar hidden">
@@ -552,6 +553,7 @@
         </div>
         <div class="pred-actions">
           <button id="btn-test-alert" class="btn-secondary">Send Preview Email</button>
+          <button id="btn-test-whatsapp" class="btn-secondary">Send Test WhatsApp</button>
           <button id="btn-refresh-alerts" class="btn-secondary">↻ Refresh</button>
           <button id="btn-clear-alerts" class="btn-secondary" style="color:var(--red);border-color:var(--red)">Clear History</button>
         </div>
@@ -591,6 +593,14 @@
       <div class="alert-settings-card">
         <h3 class="alert-settings-title">Alert Settings</h3>
         <div class="alert-settings-grid">
+          <div class="alert-setting-row">
+            <label for="as-initial-float">Start Capital</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-initial-float" type="number" min="1000" step="1000" value="200000">
+              <span class="alert-setting-unit">GBP</span>
+            </div>
+            <span class="alert-setting-hint">Paper trading and recommendation sizing base amount</span>
+          </div>
           <div class="alert-setting-row">
             <label for="as-price-swing">Price Swing Threshold</label>
             <div class="alert-setting-input-wrap">
@@ -691,7 +701,7 @@
             <span class="step-num">4</span>
             <div>
               <strong>Restart the backend</strong>
-              <p>After editing <code>.env</code>, restart uvicorn. Then click <strong>Send Test Alert</strong> to verify.</p>
+              <p>After editing <code>.env</code>, restart uvicorn. Then click <strong>Send Preview Email</strong> or <strong>Send Test WhatsApp</strong> to verify.</p>
             </div>
           </div>
         </div>
@@ -762,7 +772,7 @@
       <div class="paper-header">
         <div>
           <h2>Paper P&amp;L</h2>
-          <p class="paper-subtitle">Simulated trading starting from £100,000. Trades are added from Recommendations.</p>
+          <p id="paper-subtitle" class="paper-subtitle">Simulated trading from your configured start capital. Trades are added from Recommendations.</p>
         </div>
         <div class="pred-actions">
           <button id="btn-refresh-paper" class="btn-secondary">↻ Refresh</button>
@@ -774,7 +784,7 @@
       <div id="paper-summary" class="paper-summary hidden">
         <div class="paper-stat">
           <span class="paper-stat-label">Starting Float</span>
-          <span class="paper-stat-value">£100,000</span>
+          <span id="paper-initial" class="paper-stat-value">—</span>
         </div>
         <div class="paper-stat">
           <span class="paper-stat-label">Cash</span>
@@ -914,7 +924,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=4"></script>
 
   <!-- Footer -->
   <footer class="app-footer">

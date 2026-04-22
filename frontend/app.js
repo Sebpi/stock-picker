@@ -268,6 +268,22 @@ let watchlist = [];
 let sentimentWatchlist = [];
 let predictionReasoningMap = {};
 let recReasoningMap = {};
+let _predictionsRefreshTimer = null;
+let _predictionsNextRefreshKey = null;
+let _predictionsAutoRefreshing = false;
+
+// ── Tab data cache ────────────────────────────────────────────
+// Data is held until an explicit refresh is requested.
+// Mutations (trades, watchlist changes, etc.) bust the relevant key.
+const TabCache = (() => {
+  const _s = {};
+  return {
+    get: k => _s[k] ?? null,
+    set: (k, v) => { _s[k] = v; },
+    invalidate: k => { delete _s[k]; },
+    invalidateAll: () => { Object.keys(_s).forEach(k => delete _s[k]); },
+  };
+})();
 
 const TAB_LOADERS = {
   watchlist: () => loadWatchlist(),
@@ -288,6 +304,10 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.classList.add("active");
     document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
     TAB_LOADERS[btn.dataset.tab]?.();
+    if (btn.dataset.tab === "predictions") startPredictionsRefreshInfoTimer();
+    const tab = btn.dataset.tab;
+    if (tab === "portfolio" || tab === "paper") _startLive(tab);
+    else _stopLive();
   });
 });
 
@@ -302,6 +322,164 @@ function fmt(n) {
   if (n >= 1e9)  return "$" + (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6)  return "$" + (n / 1e6).toFixed(2) + "M";
   return "$" + n.toLocaleString();
+}
+
+function formatEtClock(date) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function formatCountdown(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function getEtParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    weekday: "short",
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.filter(p => p.type !== "literal").map(p => [p.type, p.value]));
+  const weekdays = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    year: Number(map.year),
+    month: Number(map.month),
+    day: Number(map.day),
+    hour: Number(map.hour),
+    minute: Number(map.minute),
+    second: Number(map.second),
+    weekday: weekdays[map.weekday] ?? 0,
+  };
+}
+
+function getEtDateForParts(parts) {
+  let guess = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  const desiredUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  for (let i = 0; i < 4; i++) {
+    const actual = getEtParts(new Date(guess));
+    const actualUtc = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second);
+    const delta = desiredUtc - actualUtc;
+    guess += delta;
+    if (delta === 0) break;
+  }
+  return new Date(guess);
+}
+
+function getNextPredictionRefreshDate(now = new Date()) {
+  const et = getEtParts(now);
+  const dayStart = { hour: 9, minute: 30 };
+  const dayEnd = { hour: 16, minute: 0 };
+  const currentMinutes = et.hour * 60 + et.minute;
+  const openMinutes = dayStart.hour * 60 + dayStart.minute;
+  const closeMinutes = dayEnd.hour * 60 + dayEnd.minute;
+
+  const nextBusinessDay = (offsetDays = 1) => {
+    const base = new Date(Date.UTC(et.year, et.month - 1, et.day + offsetDays));
+    let weekday = base.getUTCDay();
+    while (weekday === 0 || weekday === 6) {
+      base.setUTCDate(base.getUTCDate() + 1);
+      weekday = base.getUTCDay();
+    }
+    return {
+      year: base.getUTCFullYear(),
+      month: base.getUTCMonth() + 1,
+      day: base.getUTCDate(),
+      hour: dayStart.hour,
+      minute: dayStart.minute,
+      second: 0,
+    };
+  };
+
+  if (et.weekday === 0 || et.weekday === 6) {
+    return getEtDateForParts(nextBusinessDay(et.weekday === 6 ? 2 : 1));
+  }
+
+  if (currentMinutes < openMinutes) {
+    return getEtDateForParts({ ...et, hour: dayStart.hour, minute: dayStart.minute, second: 0 });
+  }
+
+  if (currentMinutes >= closeMinutes) {
+    return getEtDateForParts(nextBusinessDay(1));
+  }
+
+  if (currentMinutes < 9 * 60 + 45) {
+    return getEtDateForParts({ ...et, hour: 9, minute: 45, second: 0 });
+  }
+
+  let nextMinutes = Math.ceil(currentMinutes / 15) * 15;
+  if (nextMinutes >= closeMinutes) {
+    return getEtDateForParts(nextBusinessDay(1));
+  }
+  return getEtDateForParts({
+    ...et,
+    hour: Math.floor(nextMinutes / 60),
+    minute: nextMinutes % 60,
+    second: 0,
+  });
+}
+
+function isPredictionsTabActive() {
+  return document.getElementById("tab-predictions")?.classList.contains("active");
+}
+
+function updatePredictionsRefreshInfo() {
+  const el = document.getElementById("pred-refresh-info");
+  if (!el) return;
+  const now = new Date();
+  const nextRefresh = getNextPredictionRefreshDate(now);
+  const msRemaining = Math.max(0, nextRefresh.getTime() - now.getTime());
+  const countdown = formatCountdown(msRemaining);
+  const refreshKey = nextRefresh.toISOString();
+  const et = getEtParts(now);
+  const currentMinutes = et.hour * 60 + et.minute;
+  const marketOpen = et.weekday >= 1 && et.weekday <= 5 && currentMinutes >= 570 && currentMinutes < 960;
+  const nowLabel = `ET now: ${formatEtClock(now)}.`;
+  if (marketOpen) {
+    el.textContent = `${nowLabel} Next auto-refresh: ${formatEtClock(nextRefresh)} (${countdown}) on the 15-minute schedule.`;
+  } else {
+    el.textContent = `${nowLabel} Auto-refresh runs every 15 minutes during market hours. Next window: ${formatEtClock(nextRefresh)}.`;
+  }
+
+  if (_predictionsNextRefreshKey == null) {
+    _predictionsNextRefreshKey = refreshKey;
+  }
+
+  if (
+    marketOpen &&
+    isPredictionsTabActive() &&
+    !_predictionsAutoRefreshing &&
+    refreshKey !== _predictionsNextRefreshKey
+  ) {
+    _predictionsNextRefreshKey = refreshKey;
+    _predictionsAutoRefreshing = true;
+    const status = document.getElementById("pred-status");
+    if (status) status.textContent = "Auto-refreshing predictions...";
+    invalidatePredictionsSnapshotCache();
+    loadPredictions(true).finally(() => {
+      _predictionsAutoRefreshing = false;
+    });
+  }
+}
+
+function startPredictionsRefreshInfoTimer() {
+  updatePredictionsRefreshInfo();
+  if (_predictionsRefreshTimer) return;
+  _predictionsRefreshTimer = setInterval(updatePredictionsRefreshInfo, 1000);
 }
 
 function fmtScreenerMarketCap(n) {
@@ -765,15 +943,10 @@ document.getElementById("screener-search").addEventListener("keydown", async fun
   }
 });
 
-async function runScreen() {
-  const btn = document.getElementById("btn-screen");
-  const status = document.getElementById("screen-status");
-  const body = document.getElementById("screen-body");
-
+function buildScreenerParams() {
   const index  = document.getElementById("filter-index").value;
   const sector = document.getElementById("filter-sector").value;
   const query  = document.getElementById("screener-search").value.trim();
-
   function opParam(filterId, backendKey, scale) {
     const val = document.getElementById("filter-" + filterId).value;
     if (val === "") return null;
@@ -782,7 +955,6 @@ async function runScreen() {
     const num = parseFloat(val) * (scale || 1);
     return [op + "_" + backendKey, num];
   }
-
   const params = new URLSearchParams();
   if (index)  params.set("index", index);
   if (query)  params.set("q", query);
@@ -797,119 +969,157 @@ async function runScreen() {
     opParam("vol",        "volume",     1e6),
     opParam("rev-growth", "rev_growth"),
   ].forEach(p => { if (p) params.set(p[0], p[1]); });
+  return params;
+}
+
+function renderScreenerRows(data, body) {
+  function calcMedian(stocks, key) {
+    const vals = stocks.map(s => s[key]).filter(v => v != null).sort((a, b) => a - b);
+    if (!vals.length) return null;
+    const mid = Math.floor(vals.length / 2);
+    return vals.length % 2 === 0 ? (vals[mid - 1] + vals[mid]) / 2 : vals[mid];
+  }
+  function fmtMedian(val, isPct = false) {
+    return val == null ? "n/a" : isPct ? `${val}%` : `${val}`;
+  }
+  function escapeAttr(str) {
+    return String(str).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+  const sectorGroups = {};
+  for (const s of data) {
+    const sec = s.sector || "Unknown";
+    if (!sectorGroups[sec]) sectorGroups[sec] = [];
+    sectorGroups[sec].push(s);
+  }
+  const sectorMedians = {};
+  for (const [sec, stocks] of Object.entries(sectorGroups)) {
+    if (stocks.length < 2) continue;
+    sectorMedians[sec] = {
+      pe: calcMedian(stocks,'pe'), peg: calcMedian(stocks,'peg'),
+      pb: calcMedian(stocks,'pb'), ev_ebitda: calcMedian(stocks,'ev_ebitda'),
+      fcf_yield: calcMedian(stocks,'fcf_yield'), rev_growth: calcMedian(stocks,'rev_growth'),
+    };
+  }
+  function sArrow(val, median, higherIsBetter, label, sectorName) {
+    if (val == null || median == null) return '';
+    const under = higherIsBetter ? val > median : val < median;
+    const title = `${under ? "Stronger" : "Weaker"} vs ${sectorName} median ${label}: ${fmtMedian(median, higherIsBetter)}`;
+    return under
+      ? `<span class="val-arrow arrow-undervalued" title="${escapeAttr(title)}">▲</span>`
+      : `<span class="val-arrow arrow-overvalued" title="${escapeAttr(title)}">▼</span>`;
+  }
+  body.innerHTML = data.map(s => {
+    const sectorName = s.sector || "Unknown";
+    const m = sectorMedians[sectorName] || {};
+    return `<tr data-ticker="${s.ticker}">
+      <td><strong>${s.ticker}</strong></td>
+      <td>${s.name}</td>
+      <td>${sectorName || "—"}</td>
+      <td>${s.price != null ? "$" + s.price : "—"}</td>
+      <td>${s.pe ?? "—"}${sArrow(s.pe, m.pe, false, "P/E", sectorName)}</td>
+      <td>${s.peg ?? "—"}${sArrow(s.peg, m.peg, false, "PEG", sectorName)}</td>
+      <td>${s.pb ?? "—"}${sArrow(s.pb, m.pb, false, "P/B", sectorName)}</td>
+      <td>${s.ev_ebitda ?? "—"}${sArrow(s.ev_ebitda, m.ev_ebitda, false, "EV/EBITDA", sectorName)}</td>
+      <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true, "FCF yield", sectorName)}</td>
+      <td>${s.rev_growth != null ? s.rev_growth + "%" : "—"}${sArrow(s.rev_growth, m.rev_growth, true, "Revenue growth", sectorName)}</td>
+      <td>${fmtScreenerMarketCap(s.market_cap)}</td>
+      <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
+    </tr>`;
+  }).join("");
+  body.querySelectorAll("tr").forEach(row => {
+    row.addEventListener("click", e => { if (e.target.tagName === "BUTTON") return; openDetail(row.dataset.ticker); });
+  });
+  refreshWatchButtons();
+}
+
+let _screenPollTimer = null;
+
+async function runScreen() {
+  const btn = document.getElementById("btn-screen");
+  const status = document.getElementById("screen-status");
+  const body = document.getElementById("screen-body");
+
+  // Cancel any in-flight poll
+  if (_screenPollTimer) { clearInterval(_screenPollTimer); _screenPollTimer = null; }
+
+  const params = buildScreenerParams();
+  const query = params.get("q") || "";
 
   btn.disabled = true;
-  status.textContent = query ? `Screening stocks for "${query}"…` : "Screening stocks… this may take a moment.";
   body.innerHTML = "";
-  showLoader(query ? `Screening for "${query}"…` : "Screening stocks…");
+  showLoader(query ? `Screening for "${query}"…` : "Loading screener…");
+  status.textContent = "Loading…";
 
   try {
     const res = await authFetch(`${API}/api/screen?${params}`);
     const data = await res.json();
+    const results = Array.isArray(data) ? data : (data.results || []);
+    const loading = Array.isArray(data) ? false : (data.loading || false);
+    const loaded  = Array.isArray(data) ? results.length : (data.loaded || results.length);
 
-    if (data.length === 0) {
-      status.textContent = query ? `No stocks matched "${query}" and your criteria.` : "No stocks matched your criteria.";
-      return;
+    function updateStatus(results, loading, loaded) {
+      const n = results.length;
+      const label = query ? ` matching "${query}"` : "";
+      if (loading) {
+        status.innerHTML = `${n} result${n !== 1 ? "s" : ""}${label} — <span class="screen-loading-indicator">loading more… (${loaded} fetched so far)</span>`;
+      } else {
+        status.textContent = n === 0
+          ? (query ? `No stocks matched "${query}" and your criteria.` : "No stocks matched your criteria.")
+          : `${n} stock${n !== 1 ? "s" : ""}${label}.`;
+      }
     }
 
-    status.textContent = query
-      ? `${data.length} stock${data.length !== 1 ? "s" : ""} found for "${query}".`
-      : `${data.length} stock${data.length !== 1 ? "s" : ""} found.`;
+    if (results.length > 0) renderScreenerRows(results, body);
+    updateStatus(results, loading, loaded);
 
-    // Compute sector medians from screener results for inline arrows
-    const sectorGroups = {};
-    for (const s of data) {
-      const sec = s.sector || "Unknown";
-      if (!sectorGroups[sec]) sectorGroups[sec] = [];
-      sectorGroups[sec].push(s);
+    if (loading) {
+      _screenPollTimer = setInterval(async () => {
+        try {
+          const r2 = await authFetch(`${API}/api/screen?${params}`);
+          const d2 = await r2.json();
+          const r2results = Array.isArray(d2) ? d2 : (d2.results || []);
+          const r2loading = Array.isArray(d2) ? false : (d2.loading || false);
+          const r2loaded  = Array.isArray(d2) ? r2results.length : (d2.loaded || r2results.length);
+          if (r2results.length > 0) renderScreenerRows(r2results, body);
+          updateStatus(r2results, r2loading, r2loaded);
+          if (!r2loading) { clearInterval(_screenPollTimer); _screenPollTimer = null; btn.disabled = false; hideLoader(); }
+        } catch { clearInterval(_screenPollTimer); _screenPollTimer = null; btn.disabled = false; hideLoader(); }
+      }, 2000);
+    } else {
+      btn.disabled = false;
+      hideLoader();
     }
-    function calcMedian(stocks, key) {
-      const vals = stocks.map(s => s[key]).filter(v => v != null).sort((a, b) => a - b);
-      if (!vals.length) return null;
-      const mid = Math.floor(vals.length / 2);
-      return vals.length % 2 === 0 ? (vals[mid - 1] + vals[mid]) / 2 : vals[mid];
-    }
-    const sectorMedians = {};
-    for (const [sec, stocks] of Object.entries(sectorGroups)) {
-      if (stocks.length < 2) continue; // need peers to compare
-      sectorMedians[sec] = {
-        pe:         calcMedian(stocks, 'pe'),
-        peg:        calcMedian(stocks, 'peg'),
-        pb:         calcMedian(stocks, 'pb'),
-        ev_ebitda:  calcMedian(stocks, 'ev_ebitda'),
-        fcf_yield:  calcMedian(stocks, 'fcf_yield'),
-        rev_growth: calcMedian(stocks, 'rev_growth'),
-      };
-    }
-    function fmtMedian(val, isPct = false) {
-      if (val == null) return "n/a";
-      return isPct ? `${val}%` : `${val}`;
-    }
-    function escapeAttr(str) {
-      return String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/"/g, "&quot;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-    }
-    function sArrow(val, median, higherIsBetter = false, label = "metric", sectorName = "sector") {
-      if (val == null || median == null) return '';
-      const under = higherIsBetter ? val > median : val < median;
-      const title = `${under ? "Stronger" : "Weaker"} vs ${sectorName} median ${label}: ${fmtMedian(median, higherIsBetter)}`;
-      return under
-        ? `<span class="val-arrow arrow-undervalued" title="${escapeAttr(title)}">▲</span>`
-        : `<span class="val-arrow arrow-overvalued" title="${escapeAttr(title)}">▼</span>`;
-    }
-
-    body.innerHTML = data.map(s => {
-      const sectorName = s.sector || "Unknown";
-      const m = sectorMedians[sectorName] || {};
-      return `
-      <tr data-ticker="${s.ticker}">
-        <td><strong>${s.ticker}</strong></td>
-        <td>${s.name}</td>
-        <td>${sectorName || "—"}</td>
-        <td>${s.price != null ? "$" + s.price : "—"}</td>
-        <td>${s.pe ?? "—"}${sArrow(s.pe, m.pe, false, "P/E", sectorName)}</td>
-        <td>${s.peg ?? "—"}${sArrow(s.peg, m.peg, false, "PEG", sectorName)}</td>
-        <td>${s.pb ?? "—"}${sArrow(s.pb, m.pb, false, "P/B", sectorName)}</td>
-        <td>${s.ev_ebitda ?? "—"}${sArrow(s.ev_ebitda, m.ev_ebitda, false, "EV/EBITDA", sectorName)}</td>
-        <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true, "FCF yield", sectorName)}</td>
-        <td>${s.rev_growth != null ? s.rev_growth + "%" : "—"}${sArrow(s.rev_growth, m.rev_growth, true, "Revenue growth", sectorName)}</td>
-        <td>${fmtScreenerMarketCap(s.market_cap)}</td>
-        <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
-      </tr>
-    `}).join("");
-
-    body.querySelectorAll("tr").forEach(row => {
-      row.addEventListener("click", e => {
-        if (e.target.tagName === "BUTTON") return;
-        openDetail(row.dataset.ticker);
-      });
-    });
-
-    // Mark already-watched tickers
-    refreshWatchButtons();
-
   } catch (err) {
     status.textContent = "Error: " + err.message + ". Is the backend running?";
-  } finally {
     btn.disabled = false;
     hideLoader();
   }
 }
 
 // ── Watchlist ────────────────────────────────────────────────
-async function loadWatchlist() {
+async function loadWatchlist(forceRefresh = false) {
   const status = document.getElementById("watchlist-status");
   const body = document.getElementById("watchlist-body");
   const empty = document.getElementById("watchlist-empty");
 
-  status.textContent = "Loading…";
-  try {
-    const res = await authFetch(`${API}/api/watchlist`);
-    watchlist = await res.json();
+  const cached = !forceRefresh && TabCache.get('watchlist');
+  if (cached) {
+    watchlist = cached;
     status.textContent = "";
+  } else {
+    status.textContent = "Loading…";
+    try {
+      const res = await authFetch(`${API}/api/watchlist`);
+      watchlist = await res.json();
+      TabCache.set('watchlist', watchlist);
+      status.textContent = "";
+    } catch (err) {
+      status.textContent = "Error loading watchlist. Is the backend running?";
+      return;
+    }
+  }
+
+  try {
 
     if (watchlist.length === 0) {
       body.innerHTML = "";
@@ -940,11 +1150,22 @@ async function loadWatchlist() {
   }
 }
 
-document.getElementById("btn-refresh-watchlist").addEventListener("click", loadWatchlist);
+document.getElementById("btn-refresh-watchlist").addEventListener("click", () => { TabCache.invalidate('watchlist'); loadWatchlist(true); });
 
-async function loadSentiment() {
+async function loadSentiment(forceRefresh = false) {
   const status = document.getElementById("sentiment-status");
   const result = document.getElementById("sentiment-result");
+
+  const cached = !forceRefresh && TabCache.get('sentiment');
+  if (cached) {
+    sentimentWatchlist = Array.isArray(cached.watchlist) ? cached.watchlist : [];
+    status.textContent = sentimentWatchlist.length > 0
+      ? `Ready. ${sentimentWatchlist.length} watchlist stock${sentimentWatchlist.length !== 1 ? "s" : ""} available for scanning.`
+      : "Your watchlist is empty.";
+    result.innerHTML = renderSentimentWatchlist(cached);
+    return;
+  }
+
   status.textContent = "Loading watchlist...";
   result.innerHTML = '<div class="sentiment-empty-state">Loading your watchlist for sentiment analysis...</div>';
   try {
@@ -955,6 +1176,7 @@ async function loadSentiment() {
       result.innerHTML = '<div class="sentiment-empty-state">Watchlist could not be loaded.</div>';
       return;
     }
+    TabCache.set('sentiment', data);
     sentimentWatchlist = Array.isArray(data.watchlist) ? data.watchlist : [];
     status.textContent = sentimentWatchlist.length > 0
       ? `Ready. ${sentimentWatchlist.length} watchlist stock${sentimentWatchlist.length !== 1 ? "s" : ""} available for scanning.`
@@ -1010,86 +1232,82 @@ function renderSentimentResults(data, ticker) {
   const negative = results.filter(item => (item.sentiment_score || 0) < 0).length;
   const neutral = results.length - positive - negative;
 
+  const rows = results.map((item, i) => {
+    const tone = sentimentToneClass(item.sentiment, item.sentiment_score);
+    const headlines = item.headlines || [];
+    const headlineId = `sent-hl-${i}`;
+    return `
+      <div class="srow ${tone}">
+        <div class="srow-main">
+          <div class="srow-id">
+            <span class="srow-ticker">${safe(item.ticker || "N/A")}</span>
+            <span class="srow-name">${safe(item.name || item.ticker || "")}</span>
+          </div>
+          <div class="srow-badge-wrap">
+            <span class="sentiment-badge ${tone}">${safe(item.sentiment || "neutral")}</span>
+          </div>
+          <div class="srow-stat">
+            <span class="srow-label">Score</span>
+            <span class="srow-val">${sentimentScoreHtml(item.sentiment_score || 0)}</span>
+          </div>
+          <div class="srow-stat">
+            <span class="srow-label">Price</span>
+            <span class="srow-val">${item.price != null ? `$${item.price}` : "—"}</span>
+          </div>
+          <div class="srow-stat">
+            <span class="srow-label">Change</span>
+            <span class="srow-val">${item.change_pct != null ? changeHtml(item.change_pct) : "—"}</span>
+          </div>
+          <div class="srow-stat">
+            <span class="srow-label">Analyst</span>
+            <span class="srow-val">${safe(item.recommendation || "—")}</span>
+          </div>
+          ${headlines.length > 0 ? `
+            <button class="srow-hl-toggle" onclick="document.getElementById('${headlineId}').classList.toggle('open')" title="Toggle headlines">
+              ${headlines.length} headline${headlines.length !== 1 ? "s" : ""} ▾
+            </button>
+          ` : '<span class="srow-no-hl">no headlines</span>'}
+        </div>
+        ${headlines.length > 0 ? `
+          <div class="srow-headlines" id="${headlineId}">
+            ${headlines.map(h => `<div class="srow-headline-item">— ${safe(h)}</div>`).join("")}
+          </div>
+        ` : ""}
+        ${item.error ? `<div class="sentiment-error">${safe(item.error)}</div>` : ""}
+      </div>
+    `;
+  }).join("");
+
   return `
     <div class="sentiment-dashboard">
-      <div class="sentiment-summary-grid">
-        <div class="sentiment-summary-card">
-          <div class="sentiment-summary-label">${ticker ? "Ticker" : "Scanned"}</div>
-          <div class="sentiment-summary-value">${ticker ? safe(ticker) : results.length}</div>
-        </div>
-        <div class="sentiment-summary-card">
-          <div class="sentiment-summary-label">Bullish</div>
-          <div class="sentiment-summary-value change-pos">${positive}</div>
-        </div>
-        <div class="sentiment-summary-card">
-          <div class="sentiment-summary-label">Neutral</div>
-          <div class="sentiment-summary-value">${neutral}</div>
-        </div>
-        <div class="sentiment-summary-card">
-          <div class="sentiment-summary-label">Bearish</div>
-          <div class="sentiment-summary-value change-neg">${negative}</div>
-        </div>
+      <div class="sentiment-stat-bar">
+        <span class="sstat-item"><span class="sstat-label">${ticker ? "ticker" : "scanned"}</span> <strong>${ticker ? safe(ticker) : results.length}</strong></span>
+        <span class="sstat-sep">·</span>
+        <span class="sstat-item"><span class="sstat-label change-pos">bullish</span> <strong class="change-pos">${positive}</strong></span>
+        <span class="sstat-sep">·</span>
+        <span class="sstat-item"><span class="sstat-label">neutral</span> <strong>${neutral}</strong></span>
+        <span class="sstat-sep">·</span>
+        <span class="sstat-item"><span class="sstat-label change-neg">bearish</span> <strong class="change-neg">${negative}</strong></span>
       </div>
-      <div class="sentiment-card-grid">
-        ${results.map(item => `
-          <article class="sentiment-card ${sentimentToneClass(item.sentiment, item.sentiment_score)}">
-            <div class="sentiment-card-head">
-              <div>
-                <div class="sentiment-card-ticker">${safe(item.ticker || "N/A")}</div>
-                <div class="sentiment-card-name">${safe(item.name || item.ticker || "Unknown")}</div>
-              </div>
-              <div class="sentiment-badge ${sentimentToneClass(item.sentiment, item.sentiment_score)}">${safe(item.sentiment || "neutral")}</div>
-            </div>
-            <div class="sentiment-metrics">
-              <div class="sentiment-metric">
-                <span class="sentiment-metric-label">Score</span>
-                <strong>${sentimentScoreHtml(item.sentiment_score || 0)}</strong>
-              </div>
-              <div class="sentiment-metric">
-                <span class="sentiment-metric-label">Price</span>
-                <strong>${item.price != null ? `$${item.price}` : "—"}</strong>
-              </div>
-              <div class="sentiment-metric">
-                <span class="sentiment-metric-label">Change</span>
-                <strong>${item.change_pct != null ? changeHtml(item.change_pct) : "—"}</strong>
-              </div>
-              <div class="sentiment-metric">
-                <span class="sentiment-metric-label">Analyst</span>
-                <strong>${safe(item.recommendation || "n/a")}</strong>
-              </div>
-            </div>
-            ${(item.headlines || []).length > 0 ? `
-              <div class="sentiment-headlines">
-                <div class="sentiment-headlines-title">Recent headlines</div>
-                <ul>
-                  ${(item.headlines || []).map(headline => `<li>${safe(headline)}</li>`).join("")}
-                </ul>
-              </div>
-            ` : ""}
-            ${item.error ? `<div class="sentiment-error">${safe(item.error)}</div>` : ""}
-          </article>
-        `).join("")}
+      <div class="srow-list">
+        <div class="srow-header">
+          <span class="srow-id">Symbol</span>
+          <span class="srow-badge-wrap">Signal</span>
+          <span class="srow-stat">Score</span>
+          <span class="srow-stat">Price</span>
+          <span class="srow-stat">Change</span>
+          <span class="srow-stat">Analyst</span>
+          <span></span>
+        </div>
+        ${rows}
       </div>
     </div>
   `;
 }
 
-document.getElementById("btn-sentiment-list").addEventListener("click", async () => {
-  const status = document.getElementById("sentiment-status");
-  const result = document.getElementById("sentiment-result");
-  status.textContent = "Loading watchlist…";
-  try {
-    const res = await authFetch(`${API}/api/sentiment?watchlist=true`);
-    const data = await res.json();
-    if (data.detail) {
-      status.textContent = "Error: " + data.detail;
-      return;
-    }
-    status.textContent = "Watchlist loaded.";
-    result.innerHTML = renderSentimentWatchlist(data);
-  } catch (err) {
-    status.textContent = "Error: " + err.message;
-  }
+document.getElementById("btn-sentiment-list").addEventListener("click", () => {
+  TabCache.invalidate('sentiment');
+  loadSentiment(true);
 });
 
 async function runSentimentScan(ticker) {
@@ -1141,8 +1359,10 @@ async function addToWatchlist(e, ticker) {
     await authFetch(`${API}/api/watchlist/${ticker}`, { method: "POST" });
     btn.textContent = "✓ Added";
     btn.classList.add("added");
+    TabCache.invalidate('watchlist');
+    TabCache.invalidate('sentiment');
     if (document.getElementById("tab-sentiment")?.classList.contains("active")) {
-      loadSentiment();
+      loadSentiment(true);
     }
   } catch (err) {
     btn.disabled = false;
@@ -1152,7 +1372,9 @@ async function addToWatchlist(e, ticker) {
 async function removeFromWatchlist(e, ticker) {
   e.stopPropagation();
   await authFetch(`${API}/api/watchlist/${ticker}`, { method: "DELETE" });
-  loadWatchlist();
+  TabCache.invalidate('watchlist');
+  TabCache.invalidate('sentiment');
+  loadWatchlist(true);
   if (document.getElementById("tab-sentiment")?.classList.contains("active")) {
     loadSentiment();
   }
@@ -1433,6 +1655,7 @@ async function loadPredictions(forceRefresh = false) {
   const body = document.getElementById("pred-body");
   const empty = document.getElementById("pred-empty");
   const bar = document.getElementById("accuracy-bar");
+  startPredictionsRefreshInfoTimer();
 
   if (!forceRefresh && predictionsRenderedCache) {
     status.textContent = "";
@@ -1539,7 +1762,10 @@ function renderPredictionsTable(preds) {
     const scoreCls = scoreValue >= 61 ? "change-pos" : scoreValue <= 39 ? "change-neg" : "";
     const scoreStr = scoreValue != null ? `<span class="${scoreCls}">${scoreValue}/100</span>` : "—";
 
-    let actualStr = '<span class="result-pending">Pending</span>';
+    const isPending = p.confidence === "pending" || scoreValue == null;
+    let actualStr = isPending
+      ? '<span class="result-pending">—</span>'
+      : '<span class="result-pending">Pending</span>';
     let varianceStr = '<span class="result-pending">—</span>';
     let resultStr = '<span class="result-pending">—</span>';
     if (p.actual_pct != null) {
@@ -1553,7 +1779,6 @@ function renderPredictionsTable(preds) {
         : '<span class="result-wrong">✗ Wrong</span>';
     }
 
-    const isPending = p.confidence === "pending" || scoreValue == null;
     const direction = isPending ? "" : (directionValue === "bullish" ? "▲ BULLISH" : directionValue === "bearish" ? "▼ BEARISH" : "• NEUTRAL");
     const dirClass  = isPending ? "" : (directionValue === "bullish" ? "dir-bull" : directionValue === "bearish" ? "dir-bear" : "");
     const suppressedBadge = p.suppressed
@@ -1632,7 +1857,7 @@ function openPredictionReasoning(rowKey) {
     <span>${safe((item.confidence || "pending").toUpperCase())}</span>
     <span>${item.score != null ? `${item.score}/100 ${safe((item.direction || "pending").toUpperCase())}` : "Pending"}</span>
     <span>${item.predicted_12m_pct != null ? `${item.predicted_12m_pct >= 0 ? "+" : ""}${Number(item.predicted_12m_pct).toFixed(2)}% 12M` : "12M pending"}</span>
-    <span>${item.actual_pct != null ? `${item.actual_pct >= 0 ? "+" : ""}${item.actual_pct.toFixed(2)}% actual` : "Actual pending"}</span>
+    <span>${item.actual_pct != null ? `${item.actual_pct >= 0 ? "+" : ""}${item.actual_pct.toFixed(2)}% actual` : (item.score == null ? "Actual —" : "Actual pending")}</span>
   `;
   document.getElementById("pred-reasoning-body").textContent = item.reasoning || "No reasoning available.";
   overlay.classList.remove("hidden");
@@ -1725,6 +1950,7 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
     }
 
     invalidatePredictionsSnapshotCache();
+    TabCache.invalidate('recommendations');
     loadPredictions(true);
   } catch (err) {
     status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
@@ -1734,9 +1960,47 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("btn-refresh-preds").addEventListener("click", () => {
-  invalidatePredictionsSnapshotCache();
-  loadPredictions(true);
+document.getElementById("btn-refresh-preds").addEventListener("click", async () => {
+  const status = document.getElementById("pred-status");
+  const btn = document.getElementById("btn-refresh-preds");
+  btn.disabled = true;
+  status.textContent = "Refreshing predictions and actuals...";
+  showLoader("Refreshing predictions...");
+  try {
+    const res = await authFetch(`${API}/api/predictions`);
+    const preds = await res.json();
+    const pendingCount = Array.isArray(preds)
+      ? preds.filter(p => (p.confidence === "pending") || (p.predicted_pct == null && p.score == null)).length
+      : 0;
+
+    if (pendingCount > 0) {
+      status.textContent = `Found ${pendingCount} pending stock${pendingCount === 1 ? "" : "s"} - generating predictions...`;
+      const genRes = await authFetch(`${API}/api/predictions/generate`, { method: "POST" });
+      const rawText = await genRes.text();
+      let data = {};
+      try { data = rawText ? JSON.parse(rawText) : {}; } catch {}
+      if (!genRes.ok) {
+        status.textContent = "Error: " + (data.detail || data.error || "Predictions refresh failed.");
+        return;
+      }
+      if (data.message) {
+        status.textContent = data.message;
+      } else {
+        status.textContent = `Refreshed actuals and generated ${data.predictions?.length || 0} prediction(s).`;
+      }
+      TabCache.invalidate('recommendations');
+    } else {
+      status.textContent = "Actuals refreshed.";
+    }
+
+    invalidatePredictionsSnapshotCache();
+    await loadPredictions(true);
+  } catch (err) {
+    status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
+  } finally {
+    btn.disabled = false;
+    hideLoader();
+  }
 });
 
 // ── Backtest ───────────────────────────────────────────────────
@@ -1962,8 +2226,15 @@ document.getElementById("btn-simulate").addEventListener("click", async () => {
 
 // ── Recommendations ───────────────────────────────────────────
 
-async function loadRecommendations() {
+async function loadRecommendations(forceRefresh = false) {
   const status = document.getElementById("rec-status");
+
+  const cached = !forceRefresh && TabCache.get('recommendations');
+  if (cached) {
+    status.textContent = "";
+    renderRecommendations(cached);
+    return;
+  }
   const fmtEta = ms => {
     if (ms <= 0) return "0s";
     if (ms < 1000) return "<1s";
@@ -2036,6 +2307,7 @@ async function loadRecommendations() {
         }
       }, 900);
     });
+    TabCache.set('recommendations', data);
     status.textContent = "";
     renderRecommendations(data);
   } catch (err) {
@@ -2157,7 +2429,7 @@ function renderRecommendations(data) {
   }
 }
 
-document.getElementById("btn-load-recs").addEventListener("click", loadRecommendations);
+document.getElementById("btn-load-recs").addEventListener("click", () => { TabCache.invalidate('recommendations'); loadRecommendations(true); });
 
 // ── Paper Portfolio ───────────────────────────────────────────
 
@@ -2166,12 +2438,21 @@ function fmtGbp(n) {
   return (n < 0 ? "-" : "") + "£" + Math.abs(n).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-async function loadPaperPortfolio() {
+async function loadPaperPortfolio(forceRefresh = false) {
   const status = document.getElementById("paper-status");
+
+  const cached = !forceRefresh && TabCache.get('paper');
+  if (cached) {
+    status.textContent = "";
+    renderPaperPortfolio(cached);
+    return;
+  }
+
   status.textContent = "Loading…";
   try {
     const res  = await authFetch(`${API}/api/paper-portfolio`);
     const data = await res.json();
+    TabCache.set('paper', data);
     status.textContent = "";
     renderPaperPortfolio(data);
   } catch (err) {
@@ -2192,6 +2473,11 @@ function renderPaperPortfolio(data) {
   const pnlCls = pnl >= 0 ? "change-pos" : "change-neg";
   const rlsCls = (summary.realised_pnl ?? 0) >= 0 ? "change-pos" : "change-neg";
 
+  document.getElementById("paper-initial").textContent  = fmtGbp(summary.initial_float);
+  const subtitle = document.getElementById("paper-subtitle");
+  if (subtitle && summary.initial_float != null) {
+    subtitle.textContent = `Simulated trading starting from ${fmtGbp(summary.initial_float)}. Trades are added from Recommendations.`;
+  }
   document.getElementById("paper-cash").textContent     = fmtGbp(summary.cash);
   document.getElementById("paper-invested").textContent = fmtGbp(summary.total_invested);
   document.getElementById("paper-total").textContent    = fmtGbp(summary.total_value);
@@ -2216,7 +2502,7 @@ function renderPaperPortfolio(data) {
     posBody.innerHTML = positions.map(p => {
       const uCls = p.unrealised_pnl >= 0 ? "change-pos" : "change-neg";
       const rCls = p.realised_pnl  >= 0 ? "change-pos" : "change-neg";
-      return `<tr>
+      return `<tr data-ticker="${safe(p.ticker)}">
         <td><strong>${safe(p.ticker)}</strong></td>
         <td style="color:var(--text-muted);font-size:0.85rem">${safe(p.name)}</td>
         <td>${p.shares}</td>
@@ -2281,14 +2567,19 @@ async function paperTrade(btn, type, ticker, qty, price) {
     }
     btn.textContent = type === "buy" ? "✓ Bought" : "✓ Sold";
     btn.style.opacity = "0.6";
-    // Always refresh paper portfolio data
-    loadPaperPortfolio();
-    // Switch to paper tab so user sees the result
-    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-    const paperBtn = document.querySelector('.tab-btn[data-tab="paper"]');
-    if (paperBtn) paperBtn.classList.add("active");
-    document.getElementById("tab-paper")?.classList.add("active");
+    TabCache.invalidate('paper');
+    if (type === "sell") {
+      TabCache.invalidate('recommendations');
+      const row = btn.closest("tr");
+      if (row) {
+        row.remove();
+        const tbody = document.getElementById("rec-sells-body");
+        if (tbody && tbody.querySelectorAll("tr").length === 0) {
+          document.getElementById("rec-sells-wrap")?.classList.add("hidden");
+        }
+      }
+    }
+    loadPaperPortfolio(true);
   } catch (err) {
     alert("Error: " + err.message);
     btn.textContent = origText;
@@ -2296,13 +2587,14 @@ async function paperTrade(btn, type, ticker, qty, price) {
   }
 }
 
-document.getElementById("btn-refresh-paper").addEventListener("click", loadPaperPortfolio);
+document.getElementById("btn-refresh-paper").addEventListener("click", () => { TabCache.invalidate('paper'); loadPaperPortfolio(true); });
 
 document.getElementById("btn-reset-paper").addEventListener("click", async () => {
   if (!confirm("Reset your entire paper portfolio back to £100,000? This cannot be undone.")) return;
   try {
     await authFetch(`${API}/api/paper-portfolio/reset`, { method: "DELETE" });
-    loadPaperPortfolio();
+    TabCache.invalidate('paper');
+    loadPaperPortfolio(true);
   } catch (err) {
     document.getElementById("paper-status").textContent = "Reset failed: " + err.message;
   }
@@ -2310,8 +2602,18 @@ document.getElementById("btn-reset-paper").addEventListener("click", async () =>
 
 // ── Alerts ────────────────────────────────────────────────────
 
-async function loadAlerts() {
+async function loadAlerts(forceRefresh = false) {
   const status = document.getElementById("alerts-status");
+
+  const cached = !forceRefresh && TabCache.get('alerts');
+  if (cached) {
+    status.textContent = "";
+    renderMonitorBar(cached.monStatus);
+    renderAlertsTable(cached.alerts);
+    populateAlertSettings(cached.settings);
+    return;
+  }
+
   status.textContent = "Loading…";
   try {
     const [alertsRes, statusRes, settingsRes] = await Promise.all([
@@ -2322,6 +2624,7 @@ async function loadAlerts() {
     const alerts = await alertsRes.json();
     const monStatus = await statusRes.json();
     const settings = await settingsRes.json();
+    TabCache.set('alerts', { alerts, monStatus, settings });
     status.textContent = "";
     renderMonitorBar(monStatus);
     renderAlertsTable(alerts);
@@ -2333,6 +2636,7 @@ async function loadAlerts() {
 
 function populateAlertSettings(s) {
   const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
+  set("as-initial-float", s.initial_float);
   set("as-price-swing", s.alert_price_swing_pct);
   set("as-cooldown",    s.alert_cooldown_hours);
   set("as-top-buys",    s.alert_top_buys);
@@ -2412,7 +2716,7 @@ function renderAlertsTable(alerts) {
   }).join("");
 }
 
-document.getElementById("btn-refresh-alerts").addEventListener("click", loadAlerts);
+document.getElementById("btn-refresh-alerts").addEventListener("click", () => { TabCache.invalidate('alerts'); loadAlerts(true); });
 
 document.getElementById("btn-test-alert").addEventListener("click", async () => {
   const btn = document.getElementById("btn-test-alert");
@@ -2435,10 +2739,34 @@ document.getElementById("btn-test-alert").addEventListener("click", async () => 
   }
 });
 
+document.getElementById("btn-test-whatsapp").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-test-whatsapp");
+  const status = document.getElementById("alerts-status");
+  btn.disabled = true;
+  status.textContent = "Sending WhatsApp test…";
+  try {
+    const res = await authFetch(`${API}/api/alerts/test-whatsapp`, { method: "POST" });
+    const data = await res.json();
+    if (data.sms_sent) {
+      const parts = ["WhatsApp accepted by Twilio ✓"];
+      if (data.status) parts.push(`status: ${data.status}`);
+      if (data.sid) parts.push(`SID: ${data.sid}`);
+      status.textContent = parts.join(" · ");
+    } else {
+      status.textContent = data.error ? `WhatsApp failed: ${data.error}` : "WhatsApp not configured";
+    }
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById("btn-clear-alerts").addEventListener("click", async () => {
   if (!confirm("Clear all alert history?")) return;
   await authFetch(`${API}/api/alerts`, { method: "DELETE" });
-  loadAlerts();
+  TabCache.invalidate('alerts');
+  loadAlerts(true);
 });
 
 document.getElementById("btn-save-alert-settings").addEventListener("click", async () => {
@@ -2450,6 +2778,7 @@ document.getElementById("btn-save-alert-settings").addEventListener("click", asy
     const existing = await (await authFetch(`${API}/api/settings`)).json();
     const updated = {
       ...existing,
+      initial_float:         parseFloat(document.getElementById("as-initial-float").value),
       alert_price_swing_pct: parseFloat(document.getElementById("as-price-swing").value),
       alert_cooldown_hours:  parseFloat(document.getElementById("as-cooldown").value),
       alert_top_buys:        parseInt(document.getElementById("as-top-buys").value, 10),
@@ -2462,6 +2791,11 @@ document.getElementById("btn-save-alert-settings").addEventListener("click", asy
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updated),
     });
+    TabCache.invalidate('alerts');
+    TabCache.invalidate('paper');
+    TabCache.invalidate('recommendations');
+    if (document.getElementById("tab-paper")?.classList.contains("active")) loadPaperPortfolio(true);
+    if (document.getElementById("tab-recommendations")?.classList.contains("active")) loadRecommendations(true);
     msg.textContent = "Saved ✓";
     setTimeout(() => { msg.textContent = ""; }, 3000);
   } catch (err) {
@@ -2484,57 +2818,66 @@ function fmtUsd(val) {
   return "$" + Number(val).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-async function loadPortfolio() {
+async function loadPortfolio(forceRefresh = false) {
   const status  = document.getElementById("portfolio-status");
   const body    = document.getElementById("portfolio-body");
   const empty   = document.getElementById("portfolio-empty");
   const summary = document.getElementById("portfolio-summary");
 
+  const cached = !forceRefresh && TabCache.get('portfolio');
+  if (cached) {
+    status.textContent = "";
+    _renderPortfolioData(cached, body, empty, summary);
+    return;
+  }
+
   status.textContent = "Loading…";
   try {
     const res  = await authFetch(`${API}/api/portfolio`);
     const data = await res.json();
+    TabCache.set('portfolio', data);
     status.textContent = "";
 
-    const { positions, summary: s } = data;
-
-    summary.classList.remove("hidden");
-    document.getElementById("port-invested").textContent    = fmtUsd(s.total_invested);
-    document.getElementById("port-current").textContent     = fmtUsd(s.total_current_value);
-    document.getElementById("port-unrealised").innerHTML    = pnlHtml(s.total_unrealised_pnl);
-    document.getElementById("port-realised").innerHTML      = pnlHtml(s.total_realised_pnl);
-    const totalEl = document.getElementById("port-total");
-    totalEl.innerHTML = pnlHtml(s.total_pnl);
-
-    if (!positions || positions.length === 0) {
-      body.innerHTML = "";
-      empty.classList.add("visible");
-      return;
-    }
-
-    empty.classList.remove("visible");
-
-    body.innerHTML = positions.map(p => `
-      <tr data-ticker="${p.ticker}">
-        <td><strong>${p.ticker}</strong></td>
-        <td style="color:var(--text-muted);font-size:0.85rem">${p.name}</td>
-        <td>${p.shares}</td>
-        <td>$${p.avg_cost.toFixed(2)}</td>
-        <td>$${p.current_price.toFixed(2)}</td>
-        <td>${fmtUsd(p.cost_basis)}</td>
-        <td>${fmtUsd(p.current_value)}</td>
-        <td>${pnlHtml(p.unrealised_pnl)} <span style="color:var(--text-muted);font-size:0.78rem">(${p.unrealised_pct >= 0 ? "+" : ""}${p.unrealised_pct}%)</span></td>
-        <td>${pnlHtml(p.realised_pnl)}</td>
-      </tr>
-    `).join("");
-
-    body.querySelectorAll("tr").forEach(row => {
-      row.addEventListener("click", () => openDetail(row.dataset.ticker));
-    });
+    _renderPortfolioData(data, body, empty, summary);
 
   } catch (err) {
     status.textContent = err?.message || "Error loading portfolio.";
   }
+}
+
+function _renderPortfolioData(data, body, empty, summary) {
+  const { positions, summary: s } = data;
+
+  summary.classList.remove("hidden");
+  document.getElementById("port-invested").textContent    = fmtUsd(s.total_invested);
+  document.getElementById("port-current").textContent     = fmtUsd(s.total_current_value);
+  document.getElementById("port-unrealised").innerHTML    = pnlHtml(s.total_unrealised_pnl);
+  document.getElementById("port-realised").innerHTML      = pnlHtml(s.total_realised_pnl);
+  document.getElementById("port-total").innerHTML         = pnlHtml(s.total_pnl);
+
+  if (!positions || positions.length === 0) {
+    body.innerHTML = "";
+    empty.classList.add("visible");
+    return;
+  }
+
+  empty.classList.remove("visible");
+  body.innerHTML = positions.map(p => `
+    <tr data-ticker="${p.ticker}">
+      <td><strong>${p.ticker}</strong></td>
+      <td style="color:var(--text-muted);font-size:0.85rem">${p.name}</td>
+      <td>${p.shares}</td>
+      <td>$${p.avg_cost.toFixed(2)}</td>
+      <td>$${p.current_price.toFixed(2)}</td>
+      <td>${fmtUsd(p.cost_basis)}</td>
+      <td>${fmtUsd(p.current_value)}</td>
+      <td>${pnlHtml(p.unrealised_pnl)} <span style="color:var(--text-muted);font-size:0.78rem">(${p.unrealised_pct >= 0 ? "+" : ""}${p.unrealised_pct}%)</span></td>
+      <td>${pnlHtml(p.realised_pnl)}</td>
+    </tr>
+  `).join("");
+  body.querySelectorAll("tr").forEach(row => {
+    row.addEventListener("click", () => openDetail(row.dataset.ticker));
+  });
 }
 
 async function submitTrade(type) {
@@ -2568,7 +2911,8 @@ async function submitTrade(type) {
       document.getElementById("trade-ticker").value = "";
       document.getElementById("trade-qty").value    = "";
       document.getElementById("trade-price").value  = "";
-      loadPortfolio();
+      TabCache.invalidate('portfolio');
+      loadPortfolio(true);
     }
   } catch (err) {
     status.textContent = "Error: " + err.message;
@@ -2579,7 +2923,66 @@ async function submitTrade(type) {
 
 document.getElementById("btn-buy").addEventListener("click",  () => submitTrade("buy"));
 document.getElementById("btn-sell").addEventListener("click", () => submitTrade("sell"));
-document.getElementById("btn-refresh-portfolio").addEventListener("click", loadPortfolio);
+document.getElementById("btn-refresh-portfolio").addEventListener("click", () => { TabCache.invalidate('portfolio'); loadPortfolio(true); });
+
+// ── Near-realtime price polling ───────────────────────────────
+let _liveTimer = null;
+
+function _stopLive() {
+  if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; }
+}
+
+async function _tickPortfolioPrices() {
+  try {
+    const res = await authFetch(`${API}/api/portfolio/prices`);
+    if (!res.ok) return;
+    const { prices, totals } = await res.json();
+    document.querySelectorAll("#portfolio-body tr[data-ticker]").forEach(row => {
+      const d = prices[row.dataset.ticker];
+      if (!d) return;
+      row.cells[4].textContent = "$" + d.current_price.toFixed(2);
+      row.cells[6].textContent = fmtUsd(d.current_value);
+      row.cells[7].innerHTML   = pnlHtml(d.unrealised_pnl) +
+        ` <span style="color:var(--text-muted);font-size:0.78rem">(${d.unrealised_pct >= 0 ? "+" : ""}${d.unrealised_pct}%)</span>`;
+    });
+    if (totals) {
+      document.getElementById("port-current").textContent    = fmtUsd(totals.total_current_value);
+      document.getElementById("port-unrealised").innerHTML   = pnlHtml(totals.total_unrealised_pnl);
+      document.getElementById("port-total").innerHTML        = pnlHtml(totals.total_pnl);
+    }
+  } catch {}
+}
+
+async function _tickPaperPrices() {
+  try {
+    const res = await authFetch(`${API}/api/paper-portfolio/prices`);
+    if (!res.ok) return;
+    const { prices, totals } = await res.json();
+    document.querySelectorAll("#paper-positions-body tr[data-ticker]").forEach(row => {
+      const d = prices[row.dataset.ticker];
+      if (!d) return;
+      const uCls = d.unrealised_pnl >= 0 ? "change-pos" : "change-neg";
+      row.cells[4].textContent = fmtGbp(d.current_price);
+      row.cells[6].textContent = fmtGbp(d.current_value);
+      row.cells[7].innerHTML   = `<span class="${uCls}">${fmtGbp(d.unrealised_pnl)}</span>`;
+      row.cells[8].innerHTML   = `<span class="${uCls}">${d.unrealised_pct >= 0 ? "+" : ""}${d.unrealised_pct}%</span>`;
+    });
+    if (totals) {
+      const pnlCls = totals.total_pnl >= 0 ? "change-pos" : "change-neg";
+      const uCls   = totals.unrealised >= 0 ? "change-pos" : "change-neg";
+      document.getElementById("paper-total").textContent       = fmtGbp(totals.total_value);
+      document.getElementById("paper-unrealised").innerHTML    = `<span class="${uCls}">${fmtGbp(totals.unrealised)}</span>`;
+      document.getElementById("paper-pnl").innerHTML           =
+        `<span class="${pnlCls}">${fmtGbp(totals.total_pnl)} (${totals.total_pnl >= 0 ? "+" : ""}${totals.total_pnl_pct}%)</span>`;
+    }
+  } catch {}
+}
+
+function _startLive(type) {
+  _stopLive();
+  const fn = type === "paper" ? _tickPaperPrices : _tickPortfolioPrices;
+  _liveTimer = setInterval(fn, 30000);
+}
 
 document.getElementById("btn-import-portfolio").addEventListener("click", () => {
   document.getElementById("import-file-input").click();
@@ -2641,7 +3044,8 @@ document.getElementById("import-pdf-input").addEventListener("change", async (e)
       : "";
 
     overlay.classList.remove("hidden");
-    loadPortfolio();
+    TabCache.invalidate('portfolio');
+    loadPortfolio(true);
   } catch (err) {
     status.textContent = "PDF import error: " + err.message;
   } finally {
@@ -2676,7 +3080,8 @@ document.getElementById("import-file-input").addEventListener("change", async (e
     let msg = `Imported ${data.imported} transaction(s).`;
     if (data.skipped > 0) msg += ` ${data.skipped} row(s) skipped: ${data.errors.join("; ")}`;
     status.textContent = msg;
-    loadPortfolio();
+    TabCache.invalidate('portfolio');
+    loadPortfolio(true);
   } catch (err) {
     status.textContent = "Import error: " + err.message;
   } finally {
