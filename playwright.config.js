@@ -1,23 +1,17 @@
 // @ts-check
-const { defineConfig, devices } = require('@playwright/test');
+const { defineConfig } = require('@playwright/test');
 
 module.exports = defineConfig({
   testDir: './tests',
-  timeout: 120_000,
-  expect: { timeout: 15_000 },
-  fullyParallel: false,
-  retries: 1,
-  reporter: [['list'], ['html', { outputFolder: 'test-results-run', open: 'never' }]],
+  timeout: 30000,
   use: {
-    baseURL: 'http://localhost:8000',
-    trace: 'on-first-retry',
-    screenshot: 'only-on-failure',
-    video: 'off',
+    baseURL: 'http://localhost:4321',
+    headless: true,
   },
-  projects: [
-    {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
-    },
-  ],
+  webServer: {
+    command: 'node tests/server.js',
+    port: 4321,
+    reuseExistingServer: true,
+    timeout: 10000,
+  },
 });

@@ -524,34 +524,6 @@ def record_alert_sent(analysis: dict, state: dict):
 
 # ── Main scan loop ─────────────────────────────────────────────────────────────
 
-def _log_alert_to_api(analysis: dict, message: str):
-    """POST alert record to the StockPicker backend so it appears in the Alerts log."""
-    import urllib.request, urllib.error
-    try:
-        api_base = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
-        payload = {
-            "message": message[:500],
-            "channels": ["WhatsApp"],
-            "trigger": f"Sentiment — {analysis.get('severity','').upper()}: {analysis.get('summary','')[:120]}",
-            "affected_tickers": analysis.get("affected_tickers", []),
-            "severity": analysis.get("severity"),
-            "notified_email": False,
-            "notified_sms": True,
-            "source": "sentiment_agent",
-        }
-        data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{api_base}/api/alerts/log",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
-        log.info("Alert logged to StockPicker alerts feed.")
-    except Exception as e:
-        log.warning("Could not log alert to API: %s", e)
-
-
 def run_scan(dry_run: bool = False) -> dict:
     log.info("=== Sentiment scan starting ===")
     state = load_state()
@@ -640,7 +612,6 @@ def run_scan(dry_run: bool = False) -> dict:
                 alert_sent = send_whatsapp(message)
                 if alert_sent:
                     record_alert_sent(analysis, state)
-                    _log_alert_to_api(analysis, message)
     else:
         log.info(
             "No alert — severity=%s expected_move=%.1f%% alert_worthy=%s (threshold: critical always, high needs >=5%% move)",
@@ -695,7 +666,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.test_sms:
-        ok = send_whatsapp("🔔 [TEST] StockPicker Sentiment Agent — WhatsApp is configured correctly. You will receive alerts here when material Mag 7 disruptions are detected. This is a TEST message.")
+        ok = send_whatsapp("StockPicker Sentiment Agent - WhatsApp is configured correctly. You will receive alerts here when material market disruptions are detected.")
         sys.exit(0 if ok else 1)
 
     if args.loop:

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>StockLens - AI-Powered Stock Analysis</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
-  <link rel="stylesheet" href="/static/style.css?v=3" />
+  <link rel="stylesheet" href="/static/style.css?v=4" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
@@ -248,8 +248,8 @@
         <!-- Stock Research Section -->
         <div class="research-section">
           <h3>Stock Research</h3>
-          <p class="ai-subtitle">Enter a stock ticker, sector, or company description for comprehensive research analysis.</p>
-          <input type="text" id="research-query" placeholder="e.g. NVDA, quantum computing sector, AI companies..." />
+          <p class="ai-subtitle">Enter one or more stock tickers for live financial and technical analysis only.</p>
+          <input type="text" id="research-query" placeholder="e.g. NVDA or NVDA AMD TSM" />
           <button id="btn-research" class="btn-primary">Research Stock</button>
           <div id="research-status" class="status-msg"></div>
           <div id="research-loader" class="research-loader hidden">
@@ -289,6 +289,15 @@
       <div id="pred-status" class="status-msg"></div>
       <div id="pred-refresh-info" class="status-msg" style="font-size:0.92rem;color:var(--text-muted);margin-top:-0.25rem"></div>
 
+      <!-- Date period filter -->
+      <div class="pred-period-filters">
+        <button class="pred-period-btn active" data-period="all">All</button>
+        <button class="pred-period-btn" data-period="today">Today</button>
+        <button class="pred-period-btn" data-period="week">This Week</button>
+        <button class="pred-period-btn" data-period="month">This Month</button>
+        <button class="pred-period-btn" data-period="ytd">YTD</button>
+      </div>
+
       <!-- Accuracy summary -->
       <div id="accuracy-bar" class="accuracy-bar hidden">
         <div class="acc-item"><span class="acc-label">Directional Accuracy</span><span id="acc-pct" class="acc-value">—</span></div>
@@ -326,6 +335,7 @@
               <th>Date</th>
               <th>Ticker</th>
               <th>Name</th>
+              <th>Current</th>
               <th>Signal</th>
               <th title="Value / Momentum / Quality / Growth / Composite factor scores + DCF margin of safety">Factors</th>
               <th>3M</th>
@@ -791,7 +801,7 @@
           <span id="paper-cash" class="paper-stat-value">—</span>
         </div>
         <div class="paper-stat">
-          <span class="paper-stat-label">Invested</span>
+          <span class="paper-stat-label">Holdings Value</span>
           <span id="paper-invested" class="paper-stat-value">—</span>
         </div>
         <div class="paper-stat">
@@ -835,7 +845,7 @@
         <table id="paper-history-table">
           <thead>
             <tr>
-              <th>Date</th><th>Type</th><th>Ticker</th><th>Shares</th><th>Price</th><th>Value</th>
+              <th>Date</th><th>Type</th><th>Ticker</th><th>Shares</th><th>Price</th><th>Value</th><th>P&amp;L</th>
             </tr>
           </thead>
           <tbody id="paper-history-body"></tbody>

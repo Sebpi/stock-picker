@@ -268,22 +268,6 @@ let watchlist = [];
 let sentimentWatchlist = [];
 let predictionReasoningMap = {};
 let recReasoningMap = {};
-let _predictionsRefreshTimer = null;
-let _predictionsNextRefreshKey = null;
-let _predictionsAutoRefreshing = false;
-
-// ── Tab data cache ────────────────────────────────────────────
-// Data is held until an explicit refresh is requested.
-// Mutations (trades, watchlist changes, etc.) bust the relevant key.
-const TabCache = (() => {
-  const _s = {};
-  return {
-    get: k => _s[k] ?? null,
-    set: (k, v) => { _s[k] = v; },
-    invalidate: k => { delete _s[k]; },
-    invalidateAll: () => { Object.keys(_s).forEach(k => delete _s[k]); },
-  };
-})();
 
 const TAB_LOADERS = {
   watchlist: () => loadWatchlist(),
@@ -304,10 +288,6 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.classList.add("active");
     document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
     TAB_LOADERS[btn.dataset.tab]?.();
-    if (btn.dataset.tab === "predictions") startPredictionsRefreshInfoTimer();
-    const tab = btn.dataset.tab;
-    if (tab === "portfolio" || tab === "paper") _startLive(tab);
-    else _stopLive();
   });
 });
 
@@ -322,164 +302,6 @@ function fmt(n) {
   if (n >= 1e9)  return "$" + (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6)  return "$" + (n / 1e6).toFixed(2) + "M";
   return "$" + n.toLocaleString();
-}
-
-function formatEtClock(date) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-    timeZoneName: "short",
-  }).format(date);
-}
-
-function formatCountdown(ms) {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function getEtParts(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-    weekday: "short",
-  }).formatToParts(date);
-  const map = Object.fromEntries(parts.filter(p => p.type !== "literal").map(p => [p.type, p.value]));
-  const weekdays = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-  return {
-    year: Number(map.year),
-    month: Number(map.month),
-    day: Number(map.day),
-    hour: Number(map.hour),
-    minute: Number(map.minute),
-    second: Number(map.second),
-    weekday: weekdays[map.weekday] ?? 0,
-  };
-}
-
-function getEtDateForParts(parts) {
-  let guess = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
-  const desiredUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
-  for (let i = 0; i < 4; i++) {
-    const actual = getEtParts(new Date(guess));
-    const actualUtc = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second);
-    const delta = desiredUtc - actualUtc;
-    guess += delta;
-    if (delta === 0) break;
-  }
-  return new Date(guess);
-}
-
-function getNextPredictionRefreshDate(now = new Date()) {
-  const et = getEtParts(now);
-  const dayStart = { hour: 9, minute: 30 };
-  const dayEnd = { hour: 16, minute: 0 };
-  const currentMinutes = et.hour * 60 + et.minute;
-  const openMinutes = dayStart.hour * 60 + dayStart.minute;
-  const closeMinutes = dayEnd.hour * 60 + dayEnd.minute;
-
-  const nextBusinessDay = (offsetDays = 1) => {
-    const base = new Date(Date.UTC(et.year, et.month - 1, et.day + offsetDays));
-    let weekday = base.getUTCDay();
-    while (weekday === 0 || weekday === 6) {
-      base.setUTCDate(base.getUTCDate() + 1);
-      weekday = base.getUTCDay();
-    }
-    return {
-      year: base.getUTCFullYear(),
-      month: base.getUTCMonth() + 1,
-      day: base.getUTCDate(),
-      hour: dayStart.hour,
-      minute: dayStart.minute,
-      second: 0,
-    };
-  };
-
-  if (et.weekday === 0 || et.weekday === 6) {
-    return getEtDateForParts(nextBusinessDay(et.weekday === 6 ? 2 : 1));
-  }
-
-  if (currentMinutes < openMinutes) {
-    return getEtDateForParts({ ...et, hour: dayStart.hour, minute: dayStart.minute, second: 0 });
-  }
-
-  if (currentMinutes >= closeMinutes) {
-    return getEtDateForParts(nextBusinessDay(1));
-  }
-
-  if (currentMinutes < 9 * 60 + 45) {
-    return getEtDateForParts({ ...et, hour: 9, minute: 45, second: 0 });
-  }
-
-  let nextMinutes = Math.ceil(currentMinutes / 15) * 15;
-  if (nextMinutes >= closeMinutes) {
-    return getEtDateForParts(nextBusinessDay(1));
-  }
-  return getEtDateForParts({
-    ...et,
-    hour: Math.floor(nextMinutes / 60),
-    minute: nextMinutes % 60,
-    second: 0,
-  });
-}
-
-function isPredictionsTabActive() {
-  return document.getElementById("tab-predictions")?.classList.contains("active");
-}
-
-function updatePredictionsRefreshInfo() {
-  const el = document.getElementById("pred-refresh-info");
-  if (!el) return;
-  const now = new Date();
-  const nextRefresh = getNextPredictionRefreshDate(now);
-  const msRemaining = Math.max(0, nextRefresh.getTime() - now.getTime());
-  const countdown = formatCountdown(msRemaining);
-  const refreshKey = nextRefresh.toISOString();
-  const et = getEtParts(now);
-  const currentMinutes = et.hour * 60 + et.minute;
-  const marketOpen = et.weekday >= 1 && et.weekday <= 5 && currentMinutes >= 570 && currentMinutes < 960;
-  const nowLabel = `ET now: ${formatEtClock(now)}.`;
-  if (marketOpen) {
-    el.textContent = `${nowLabel} Next auto-refresh: ${formatEtClock(nextRefresh)} (${countdown}) on the 15-minute schedule.`;
-  } else {
-    el.textContent = `${nowLabel} Auto-refresh runs every 15 minutes during market hours. Next window: ${formatEtClock(nextRefresh)}.`;
-  }
-
-  if (_predictionsNextRefreshKey == null) {
-    _predictionsNextRefreshKey = refreshKey;
-  }
-
-  if (
-    marketOpen &&
-    isPredictionsTabActive() &&
-    !_predictionsAutoRefreshing &&
-    refreshKey !== _predictionsNextRefreshKey
-  ) {
-    _predictionsNextRefreshKey = refreshKey;
-    _predictionsAutoRefreshing = true;
-    const status = document.getElementById("pred-status");
-    if (status) status.textContent = "Auto-refreshing predictions...";
-    invalidatePredictionsSnapshotCache();
-    loadPredictions(true).finally(() => {
-      _predictionsAutoRefreshing = false;
-    });
-  }
-}
-
-function startPredictionsRefreshInfoTimer() {
-  updatePredictionsRefreshInfo();
-  if (_predictionsRefreshTimer) return;
-  _predictionsRefreshTimer = setInterval(updatePredictionsRefreshInfo, 1000);
 }
 
 function fmtScreenerMarketCap(n) {
@@ -754,124 +576,6 @@ function renderResearchResponse(rawText, query) {
   `);
 }
 
-// ── Sector-aware screener tooltips & placeholders ─────────────
-const SECTOR_FILTER_CONFIG = {
-  "": {
-    pe:        { tip: "Price-to-Earnings Ratio\n\nShare price ÷ earnings per share. Tells you how much investors pay for £1 of profit.\n\n✅ Good: <15 = cheap, 15–25 = fair value\n⚠️ Caution: >30 = expensive, may be priced for perfection\n\nNote: negative P/E means the company is losing money.", ph: "e.g. 25" },
-    peg:       { tip: "Price/Earnings-to-Growth Ratio\n\nP/E ÷ expected earnings growth rate. Adjusts P/E for how fast the company is growing — a cheaper way to spot value in growth stocks.\n\n✅ Good: <1.0 = undervalued relative to growth\n✅ Fair: 1.0–2.0 = reasonably priced\n⚠️ Caution: >2.0 = paying a lot for growth", ph: "e.g. 1.5" },
-    pb:        { tip: "Price-to-Book Ratio\n\nShare price ÷ net assets per share (what the company owns minus what it owes). Shows if you are paying more than the company's accounting value.\n\n✅ Good: <1.5 = trading near or below asset value\n✅ Fair: 1.5–3.0 = moderate premium\n⚠️ Caution: >5 = very expensive vs. assets (common in asset-light tech)", ph: "e.g. 3" },
-    ev:        { tip: "Enterprise Value ÷ Earnings Before Interest, Tax, Depreciation & Amortisation\n\nCompares the total cost to buy the whole business against its operating profit. More comprehensive than P/E as it accounts for debt and is not distorted by accounting choices.\n\n✅ Good: <10 = potentially undervalued\n✅ Fair: 10–15 = reasonable\n⚠️ Caution: >20 = expensive on this measure", ph: "e.g. 15" },
-    fcf:       { tip: "Free Cash Flow Yield\n\nFree cash flow ÷ market cap × 100. Shows how much real cash the company generates relative to its price — often seen as harder to fake than reported earnings.\n\n✅ Good: >5% = strong cash generation\n✅ Decent: 2–5%\n⚠️ Caution: <2% or negative = limited or no free cash", ph: "e.g. 4" },
-    revgrowth: { tip: "Year-over-Year Revenue Growth\n\nHow fast the company's sales are growing compared to the same period last year.\n\n✅ Good: >10% = strong growth\n✅ Decent: 5–10%\n⚠️ Caution: <5% = slow growth  ❌ Negative = shrinking revenue", ph: "e.g. 10" },
-  },
-  "Technology": {
-    pe:        { tip: "P/E Ratio — Technology Sector\n\nTech companies often command premium valuations due to high growth and scalable business models. Use alongside PEG and revenue growth for context.\n\n✅ Good: <25 = attractively valued for tech\n✅ Fair: 25–45 = normal growth premium\n⚠️ Caution: >50 = priced for perfection, high risk if growth slows", ph: "e.g. 35" },
-    peg:       { tip: "PEG Ratio — Technology Sector\n\nParticularly useful in tech where high P/Es are only justified by high growth. A PEG under 1 is rare and valuable here.\n\n✅ Good: <1.0 = undervalued relative to growth\n✅ Fair: 1.0–2.0 = growth is reasonably priced\n⚠️ Caution: >2.5 = expensive even for a fast-grower", ph: "e.g. 1.5" },
-    pb:        { tip: "P/B Ratio — Technology Sector\n\nAsset-light tech companies (software, platforms) carry minimal physical assets, so high P/B is normal. Focus on earnings power and FCF instead.\n\n✅ Context: <8 = modest for tech\n✅ Normal: 8–20 = typical for profitable software firms\n⚠️ Caution: >30 = very richly priced vs. book (look for strong FCF to justify)", ph: "e.g. 10" },
-    ev:        { tip: "EV/EBITDA — Technology Sector\n\nHigher multiples are the norm in tech. Cloud, SaaS and semiconductor firms often trade at significant premiums due to recurring revenue and margin expansion.\n\n✅ Good: <18 = reasonable for tech\n✅ Fair: 18–30 = typical growth-stock range\n⚠️ Caution: >35 = very expensive, needs exceptional growth to justify", ph: "e.g. 22" },
-    fcf:       { tip: "FCF Yield — Technology Sector\n\nFree cash flow is the gold standard in tech — software and platform businesses can be highly cash-generative once scaled.\n\n✅ Good: >3% = healthy for a growth-stage tech firm\n✅ Mature tech: >5% = excellent\n⚠️ Caution: <1% = still burning cash or re-investing heavily (acceptable in early growth, not in maturity)", ph: "e.g. 3" },
-    revgrowth: { tip: "Revenue Growth — Technology Sector\n\nGrowth is the primary value driver in tech. Markets will forgive low earnings today for strong, compounding top-line growth.\n\n✅ Strong: >20% = high-growth tech\n✅ Solid: 10–20% = healthy expansion\n⚠️ Caution: <8% = slowing — re-rate risk if the market was pricing in higher growth", ph: "e.g. 15" },
-  },
-  "Healthcare": {
-    pe:        { tip: "P/E Ratio — Healthcare Sector\n\nHealthcare spans pharma, biotech, medtech and services — each with very different earnings profiles. Biotech may have no earnings; large pharma typically trades at moderate multiples.\n\n✅ Good: <18 = value territory for established healthcare\n✅ Fair: 18–30 = reasonable for high-quality names\n⚠️ Caution: >35 = rich; validate with pipeline strength or recurring revenue", ph: "e.g. 22" },
-    peg:       { tip: "PEG Ratio — Healthcare Sector\n\nUseful for pharma and healthcare services with predictable earnings. Less meaningful for loss-making biotech.\n\n✅ Good: <1.0 = undervalued vs. growth\n✅ Fair: 1.0–2.0 = reasonably priced\n⚠️ Caution: >2.5 = high premium; justify with pipeline or patent moat", ph: "e.g. 1.5" },
-    pb:        { tip: "P/B Ratio — Healthcare Sector\n\nLarge pharma and medtech carry significant intangible assets (patents, IP) not always reflected in book value, so moderate-to-high P/B is normal.\n\n✅ Good: <3 = modest premium for healthcare\n✅ Fair: 3–6 = normal for established names\n⚠️ Caution: >8 = very expensive vs. assets; look for durable IP or recurring revenue", ph: "e.g. 4" },
-    ev:        { tip: "EV/EBITDA — Healthcare Sector\n\nA reliable metric for healthcare services and medtech where EBITDA is consistent. Less useful for clinical-stage biotech with no EBITDA.\n\n✅ Good: <12 = potentially undervalued\n✅ Fair: 12–20 = reasonable for quality healthcare\n⚠️ Caution: >25 = expensive; requires strong pipeline or high-margin recurring business", ph: "e.g. 15" },
-    fcf:       { tip: "FCF Yield — Healthcare Sector\n\nEstablished pharma and healthcare services generate strong, predictable cash flows. R&D-heavy firms may have lower FCF due to pipeline investment.\n\n✅ Good: >5% = strong cash generation\n✅ Decent: 2–5% = adequate\n⚠️ Caution: <2% = likely reinvesting heavily in R&D or clinical trials (check pipeline value)", ph: "e.g. 4" },
-    revgrowth: { tip: "Revenue Growth — Healthcare Sector\n\nGrowth is driven by drug launches, aging demographics and procedure volumes. Watch for patent cliffs that can sharply reduce revenues.\n\n✅ Strong: >12% = strong pipeline or market share gains\n✅ Solid: 5–12% = healthy for established healthcare\n⚠️ Caution: <5% = mature or facing patent expiry risk", ph: "e.g. 8" },
-  },
-  "Financial Services": {
-    pe:        { tip: "P/E Ratio — Financial Services Sector\n\nBanks, insurers and asset managers tend to trade at lower multiples than the broader market due to slower growth and cyclical earnings.\n\n✅ Good: <10 = cheap for financials\n✅ Fair: 10–16 = normal range\n⚠️ Caution: >20 = expensive relative to peers; check ROE and credit quality", ph: "e.g. 12" },
-    peg:       { tip: "PEG Ratio — Financial Services Sector\n\nLess widely used in financials where earnings are lumpy. P/B and ROE are generally more informative for banks.\n\n✅ Good: <1.0 = undervalued vs. growth\n✅ Fair: 1.0–1.8\n⚠️ Caution: >2.0 = high for a sector with structurally limited growth", ph: "e.g. 1.2" },
-    pb:        { tip: "P/B Ratio — Financial Services Sector\n\nThe primary valuation metric for banks. Book value represents the net asset base; trading near or below it can signal value or distress.\n\n✅ Good: <1.0 = trading below book — deep value if quality is solid\n✅ Fair: 1.0–1.8 = typical for healthy bank\n⚠️ Caution: >2.5 = rich for a bank; only justified by high ROE (>15%)", ph: "e.g. 1.5" },
-    ev:        { tip: "EV/EBITDA — Financial Services Sector\n\nGenerally not meaningful for banks and insurers — their 'debt' is a core operating input (deposits, float), not just financing. Use P/E and P/B instead.\n\n✅ Applicable to: asset managers, exchanges, fintech\n⚠️ Not useful for: retail banks, insurance companies", ph: "e.g. 10" },
-    fcf:       { tip: "FCF Yield — Financial Services Sector\n\nFree cash flow is harder to define cleanly for banks (capital requirements differ). Dividend yield and payout ratio are often more useful signals.\n\n✅ Asset managers / exchanges: >5% = strong\n✅ Insurers: >4% = healthy\n⚠️ Banks: use dividend yield and CET1 ratio instead", ph: "e.g. 4" },
-    revgrowth: { tip: "Revenue Growth — Financial Services Sector\n\nRevenue in financials is driven by loan growth, fee income and interest rate margins. Growth above 8% is strong for this sector.\n\n✅ Good: >8% = strong for financials\n✅ Decent: 3–8%\n⚠️ Caution: <3% = stagnant; check net interest margin trend", ph: "e.g. 6" },
-  },
-  "Consumer Cyclical": {
-    pe:        { tip: "P/E Ratio — Consumer Cyclical Sector\n\nEarnings are tied to economic cycles — P/E can look high at cycle peaks and low at troughs. Consider normalised earnings to avoid misleading signals.\n\n✅ Good: <15 = cheap on current earnings\n✅ Fair: 15–25 = reasonable mid-cycle\n⚠️ Caution: >28 = expensive; check if earnings are near a cyclical peak", ph: "e.g. 20" },
-    peg:       { tip: "PEG Ratio — Consumer Cyclical Sector\n\nUseful when earnings growth is driven by structural factors (brand, market share) rather than just the cycle. Be wary of PEG based on peak earnings.\n\n✅ Good: <1.0\n✅ Fair: 1.0–2.0\n⚠️ Caution: >2.5 = expensive for a cyclical business", ph: "e.g. 1.5" },
-    pb:        { tip: "P/B Ratio — Consumer Cyclical Sector\n\nRetailers and automakers carry significant tangible assets; luxury brands have large intangible brand value. Context matters by sub-sector.\n\n✅ Good: <2.0 = conservative valuation\n✅ Fair: 2.0–4.0 = moderate brand premium\n⚠️ Caution: >5 = high; ensure brand equity or recurring revenue justifies it", ph: "e.g. 3" },
-    ev:        { tip: "EV/EBITDA — Consumer Cyclical Sector\n\nA key metric for retail, autos and leisure. Accounts for the capital-intensive nature of physical retail better than P/E.\n\n✅ Good: <9 = potentially undervalued\n✅ Fair: 9–15 = normal range\n⚠️ Caution: >18 = expensive for a cyclical; margin of safety is thin", ph: "e.g. 12" },
-    fcf:       { tip: "FCF Yield — Consumer Cyclical Sector\n\nStrong FCF is a hallmark of quality cyclicals — it allows buybacks and dividends through downturns. Retailers with inventory risk tend to have lumpier FCF.\n\n✅ Good: >5% = strong\n✅ Decent: 2–5%\n⚠️ Caution: <2% = thin cushion for a cyclical business heading into a slowdown", ph: "e.g. 4" },
-    revgrowth: { tip: "Revenue Growth — Consumer Cyclical Sector\n\nGrowth reflects consumer confidence and discretionary spending. Strong organic growth (ex-price increases) is the quality signal.\n\n✅ Good: >8% = outperforming the consumer\n✅ Decent: 3–8%\n⚠️ Caution: <3% = barely keeping up with inflation", ph: "e.g. 6" },
-  },
-  "Consumer Defensive": {
-    pe:        { tip: "P/E Ratio — Consumer Defensive Sector\n\nStaples (food, beverages, household goods) command a stability premium — investors pay up for predictable earnings through downturns. Expect higher-than-market multiples.\n\n✅ Good: <18 = attractively priced for a defensive\n✅ Fair: 18–25 = typical for quality staples\n⚠️ Caution: >28 = expensive; limited upside unless brand/pricing power is exceptional", ph: "e.g. 20" },
-    peg:       { tip: "PEG Ratio — Consumer Defensive Sector\n\nGrowth is inherently modest in staples, so PEG will naturally be higher. Focus on dividend yield and FCF as primary quality indicators.\n\n✅ Good: <1.5 = fair value in this slow-growth sector\n✅ Fair: 1.5–2.5\n⚠️ Caution: >3.0 = very expensive for a low-growth business", ph: "e.g. 2.0" },
-    pb:        { tip: "P/B Ratio — Consumer Defensive Sector\n\nEstablished consumer brands carry enormous intangible value (brand equity, distribution networks) not fully captured in book value.\n\n✅ Good: <3.0\n✅ Fair: 3.0–6.0 = normal for blue-chip staples\n⚠️ Caution: >8 = very expensive; requires pricing power and dominant market position", ph: "e.g. 4" },
-    ev:        { tip: "EV/EBITDA — Consumer Defensive Sector\n\nReliable metric for staples with consistent EBITDA. Higher multiples than cyclicals are warranted given earnings resilience.\n\n✅ Good: <12 = value territory\n✅ Fair: 12–18 = typical for quality defensives\n⚠️ Caution: >22 = fully priced; limited downside protection at this valuation", ph: "e.g. 15" },
-    fcf:       { tip: "FCF Yield — Consumer Defensive Sector\n\nStrong, consistent FCF is the hallmark of great consumer staples — it funds dividends, buybacks and acquisitions through all market conditions.\n\n✅ Good: >5% = excellent quality signal\n✅ Decent: 3–5%\n⚠️ Caution: <2% = unusually low for a staples business; investigate margin pressure", ph: "e.g. 4" },
-    revgrowth: { tip: "Revenue Growth — Consumer Defensive Sector\n\nStaples grow slowly by nature — pricing power and volume growth of 3–5% is considered healthy. Focus on margin stability over top-line heroics.\n\n✅ Good: >6% = strong (likely gaining market share)\n✅ Decent: 2–6%\n⚠️ Caution: <2% = barely treading water; check if pricing is masking volume decline", ph: "e.g. 4" },
-  },
-  "Energy": {
-    pe:        { tip: "P/E Ratio — Energy Sector\n\nEnergy earnings are highly cyclical and commodity-driven — P/E can be misleading (very low at oil price peaks, very high or negative in downturns). Use EV/EBITDA and FCF yield as primary metrics.\n\n✅ Good: <10 = cheap on current commodity prices\n✅ Fair: 10–18 = reasonable mid-cycle\n⚠️ Caution: >22 = likely near a commodity peak — earnings may not be sustainable", ph: "e.g. 12" },
-    peg:       { tip: "PEG Ratio — Energy Sector\n\nLeast reliable metric in energy due to earnings volatility from commodity price swings. FCF yield and balance sheet strength are far more informative.\n\n✅ Context: use as a supplementary signal only\n✅ Good: <1.0 = undervalued relative to growth cycle\n⚠️ Note: growth figures in energy can be artificially high at cycle peaks", ph: "e.g. 1.0" },
-    pb:        { tip: "P/B Ratio — Energy Sector\n\nEnergy companies have large tangible asset bases (reserves, infrastructure). Trading near or below book can signal deep value — or a value trap if reserves are impaired.\n\n✅ Good: <1.2 = trading near asset value\n✅ Fair: 1.2–2.0\n⚠️ Caution: >2.5 = expensive for a capital-intensive, commodity-exposed business", ph: "e.g. 1.5" },
-    ev:        { tip: "EV/EBITDA — Energy Sector\n\nThe preferred valuation metric in energy. Accounts for the heavy debt loads common in the sector and strips out the distortions of D&A on capital-intensive assets.\n\n✅ Good: <5 = potentially undervalued\n✅ Fair: 5–8 = mid-cycle norm\n⚠️ Caution: >10 = expensive for energy; implies high commodity price expectations", ph: "e.g. 6" },
-    fcf:       { tip: "FCF Yield — Energy Sector\n\nThe most important metric in energy today. After years of over-investment, the sector now prioritises returning cash to shareholders. High FCF yield = strong capital discipline.\n\n✅ Good: >8% = excellent capital return story\n✅ Decent: 4–8%\n⚠️ Caution: <4% = either commodity prices are weak or capex is high — check breakeven oil price", ph: "e.g. 6" },
-    revgrowth: { tip: "Revenue Growth — Energy Sector\n\nRevenue tracks commodity prices closely — high growth in a bull market can quickly reverse. Focus on production growth and cost per barrel, not just top-line revenue.\n\n✅ Good: >10% = production growth or commodity tailwind\n✅ Decent: 0–10%\n⚠️ Caution: Negative = commodity downturn or volume decline; check hedge book and breakeven", ph: "e.g. 5" },
-  },
-  "Industrials": {
-    pe:        { tip: "P/E Ratio — Industrials Sector\n\nIndustrials (aerospace, defence, logistics, machinery) are moderately cyclical. Quality names with recurring service revenues deserve a premium over pure equipment manufacturers.\n\n✅ Good: <15 = value territory\n✅ Fair: 15–22 = reasonable for quality industrials\n⚠️ Caution: >25 = expensive; validate with order backlog and margin trends", ph: "e.g. 18" },
-    peg:       { tip: "PEG Ratio — Industrials Sector\n\nUseful for identifying compounders in industrials — businesses with durable pricing power and long-cycle order books.\n\n✅ Good: <1.0 = undervalued vs. growth\n✅ Fair: 1.0–2.0\n⚠️ Caution: >2.5 = expensive for the sector", ph: "e.g. 1.5" },
-    pb:        { tip: "P/B Ratio — Industrials Sector\n\nIndustrials carry significant physical assets. Trading at a large premium to book is only justified by high ROE and durable competitive moats (e.g. switching costs, regulatory barriers).\n\n✅ Good: <2.0 = modest premium\n✅ Fair: 2.0–4.0\n⚠️ Caution: >5 = expensive vs. asset base; requires consistently high returns on capital", ph: "e.g. 3" },
-    ev:        { tip: "EV/EBITDA — Industrials Sector\n\nStandard valuation metric for industrials. Useful for comparing capital-intensive businesses where EBITDA is a cleaner measure of operating performance than net income.\n\n✅ Good: <9 = potentially undervalued\n✅ Fair: 9–14 = normal range\n⚠️ Caution: >16 = expensive; margin of safety is limited unless order backlog is very strong", ph: "e.g. 11" },
-    fcf:       { tip: "FCF Yield — Industrials Sector\n\nCapex cycles can make FCF lumpy in industrials. Look for businesses with asset-light models or long-term service contracts that generate consistent free cash.\n\n✅ Good: >5% = strong and consistent\n✅ Decent: 2–5%\n⚠️ Caution: <2% = likely in a heavy capex phase or facing margin pressure", ph: "e.g. 4" },
-    revgrowth: { tip: "Revenue Growth — Industrials Sector\n\nGrowth is driven by capital expenditure cycles, infrastructure spending and global trade. Backlog and book-to-bill ratio are leading indicators.\n\n✅ Good: >8% = strong organic growth or cycle tailwind\n✅ Decent: 3–8%\n⚠️ Caution: <3% = late-cycle signal; check order intake trend", ph: "e.g. 6" },
-  },
-  "Communication Services": {
-    pe:        { tip: "P/E Ratio — Communication Services Sector\n\nSpans telecom (low growth, high yield) and media/internet platforms (high growth, low yield). Valuations vary enormously — always compare within sub-sector.\n\n✅ Telecom: <14 = cheap, 14–20 = fair\n✅ Platforms/media: <25 = reasonable, 25–40 = growth premium\n⚠️ Caution: >45 = expensive for platform; check user growth and ARPU trends", ph: "e.g. 22" },
-    peg:       { tip: "PEG Ratio — Communication Services Sector\n\nMost useful for internet platforms and streaming businesses where growth is the primary value driver. Less relevant for mature telecoms.\n\n✅ Good: <1.0 = undervalued relative to growth\n✅ Fair: 1.0–2.0\n⚠️ Caution: >2.5 = high for the sector", ph: "e.g. 1.5" },
-    pb:        { tip: "P/B Ratio — Communication Services Sector\n\nPlatform businesses have minimal tangible assets, making P/B less useful. Telecoms have large physical network assets — higher P/B signals confidence in returns on that infrastructure.\n\n✅ Telecom: <2.0 = reasonable\n✅ Platforms: <8 = fair for asset-light model\n⚠️ Caution: >15 for platforms = very richly priced vs. book value", ph: "e.g. 5" },
-    ev:        { tip: "EV/EBITDA — Communication Services Sector\n\nThe standard metric for telecoms where EBITDA margins are high and stable. Less reliable for loss-making or fast-growing platforms.\n\n✅ Telecom: <7 = value, 7–12 = fair\n✅ Media/platforms: <15 = reasonable\n⚠️ Caution: >22 = expensive; validate with subscriber growth and churn rates", ph: "e.g. 14" },
-    fcf:       { tip: "FCF Yield — Communication Services Sector\n\nTelecoms are capital-intensive (network build-out) so FCF after capex is the key metric. Platforms can be highly cash-generative once scaled.\n\n✅ Telecom: >6% = strong after high capex\n✅ Platforms: >4% = healthy\n⚠️ Caution: <2% = network investment phase or margin pressure; check capex cycle timing", ph: "e.g. 4" },
-    revgrowth: { tip: "Revenue Growth — Communication Services Sector\n\nTelecom revenue is mature and slow; platform/media revenue can grow rapidly via advertising, subscriptions and user expansion.\n\n✅ Platforms: >12% = strong\n✅ Telecom: >3% = solid for mature network\n⚠️ Caution: Flat or negative telecom revenue = pricing pressure or subscriber loss", ph: "e.g. 8" },
-  },
-  "Basic Materials": {
-    pe:        { tip: "P/E Ratio — Basic Materials Sector\n\nMining, chemicals and materials are highly cyclical — earnings spike with commodity prices. P/E based on peak earnings is misleading; use mid-cycle or normalised earnings.\n\n✅ Good: <10 = cheap on current prices\n✅ Fair: 10–18\n⚠️ Caution: >22 = likely near commodity price peak — use EV/EBITDA and FCF yield instead", ph: "e.g. 12" },
-    peg:       { tip: "PEG Ratio — Basic Materials Sector\n\nLeast reliable in this sector due to earnings cyclicality. Growth can look exceptional at commodity peaks and collapse rapidly. Use as supplementary context only.\n\n✅ Good: <1.0 (at mid-cycle earnings)\n⚠️ Note: PEG based on peak earnings will mislead — always check where we are in the commodity cycle", ph: "e.g. 1.0" },
-    pb:        { tip: "P/B Ratio — Basic Materials Sector\n\nMining companies hold real assets (reserves, infrastructure). Buying near or below book value limits downside. High P/B in a commodity up-cycle can quickly unwind.\n\n✅ Good: <1.2 = conservative, asset-backed value\n✅ Fair: 1.2–2.5\n⚠️ Caution: >3 = expensive for a cyclical; requires sustained high commodity prices", ph: "e.g. 1.5" },
-    ev:        { tip: "EV/EBITDA — Basic Materials Sector\n\nPreferred valuation metric in mining and chemicals. Strips out D&A distortions on large physical asset bases and accounts for debt typical in capital-intensive businesses.\n\n✅ Good: <6 = potentially undervalued\n✅ Fair: 6–10\n⚠️ Caution: >12 = expensive for materials; commodity price assumptions are likely optimistic", ph: "e.g. 7" },
-    fcf:       { tip: "FCF Yield — Basic Materials Sector\n\nDisciplined capital allocation is key in materials — look for miners generating FCF at mid-cycle prices, not just at price spikes.\n\n✅ Good: >7% = strong capital return story\n✅ Decent: 3–7%\n⚠️ Caution: <3% = heavy capex or weak commodity environment; check breakeven costs", ph: "e.g. 5" },
-    revgrowth: { tip: "Revenue Growth — Basic Materials Sector\n\nRevenue tracks commodity prices — headline growth can be misleading. Volume growth and cost curve position are more durable quality indicators.\n\n✅ Good: >8% = volume growth or commodity tailwind\n✅ Decent: 0–8%\n⚠️ Caution: Negative = commodity downturn; assess balance sheet strength and cost position", ph: "e.g. 5" },
-  },
-  "Utilities": {
-    pe:        { tip: "P/E Ratio — Utilities Sector\n\nUtilities are slow-growth, high-yield businesses — lower P/E multiples reflect lower growth, not poor quality. They are valued primarily for income and capital stability.\n\n✅ Good: <13 = cheap for utilities\n✅ Fair: 13–20 = typical range\n⚠️ Caution: >22 = expensive; dividend yield will be low at this price — compare to bond yields", ph: "e.g. 15" },
-    peg:       { tip: "PEG Ratio — Utilities Sector\n\nLeast useful in utilities — growth is deliberately slow and regulated. Focus on dividend yield, payout ratio and RAB (Regulated Asset Base) instead.\n\n✅ Context: utilities rarely have PEG <1 — that is not the investment thesis\n✅ If applicable: <2.5 = fair for regulated utility\n⚠️ Note: earnings growth is mostly driven by regulatory rate reviews, not operational expansion", ph: "e.g. 2.0" },
-    pb:        { tip: "P/B Ratio — Utilities Sector\n\nLarge regulated asset bases make P/B meaningful here. Premium to book is justified by a favourable regulatory environment and stable returns.\n\n✅ Good: <1.3 = near asset value — potential value if regulation is stable\n✅ Fair: 1.3–2.2 = normal premium for quality utility\n⚠️ Caution: >2.5 = expensive; regulatory risk or rate cut could reprice significantly", ph: "e.g. 1.8" },
-    ev:        { tip: "EV/EBITDA — Utilities Sector\n\nKey metric for utilities given high, stable EBITDA margins from regulated or contracted revenues. Also captures the significant debt typical in capital-intensive utility businesses.\n\n✅ Good: <7 = value territory\n✅ Fair: 7–11 = normal for regulated utility\n⚠️ Caution: >13 = expensive; implies optimistic assumptions about regulatory outcomes or rate increases", ph: "e.g. 9" },
-    fcf:       { tip: "FCF Yield — Utilities Sector\n\nUtilities are capital-intensive — ongoing infrastructure investment means FCF after capex can be modest despite high EBITDA. Focus on dividend coverage rather than raw FCF yield.\n\n✅ Good: >4% = healthy after infrastructure capex\n✅ Decent: 2–4%\n⚠️ Caution: <2% = heavy investment cycle or stretched balance sheet; check dividend cover ratio", ph: "e.g. 3" },
-    revgrowth: { tip: "Revenue Growth — Utilities Sector\n\nRevenue is set by regulators or long-term contracts — growth is modest by design. Tariff increases, electrification and renewable build-out are the main growth levers.\n\n✅ Good: >4% = above-average for utilities (likely tariff increases or M&A)\n✅ Decent: 1–4% = in line with regulated rate of return\n⚠️ Caution: Flat or negative = regulatory headwind or volume decline; check RAB growth", ph: "e.g. 3" },
-  },
-  "Real Estate": {
-    pe:        { tip: "P/E Ratio — Real Estate / REITs\n\nTraditional P/E is largely irrelevant for REITs — depreciation heavily distorts reported earnings. Use Price/FFO (Funds From Operations) or Price/AFFO instead, which add back D&A to reflect true cash earnings.\n\n✅ Context: a 'low' P/E in a REIT may simply reflect high depreciation charges\n✅ Use instead: Price/FFO <15 = good value; 15–22 = fair; >25 = expensive\n⚠️ Note: if the screener shows P/E, treat it as a rough guide only", ph: "e.g. 20" },
-    peg:       { tip: "PEG Ratio — Real Estate / REITs\n\nNot a standard metric for REITs. FFO growth rate relative to Price/FFO is more relevant. Use this filter with caution in this sector.\n\n✅ If using: <2.0 = reasonable\n⚠️ Preferred metric: Price/FFO relative to FFO growth rate", ph: "e.g. 2.0" },
-    pb:        { tip: "P/B Ratio — Real Estate / REITs\n\nBook value approximates NAV (Net Asset Value) for real estate. Buying below book suggests the market is discounting the asset base — a key value signal for REITs.\n\n✅ Good: <0.9 = trading at a discount to NAV — potential value\n✅ Fair: 0.9–1.5 = modest premium to NAV\n⚠️ Caution: >2.0 = significant premium; only justified by trophy assets or strong rental growth outlook", ph: "e.g. 1.2" },
-    ev:        { tip: "EV/EBITDA — Real Estate / REITs\n\nUseful for property companies with operating businesses (hotels, logistics, retail). For pure-play REITs, EV/EBITDA is less standard than cap rate or Price/FFO.\n\n✅ Good: <14 = reasonable for diversified REIT\n✅ Fair: 14–22\n⚠️ Caution: >25 = expensive; implies very low cap rate or speculative premium on asset appreciation", ph: "e.g. 18" },
-    fcf:       { tip: "FCF Yield — Real Estate / REITs\n\nFor REITs, AFFO yield (Adjusted Funds From Operations ÷ market cap) is the closest equivalent to FCF yield and is the primary income metric.\n\n✅ Good: AFFO yield >5% = attractive income\n✅ Decent: 3–5%\n⚠️ Caution: <3% = low yield relative to interest rates; also check dividend payout as % of AFFO (should be <90%)", ph: "e.g. 5" },
-    revgrowth: { tip: "Revenue Growth — Real Estate / REITs\n\nRental income growth driven by occupancy rates, lease renewals and new development. Same-store NOI (Net Operating Income) growth is the purest quality signal.\n\n✅ Good: >6% = strong rental growth or acquisitions\n✅ Decent: 2–6% = in line with inflation-linked leases\n⚠️ Caution: <2% = occupancy pressure or lease expiry risk; check vacancy rates and WAULT (weighted average unexpired lease term)", ph: "e.g. 4" },
-  },
-};
-
-function applyScreenerSectorConfig(sector) {
-  const cfg = SECTOR_FILTER_CONFIG[sector] || SECTOR_FILTER_CONFIG[""];
-  const fields = { pe: "pe", peg: "peg", pb: "pb", ev: "ev", fcf: "fcf", revgrowth: "rev-growth" };
-  for (const [key, inputId] of Object.entries(fields)) {
-    const c = cfg[key];
-    if (!c) continue;
-    const tip = document.querySelector(`.filter-group:has(#filter-${inputId}) .tip`);
-    const input = document.getElementById(`filter-${inputId}`);
-    if (tip) tip.setAttribute("data-tip", c.tip);
-    if (input) input.placeholder = c.ph;
-  }
-}
-
-document.getElementById("filter-sector").addEventListener("change", function () {
-  applyScreenerSectorConfig(this.value);
-});
-applyScreenerSectorConfig("");
-
 // Toggle ≤ / ≥ on filter operator buttons
 document.querySelectorAll(".filter-op-btn").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -943,10 +647,15 @@ document.getElementById("screener-search").addEventListener("keydown", async fun
   }
 });
 
-function buildScreenerParams() {
+async function runScreen() {
+  const btn = document.getElementById("btn-screen");
+  const status = document.getElementById("screen-status");
+  const body = document.getElementById("screen-body");
+
   const index  = document.getElementById("filter-index").value;
   const sector = document.getElementById("filter-sector").value;
   const query  = document.getElementById("screener-search").value.trim();
+
   function opParam(filterId, backendKey, scale) {
     const val = document.getElementById("filter-" + filterId).value;
     if (val === "") return null;
@@ -955,6 +664,7 @@ function buildScreenerParams() {
     const num = parseFloat(val) * (scale || 1);
     return [op + "_" + backendKey, num];
   }
+
   const params = new URLSearchParams();
   if (index)  params.set("index", index);
   if (query)  params.set("q", query);
@@ -969,157 +679,119 @@ function buildScreenerParams() {
     opParam("vol",        "volume",     1e6),
     opParam("rev-growth", "rev_growth"),
   ].forEach(p => { if (p) params.set(p[0], p[1]); });
-  return params;
-}
-
-function renderScreenerRows(data, body) {
-  function calcMedian(stocks, key) {
-    const vals = stocks.map(s => s[key]).filter(v => v != null).sort((a, b) => a - b);
-    if (!vals.length) return null;
-    const mid = Math.floor(vals.length / 2);
-    return vals.length % 2 === 0 ? (vals[mid - 1] + vals[mid]) / 2 : vals[mid];
-  }
-  function fmtMedian(val, isPct = false) {
-    return val == null ? "n/a" : isPct ? `${val}%` : `${val}`;
-  }
-  function escapeAttr(str) {
-    return String(str).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-  }
-  const sectorGroups = {};
-  for (const s of data) {
-    const sec = s.sector || "Unknown";
-    if (!sectorGroups[sec]) sectorGroups[sec] = [];
-    sectorGroups[sec].push(s);
-  }
-  const sectorMedians = {};
-  for (const [sec, stocks] of Object.entries(sectorGroups)) {
-    if (stocks.length < 2) continue;
-    sectorMedians[sec] = {
-      pe: calcMedian(stocks,'pe'), peg: calcMedian(stocks,'peg'),
-      pb: calcMedian(stocks,'pb'), ev_ebitda: calcMedian(stocks,'ev_ebitda'),
-      fcf_yield: calcMedian(stocks,'fcf_yield'), rev_growth: calcMedian(stocks,'rev_growth'),
-    };
-  }
-  function sArrow(val, median, higherIsBetter, label, sectorName) {
-    if (val == null || median == null) return '';
-    const under = higherIsBetter ? val > median : val < median;
-    const title = `${under ? "Stronger" : "Weaker"} vs ${sectorName} median ${label}: ${fmtMedian(median, higherIsBetter)}`;
-    return under
-      ? `<span class="val-arrow arrow-undervalued" title="${escapeAttr(title)}">▲</span>`
-      : `<span class="val-arrow arrow-overvalued" title="${escapeAttr(title)}">▼</span>`;
-  }
-  body.innerHTML = data.map(s => {
-    const sectorName = s.sector || "Unknown";
-    const m = sectorMedians[sectorName] || {};
-    return `<tr data-ticker="${s.ticker}">
-      <td><strong>${s.ticker}</strong></td>
-      <td>${s.name}</td>
-      <td>${sectorName || "—"}</td>
-      <td>${s.price != null ? "$" + s.price : "—"}</td>
-      <td>${s.pe ?? "—"}${sArrow(s.pe, m.pe, false, "P/E", sectorName)}</td>
-      <td>${s.peg ?? "—"}${sArrow(s.peg, m.peg, false, "PEG", sectorName)}</td>
-      <td>${s.pb ?? "—"}${sArrow(s.pb, m.pb, false, "P/B", sectorName)}</td>
-      <td>${s.ev_ebitda ?? "—"}${sArrow(s.ev_ebitda, m.ev_ebitda, false, "EV/EBITDA", sectorName)}</td>
-      <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true, "FCF yield", sectorName)}</td>
-      <td>${s.rev_growth != null ? s.rev_growth + "%" : "—"}${sArrow(s.rev_growth, m.rev_growth, true, "Revenue growth", sectorName)}</td>
-      <td>${fmtScreenerMarketCap(s.market_cap)}</td>
-      <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
-    </tr>`;
-  }).join("");
-  body.querySelectorAll("tr").forEach(row => {
-    row.addEventListener("click", e => { if (e.target.tagName === "BUTTON") return; openDetail(row.dataset.ticker); });
-  });
-  refreshWatchButtons();
-}
-
-let _screenPollTimer = null;
-
-async function runScreen() {
-  const btn = document.getElementById("btn-screen");
-  const status = document.getElementById("screen-status");
-  const body = document.getElementById("screen-body");
-
-  // Cancel any in-flight poll
-  if (_screenPollTimer) { clearInterval(_screenPollTimer); _screenPollTimer = null; }
-
-  const params = buildScreenerParams();
-  const query = params.get("q") || "";
 
   btn.disabled = true;
+  status.textContent = query ? `Screening stocks for "${query}"…` : "Screening stocks… this may take a moment.";
   body.innerHTML = "";
-  showLoader(query ? `Screening for "${query}"…` : "Loading screener…");
-  status.textContent = "Loading…";
+  showLoader(query ? `Screening for "${query}"…` : "Screening stocks…");
 
   try {
     const res = await authFetch(`${API}/api/screen?${params}`);
     const data = await res.json();
-    const results = Array.isArray(data) ? data : (data.results || []);
-    const loading = Array.isArray(data) ? false : (data.loading || false);
-    const loaded  = Array.isArray(data) ? results.length : (data.loaded || results.length);
 
-    function updateStatus(results, loading, loaded) {
-      const n = results.length;
-      const label = query ? ` matching "${query}"` : "";
-      if (loading) {
-        status.innerHTML = `${n} result${n !== 1 ? "s" : ""}${label} — <span class="screen-loading-indicator">loading more… (${loaded} fetched so far)</span>`;
-      } else {
-        status.textContent = n === 0
-          ? (query ? `No stocks matched "${query}" and your criteria.` : "No stocks matched your criteria.")
-          : `${n} stock${n !== 1 ? "s" : ""}${label}.`;
-      }
+    if (data.length === 0) {
+      status.textContent = query ? `No stocks matched "${query}" and your criteria.` : "No stocks matched your criteria.";
+      return;
     }
 
-    if (results.length > 0) renderScreenerRows(results, body);
-    updateStatus(results, loading, loaded);
+    status.textContent = query
+      ? `${data.length} stock${data.length !== 1 ? "s" : ""} found for "${query}".`
+      : `${data.length} stock${data.length !== 1 ? "s" : ""} found.`;
 
-    if (loading) {
-      _screenPollTimer = setInterval(async () => {
-        try {
-          const r2 = await authFetch(`${API}/api/screen?${params}`);
-          const d2 = await r2.json();
-          const r2results = Array.isArray(d2) ? d2 : (d2.results || []);
-          const r2loading = Array.isArray(d2) ? false : (d2.loading || false);
-          const r2loaded  = Array.isArray(d2) ? r2results.length : (d2.loaded || r2results.length);
-          if (r2results.length > 0) renderScreenerRows(r2results, body);
-          updateStatus(r2results, r2loading, r2loaded);
-          if (!r2loading) { clearInterval(_screenPollTimer); _screenPollTimer = null; btn.disabled = false; hideLoader(); }
-        } catch { clearInterval(_screenPollTimer); _screenPollTimer = null; btn.disabled = false; hideLoader(); }
-      }, 2000);
-    } else {
-      btn.disabled = false;
-      hideLoader();
+    // Compute sector medians from screener results for inline arrows
+    const sectorGroups = {};
+    for (const s of data) {
+      const sec = s.sector || "Unknown";
+      if (!sectorGroups[sec]) sectorGroups[sec] = [];
+      sectorGroups[sec].push(s);
     }
+    function calcMedian(stocks, key) {
+      const vals = stocks.map(s => s[key]).filter(v => v != null).sort((a, b) => a - b);
+      if (!vals.length) return null;
+      const mid = Math.floor(vals.length / 2);
+      return vals.length % 2 === 0 ? (vals[mid - 1] + vals[mid]) / 2 : vals[mid];
+    }
+    const sectorMedians = {};
+    for (const [sec, stocks] of Object.entries(sectorGroups)) {
+      if (stocks.length < 2) continue; // need peers to compare
+      sectorMedians[sec] = {
+        pe:         calcMedian(stocks, 'pe'),
+        peg:        calcMedian(stocks, 'peg'),
+        pb:         calcMedian(stocks, 'pb'),
+        ev_ebitda:  calcMedian(stocks, 'ev_ebitda'),
+        fcf_yield:  calcMedian(stocks, 'fcf_yield'),
+        rev_growth: calcMedian(stocks, 'rev_growth'),
+      };
+    }
+    function fmtMedian(val, isPct = false) {
+      if (val == null) return "n/a";
+      return isPct ? `${val}%` : `${val}`;
+    }
+    function escapeAttr(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+    function sArrow(val, median, higherIsBetter = false, label = "metric", sectorName = "sector") {
+      if (val == null || median == null) return '';
+      const under = higherIsBetter ? val > median : val < median;
+      const title = `${under ? "Stronger" : "Weaker"} vs ${sectorName} median ${label}: ${fmtMedian(median, higherIsBetter)}`;
+      return under
+        ? `<span class="val-arrow arrow-undervalued" title="${escapeAttr(title)}">▲</span>`
+        : `<span class="val-arrow arrow-overvalued" title="${escapeAttr(title)}">▼</span>`;
+    }
+
+    body.innerHTML = data.map(s => {
+      const sectorName = s.sector || "Unknown";
+      const m = sectorMedians[sectorName] || {};
+      return `
+      <tr data-ticker="${s.ticker}">
+        <td><strong>${s.ticker}</strong></td>
+        <td>${s.name}</td>
+        <td>${sectorName || "—"}</td>
+        <td>${s.price != null ? "$" + s.price : "—"}</td>
+        <td>${s.pe ?? "—"}${sArrow(s.pe, m.pe, false, "P/E", sectorName)}</td>
+        <td>${s.peg ?? "—"}${sArrow(s.peg, m.peg, false, "PEG", sectorName)}</td>
+        <td>${s.pb ?? "—"}${sArrow(s.pb, m.pb, false, "P/B", sectorName)}</td>
+        <td>${s.ev_ebitda ?? "—"}${sArrow(s.ev_ebitda, m.ev_ebitda, false, "EV/EBITDA", sectorName)}</td>
+        <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true, "FCF yield", sectorName)}</td>
+        <td>${s.rev_growth != null ? s.rev_growth + "%" : "—"}${sArrow(s.rev_growth, m.rev_growth, true, "Revenue growth", sectorName)}</td>
+        <td>${fmtScreenerMarketCap(s.market_cap)}</td>
+        <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
+      </tr>
+    `}).join("");
+
+    body.querySelectorAll("tr").forEach(row => {
+      row.addEventListener("click", e => {
+        if (e.target.tagName === "BUTTON") return;
+        openDetail(row.dataset.ticker);
+      });
+    });
+
+    // Mark already-watched tickers
+    refreshWatchButtons();
+
   } catch (err) {
     status.textContent = "Error: " + err.message + ". Is the backend running?";
+  } finally {
     btn.disabled = false;
     hideLoader();
   }
 }
 
 // ── Watchlist ────────────────────────────────────────────────
-async function loadWatchlist(forceRefresh = false) {
+async function loadWatchlist() {
   const status = document.getElementById("watchlist-status");
   const body = document.getElementById("watchlist-body");
   const empty = document.getElementById("watchlist-empty");
 
-  const cached = !forceRefresh && TabCache.get('watchlist');
-  if (cached) {
-    watchlist = cached;
-    status.textContent = "";
-  } else {
-    status.textContent = "Loading…";
-    try {
-      const res = await authFetch(`${API}/api/watchlist`);
-      watchlist = await res.json();
-      TabCache.set('watchlist', watchlist);
-      status.textContent = "";
-    } catch (err) {
-      status.textContent = "Error loading watchlist. Is the backend running?";
-      return;
-    }
-  }
-
+  status.textContent = "Loading…";
   try {
+    const res = await authFetch(`${API}/api/watchlist`);
+    watchlist = await res.json();
+    status.textContent = "";
 
     if (watchlist.length === 0) {
       body.innerHTML = "";
@@ -1150,22 +822,11 @@ async function loadWatchlist(forceRefresh = false) {
   }
 }
 
-document.getElementById("btn-refresh-watchlist").addEventListener("click", () => { TabCache.invalidate('watchlist'); loadWatchlist(true); });
+document.getElementById("btn-refresh-watchlist").addEventListener("click", loadWatchlist);
 
-async function loadSentiment(forceRefresh = false) {
+async function loadSentiment() {
   const status = document.getElementById("sentiment-status");
   const result = document.getElementById("sentiment-result");
-
-  const cached = !forceRefresh && TabCache.get('sentiment');
-  if (cached) {
-    sentimentWatchlist = Array.isArray(cached.watchlist) ? cached.watchlist : [];
-    status.textContent = sentimentWatchlist.length > 0
-      ? `Ready. ${sentimentWatchlist.length} watchlist stock${sentimentWatchlist.length !== 1 ? "s" : ""} available for scanning.`
-      : "Your watchlist is empty.";
-    result.innerHTML = renderSentimentWatchlist(cached);
-    return;
-  }
-
   status.textContent = "Loading watchlist...";
   result.innerHTML = '<div class="sentiment-empty-state">Loading your watchlist for sentiment analysis...</div>';
   try {
@@ -1176,7 +837,6 @@ async function loadSentiment(forceRefresh = false) {
       result.innerHTML = '<div class="sentiment-empty-state">Watchlist could not be loaded.</div>';
       return;
     }
-    TabCache.set('sentiment', data);
     sentimentWatchlist = Array.isArray(data.watchlist) ? data.watchlist : [];
     status.textContent = sentimentWatchlist.length > 0
       ? `Ready. ${sentimentWatchlist.length} watchlist stock${sentimentWatchlist.length !== 1 ? "s" : ""} available for scanning.`
@@ -1190,8 +850,8 @@ async function loadSentiment(forceRefresh = false) {
 
 function sentimentToneClass(sentiment, score = 0) {
   const label = String(sentiment || "").toLowerCase();
-  if (label === "bullish" || score > 0) return "sentiment-positive";
-  if (label === "bearish" || score < 0) return "sentiment-negative";
+  if (label === "bullish") return "sentiment-positive";
+  if (label === "bearish") return "sentiment-negative";
   if (label === "error") return "sentiment-negative";
   return "sentiment-neutral";
 }
@@ -1232,82 +892,86 @@ function renderSentimentResults(data, ticker) {
   const negative = results.filter(item => (item.sentiment_score || 0) < 0).length;
   const neutral = results.length - positive - negative;
 
-  const rows = results.map((item, i) => {
-    const tone = sentimentToneClass(item.sentiment, item.sentiment_score);
-    const headlines = item.headlines || [];
-    const headlineId = `sent-hl-${i}`;
-    return `
-      <div class="srow ${tone}">
-        <div class="srow-main">
-          <div class="srow-id">
-            <span class="srow-ticker">${safe(item.ticker || "N/A")}</span>
-            <span class="srow-name">${safe(item.name || item.ticker || "")}</span>
-          </div>
-          <div class="srow-badge-wrap">
-            <span class="sentiment-badge ${tone}">${safe(item.sentiment || "neutral")}</span>
-          </div>
-          <div class="srow-stat">
-            <span class="srow-label">Score</span>
-            <span class="srow-val">${sentimentScoreHtml(item.sentiment_score || 0)}</span>
-          </div>
-          <div class="srow-stat">
-            <span class="srow-label">Price</span>
-            <span class="srow-val">${item.price != null ? `$${item.price}` : "—"}</span>
-          </div>
-          <div class="srow-stat">
-            <span class="srow-label">Change</span>
-            <span class="srow-val">${item.change_pct != null ? changeHtml(item.change_pct) : "—"}</span>
-          </div>
-          <div class="srow-stat">
-            <span class="srow-label">Analyst</span>
-            <span class="srow-val">${safe(item.recommendation || "—")}</span>
-          </div>
-          ${headlines.length > 0 ? `
-            <button class="srow-hl-toggle" onclick="document.getElementById('${headlineId}').classList.toggle('open')" title="Toggle headlines">
-              ${headlines.length} headline${headlines.length !== 1 ? "s" : ""} ▾
-            </button>
-          ` : '<span class="srow-no-hl">no headlines</span>'}
-        </div>
-        ${headlines.length > 0 ? `
-          <div class="srow-headlines" id="${headlineId}">
-            ${headlines.map(h => `<div class="srow-headline-item">— ${safe(h)}</div>`).join("")}
-          </div>
-        ` : ""}
-        ${item.error ? `<div class="sentiment-error">${safe(item.error)}</div>` : ""}
-      </div>
-    `;
-  }).join("");
-
   return `
     <div class="sentiment-dashboard">
-      <div class="sentiment-stat-bar">
-        <span class="sstat-item"><span class="sstat-label">${ticker ? "ticker" : "scanned"}</span> <strong>${ticker ? safe(ticker) : results.length}</strong></span>
-        <span class="sstat-sep">·</span>
-        <span class="sstat-item"><span class="sstat-label change-pos">bullish</span> <strong class="change-pos">${positive}</strong></span>
-        <span class="sstat-sep">·</span>
-        <span class="sstat-item"><span class="sstat-label">neutral</span> <strong>${neutral}</strong></span>
-        <span class="sstat-sep">·</span>
-        <span class="sstat-item"><span class="sstat-label change-neg">bearish</span> <strong class="change-neg">${negative}</strong></span>
-      </div>
-      <div class="srow-list">
-        <div class="srow-header">
-          <span class="srow-id">Symbol</span>
-          <span class="srow-badge-wrap">Signal</span>
-          <span class="srow-stat">Score</span>
-          <span class="srow-stat">Price</span>
-          <span class="srow-stat">Change</span>
-          <span class="srow-stat">Analyst</span>
-          <span></span>
+      <div class="sentiment-summary-grid">
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">${ticker ? "Ticker" : "Scanned"}</div>
+          <div class="sentiment-summary-value">${ticker ? safe(ticker) : results.length}</div>
         </div>
-        ${rows}
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">Bullish</div>
+          <div class="sentiment-summary-value change-pos">${positive}</div>
+        </div>
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">Neutral</div>
+          <div class="sentiment-summary-value">${neutral}</div>
+        </div>
+        <div class="sentiment-summary-card">
+          <div class="sentiment-summary-label">Bearish</div>
+          <div class="sentiment-summary-value change-neg">${negative}</div>
+        </div>
+      </div>
+      <div class="sentiment-card-grid">
+        ${results.map(item => `
+          <article class="sentiment-card ${sentimentToneClass(item.sentiment, item.sentiment_score)}">
+            <div class="sentiment-card-head">
+              <div>
+                <div class="sentiment-card-ticker">${safe(item.ticker || "N/A")}</div>
+                <div class="sentiment-card-name">${safe(item.name || item.ticker || "Unknown")}</div>
+              </div>
+              <div class="sentiment-badge ${sentimentToneClass(item.sentiment, item.sentiment_score)}">${safe(item.sentiment || "neutral")}</div>
+            </div>
+            <div class="sentiment-metrics">
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Score</span>
+                <strong>${sentimentScoreHtml(item.sentiment_score || 0)}</strong>
+              </div>
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Price</span>
+                <strong>${item.price != null ? `$${item.price}` : "—"}</strong>
+              </div>
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Change</span>
+                <strong>${item.change_pct != null ? changeHtml(item.change_pct) : "—"}</strong>
+              </div>
+              <div class="sentiment-metric">
+                <span class="sentiment-metric-label">Analyst</span>
+                <strong>${safe(item.recommendation || "n/a")}</strong>
+              </div>
+            </div>
+            ${(item.headlines || []).length > 0 ? `
+              <div class="sentiment-headlines">
+                <div class="sentiment-headlines-title">Recent headlines</div>
+                <ul>
+                  ${(item.headlines || []).map(headline => `<li>${safe(headline)}</li>`).join("")}
+                </ul>
+              </div>
+            ` : ""}
+            ${item.error ? `<div class="sentiment-error">${safe(item.error)}</div>` : ""}
+          </article>
+        `).join("")}
       </div>
     </div>
   `;
 }
 
-document.getElementById("btn-sentiment-list").addEventListener("click", () => {
-  TabCache.invalidate('sentiment');
-  loadSentiment(true);
+document.getElementById("btn-sentiment-list").addEventListener("click", async () => {
+  const status = document.getElementById("sentiment-status");
+  const result = document.getElementById("sentiment-result");
+  status.textContent = "Loading watchlist…";
+  try {
+    const res = await authFetch(`${API}/api/sentiment?watchlist=true`);
+    const data = await res.json();
+    if (data.detail) {
+      status.textContent = "Error: " + data.detail;
+      return;
+    }
+    status.textContent = "Watchlist loaded.";
+    result.innerHTML = renderSentimentWatchlist(data);
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  }
 });
 
 async function runSentimentScan(ticker) {
@@ -1359,10 +1023,8 @@ async function addToWatchlist(e, ticker) {
     await authFetch(`${API}/api/watchlist/${ticker}`, { method: "POST" });
     btn.textContent = "✓ Added";
     btn.classList.add("added");
-    TabCache.invalidate('watchlist');
-    TabCache.invalidate('sentiment');
     if (document.getElementById("tab-sentiment")?.classList.contains("active")) {
-      loadSentiment(true);
+      loadSentiment();
     }
   } catch (err) {
     btn.disabled = false;
@@ -1372,9 +1034,7 @@ async function addToWatchlist(e, ticker) {
 async function removeFromWatchlist(e, ticker) {
   e.stopPropagation();
   await authFetch(`${API}/api/watchlist/${ticker}`, { method: "DELETE" });
-  TabCache.invalidate('watchlist');
-  TabCache.invalidate('sentiment');
-  loadWatchlist(true);
+  loadWatchlist();
   if (document.getElementById("tab-sentiment")?.classList.contains("active")) {
     loadSentiment();
   }
@@ -1550,8 +1210,8 @@ document.getElementById("btn-research").addEventListener("click", async () => {
   const stages = [
     "Building research query from input...",
     "Collecting live fundamentals (yfinance)...",
-    "Gathering news, analyst, social and technical signals...",
-    "Sending prompt to Claude and synthesizing insights...",
+    "Gathering live news, analyst and technical signals...",
+    "Sending only the live data package to Claude...",
     "Compiling final narrative and risk summary...",
   ];
   let currentStage = 0;
@@ -1644,6 +1304,7 @@ document.getElementById("btn-ask").addEventListener("click", async () => {
 
 let predictionsSnapshotCache = null;
 let predictionsRenderedCache = null;
+const PREDICTIONS_RENDER_VERSION = 2;
 
 function invalidatePredictionsSnapshotCache() {
   predictionsSnapshotCache = null;
@@ -1655,9 +1316,8 @@ async function loadPredictions(forceRefresh = false) {
   const body = document.getElementById("pred-body");
   const empty = document.getElementById("pred-empty");
   const bar = document.getElementById("accuracy-bar");
-  startPredictionsRefreshInfoTimer();
 
-  if (!forceRefresh && predictionsRenderedCache) {
+  if (!forceRefresh && predictionsRenderedCache && predictionsRenderedCache.version === PREDICTIONS_RENDER_VERSION) {
     status.textContent = "";
     body.innerHTML = predictionsRenderedCache.bodyHtml;
     empty.classList.toggle("visible", !!predictionsRenderedCache.emptyVisible);
@@ -1675,6 +1335,7 @@ async function loadPredictions(forceRefresh = false) {
       empty.classList.add("visible");
       bar.classList.add("hidden");
       predictionsRenderedCache = {
+        version: PREDICTIONS_RENDER_VERSION,
         bodyHtml: "",
         emptyVisible: true,
         barHidden: true,
@@ -1686,6 +1347,7 @@ async function loadPredictions(forceRefresh = false) {
     const bodyHtml = renderPredictionsTable(predictionsSnapshotCache);
     const barState = renderAccuracyBar(predictionsSnapshotCache);
     predictionsRenderedCache = {
+      version: PREDICTIONS_RENDER_VERSION,
       bodyHtml,
       emptyVisible: false,
       barHidden: !!barState?.hidden,
@@ -1707,6 +1369,7 @@ async function loadPredictions(forceRefresh = false) {
       empty.classList.add("visible");
       bar.classList.add("hidden");
       predictionsRenderedCache = {
+        version: PREDICTIONS_RENDER_VERSION,
         bodyHtml: "",
         emptyVisible: true,
         barHidden: true,
@@ -1719,6 +1382,7 @@ async function loadPredictions(forceRefresh = false) {
     const bodyHtml = renderPredictionsTable(predictionsSnapshotCache);
     const barState = renderAccuracyBar(predictionsSnapshotCache);
     predictionsRenderedCache = {
+      version: PREDICTIONS_RENDER_VERSION,
       bodyHtml,
       emptyVisible: false,
       barHidden: !!barState?.hidden,
@@ -1731,15 +1395,33 @@ async function loadPredictions(forceRefresh = false) {
   }
 }
 
-function renderPredictionsTable(preds) {
+function renderPredictionsTableLegacy(preds) {
   const body = document.getElementById("pred-body");
   predictionReasoningMap = {};
   body.innerHTML = preds.map(p => {
+    const basePrice = Number(p.price_at_prediction);
+    const hasBasePrice = Number.isFinite(basePrice) && basePrice > 0;
+    const currentPrice = Number(p.current_price);
+    const hasCurrentPrice = Number.isFinite(currentPrice) && currentPrice > 0;
+
     const fmtProjectedPct = val => {
       if (val == null) return "—";
       const cls = val >= 0 ? "change-pos" : "change-neg";
       return `<span class="${cls}">${val >= 0 ? "+" : ""}${Number(val).toFixed(2)}%</span>`;
     };
+    const fmtTargetPrice = val => {
+      if (val == null || !hasBasePrice) return "";
+      const targetPrice = basePrice * (1 + Number(val) / 100);
+      if (!Number.isFinite(targetPrice)) return "";
+      return `<div class="pred-target-price">Target $${targetPrice.toFixed(2)}</div>`;
+    };
+    const renderProjectedCell = val => `
+      <div class="pred-horizon-cell">
+        ${fmtProjectedPct(val)}
+        ${fmtTargetPrice(val)}
+      </div>
+    `;
+
     const scoreValue = p.score != null ? p.score : (p.predicted_pct != null ? Math.max(0, Math.min(100, Math.round(50 + p.predicted_pct * 14))) : null);
     const directionValue = p.direction || (p.predicted_pct == null ? "pending" : (p.predicted_pct >= 0.35 ? "bullish" : p.predicted_pct <= -0.35 ? "bearish" : "neutral"));
     const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
@@ -1747,6 +1429,8 @@ function renderPredictionsTable(preds) {
       ticker: p.ticker || "—",
       name: p.name || p.ticker || "—",
       date: p.date || "—",
+      price_at_prediction: hasBasePrice ? basePrice : null,
+      current_price: hasCurrentPrice ? currentPrice : null,
       confidence: p.confidence || "pending",
       direction: directionValue,
       score: scoreValue,
@@ -1762,10 +1446,7 @@ function renderPredictionsTable(preds) {
     const scoreCls = scoreValue >= 61 ? "change-pos" : scoreValue <= 39 ? "change-neg" : "";
     const scoreStr = scoreValue != null ? `<span class="${scoreCls}">${scoreValue}/100</span>` : "—";
 
-    const isPending = p.confidence === "pending" || scoreValue == null;
-    let actualStr = isPending
-      ? '<span class="result-pending">—</span>'
-      : '<span class="result-pending">Pending</span>';
+    let actualStr = '<span class="result-pending">Pending</span>';
     let varianceStr = '<span class="result-pending">—</span>';
     let resultStr = '<span class="result-pending">—</span>';
     if (p.actual_pct != null) {
@@ -1779,17 +1460,12 @@ function renderPredictionsTable(preds) {
         : '<span class="result-wrong">✗ Wrong</span>';
     }
 
+    const isPending = p.confidence === "pending" || scoreValue == null;
     const direction = isPending ? "" : (directionValue === "bullish" ? "▲ BULLISH" : directionValue === "bearish" ? "▼ BEARISH" : "• NEUTRAL");
     const dirClass  = isPending ? "" : (directionValue === "bullish" ? "dir-bull" : directionValue === "bearish" ? "dir-bear" : "");
-    const suppressedBadge = p.suppressed
-      ? `<span class="badge-suppressed" title="Model has no reliable signal for this stock (≥10 predictions, &lt;40% accuracy). Treat with extreme caution.">⚠ SUPPRESSED</span> `
-      : "";
-    const earningsBadge = (p.days_to_earnings != null && p.days_to_earnings >= 0 && p.days_to_earnings <= 7)
-      ? `<span class="badge-earnings" title="Earnings in ${p.days_to_earnings} day${p.days_to_earnings !== 1 ? 's' : ''} — binary event, prediction is low-confidence">📅 EARNINGS ${p.days_to_earnings}d</span> `
-      : "";
     const confBadge = isPending
       ? `<span class="badge-pending">NOT ANALYSED</span>`
-      : `${suppressedBadge}${earningsBadge}<span class="badge-${p.confidence || 'medium'}">${(p.confidence || 'medium').toUpperCase()}</span> <span class="${dirClass}">${direction}</span>`;
+      : `<span class="badge-${p.confidence || 'medium'}">${(p.confidence || 'medium').toUpperCase()}</span> <span class="${dirClass}">${direction}</span>`;
 
     // Factor badges
     const fs = p.factor_scores || {};
@@ -1797,33 +1473,28 @@ function renderPredictionsTable(preds) {
       const val = fs[key];
       if (val == null) return `<span class="factor-badge factor-na" title="${title}">—</span>`;
       const cls = val >= 70 ? "factor-green" : val >= 45 ? "factor-amber" : "factor-red";
-      return `<span class="factor-badge ${cls}" title="${title}: ${val}/100">${label}<span class="factor-val">${val}</span></span>`;
+      return `<span class="factor-badge ${cls}" title="${title}: ${val}/100">${label}</span>`;
     };
     const dcfMoS = p.dcf && p.dcf.margin_of_safety_pct != null
-      ? (() => { const v = p.dcf.margin_of_safety_pct; const cls = v >= 0 ? "change-pos" : "change-neg"; return `<span class="${cls}" title="MoS (Margin of Safety) — DCF intrinsic value vs current price. ▲ = undervalued (upside), ▼ = overvalued (priced above intrinsic value). Null = suppressed when earnings are negative or cash flows are distorted.">${v >= 0 ? "▲" : "▼"}${Math.abs(v).toFixed(0)}%</span>`; })()
+      ? (() => { const v = p.dcf.margin_of_safety_pct; const cls = v >= 0 ? "change-pos" : "change-neg"; return `<span class="${cls}" title="DCF Margin of Safety">${v >= 0 ? "▲" : "▼"}${Math.abs(v).toFixed(0)}%</span>`; })()
       : "";
-    // Sub-score detail line
-    const subScores = (() => {
-      const parts = [];
-      if (fs._rsi != null)            parts.push(`<span title="RSI (Relative Strength Index) — measures overbought/oversold momentum. >70 = overbought, <30 = oversold, 40–60 = neutral.">RSI ${fs._rsi.toFixed(0)}</span>`);
-      if (fs._52w_position != null)   parts.push(`<span title="52-Week Position — where the price sits between its 52-week low and high. 100% = at the high, 0% = at the low, 50% = midpoint.">52w ${fs._52w_position.toFixed(0)}%</span>`);
-      if (fs._price_vs_50sma != null) parts.push(`<span title="Price vs 50-Day SMA (Simple Moving Average) — how far above (+) or below (−) the stock is trading relative to its 50-day average. Positive = bullish trend, negative = bearish.">SMA ${fs._price_vs_50sma >= 0 ? "+" : ""}${fs._price_vs_50sma.toFixed(1)}%</span>`);
-      if (fs._fcf_yield != null)      parts.push(`<span title="FCF Yield (Free Cash Flow Yield) — free cash generated as a % of the stock price. >8% = strong, <3% = weak/expensive, negative = cash burn.">FCF ${fs._fcf_yield.toFixed(1)}%</span>`);
-      return parts.length ? `<div class="factor-subscores">${parts.join(" · ")}</div>` : "";
-    })();
+    const currentPriceStr = hasCurrentPrice
+      ? `<span>${fmtUsd(currentPrice)}</span>`
+      : '<span class="result-pending">—</span>';
 
     return `
       <tr>
         <td>${p.date}</td>
         <td><strong>${p.ticker}</strong></td>
         <td style="color:var(--text-muted);font-size:0.85rem">${safe(p.name || "—")}</td>
+        <td>${currentPriceStr}</td>
         <td>${scoreStr}</td>
-        <td class="factor-cell">${factorBadge("V","value","Value — P/E, P/B, EV/EBITDA, FCF yield, PEG ratio. High score = stock is cheap vs fundamentals")}${factorBadge("M","momentum","Momentum — RSI, 52-week position, price vs 50-day SMA, 5-day change. High score = bullish trend")}${factorBadge("Q","quality","Quality — ROE, gross & net margin, debt/equity, current ratio. High score = strong balance sheet")}${factorBadge("G","growth","Growth — revenue growth, EPS growth, fwd P/E trend, operating margin. High score = accelerating earnings")}${factorBadge("⊕","composite","Composite — average of Value + Momentum + Quality + Growth. Single headline score to compare stocks. ≥70 = broad conviction across all pillars")}${dcfMoS ? `<br><span style="font-size:0.75rem">${dcfMoS} MoS</span>` : ""}${subScores}</td>
-        <td>${fmtProjectedPct(p.predicted_3m_pct)}</td>
-        <td>${fmtProjectedPct(p.predicted_6m_pct)}</td>
-        <td>${fmtProjectedPct(p.predicted_12m_pct)}</td>
-        <td>${fmtProjectedPct(p.predicted_24m_pct)}</td>
-        <td>${fmtProjectedPct(p.predicted_36m_pct)}</td>
+        <td class="factor-cell">${factorBadge("V","value","Value")}${factorBadge("M","momentum","Momentum")}${factorBadge("Q","quality","Quality")}${factorBadge("G","growth","Growth")}${factorBadge("⊕","composite","Composite")}${dcfMoS ? `<br><span style="font-size:0.75rem">${dcfMoS} MoS</span>` : ""}</td>
+        <td>${renderProjectedCell(p.predicted_3m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_6m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_12m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_24m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_36m_pct)}</td>
         <td>${actualStr}</td>
         <td>${varianceStr}</td>
         <td>${resultStr}</td>
@@ -1856,8 +1527,10 @@ function openPredictionReasoning(rowKey) {
     <span>${safe(item.date)}</span>
     <span>${safe((item.confidence || "pending").toUpperCase())}</span>
     <span>${item.score != null ? `${item.score}/100 ${safe((item.direction || "pending").toUpperCase())}` : "Pending"}</span>
+    <span>${item.current_price != null ? `Current ${fmtUsd(item.current_price)}` : "Current price unavailable"}</span>
+    <span>${item.price_at_prediction != null ? `Base $${Number(item.price_at_prediction).toFixed(2)}` : "Base price unavailable"}</span>
     <span>${item.predicted_12m_pct != null ? `${item.predicted_12m_pct >= 0 ? "+" : ""}${Number(item.predicted_12m_pct).toFixed(2)}% 12M` : "12M pending"}</span>
-    <span>${item.actual_pct != null ? `${item.actual_pct >= 0 ? "+" : ""}${item.actual_pct.toFixed(2)}% actual` : (item.score == null ? "Actual —" : "Actual pending")}</span>
+    <span>${item.actual_pct != null ? `${item.actual_pct >= 0 ? "+" : ""}${item.actual_pct.toFixed(2)}% actual` : "Actual pending"}</span>
   `;
   document.getElementById("pred-reasoning-body").textContent = item.reasoning || "No reasoning available.";
   overlay.classList.remove("hidden");
@@ -1871,6 +1544,201 @@ document.getElementById("pred-reasoning-overlay").addEventListener("click", e =>
   if (e.target === document.getElementById("pred-reasoning-overlay")) {
     document.getElementById("pred-reasoning-overlay").classList.add("hidden");
   }
+});
+
+function renderPredictionsTable(preds) {
+  const body = document.getElementById("pred-body");
+  predictionReasoningMap = {};
+
+  const today = new Date();
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const startOfWeek = new Date(today);
+  startOfWeek.setHours(0, 0, 0, 0);
+  const dayOfWeek = startOfWeek.getDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  startOfWeek.setDate(startOfWeek.getDate() + mondayOffset);
+  const weekIso = `${startOfWeek.getFullYear()}-${String(startOfWeek.getMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getDate()).padStart(2, "0")}`;
+  const monthIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
+
+  const groupedPreds = { today: [], week: [], month: [], ytd: [] };
+  preds.forEach(p => {
+    const predictionDate = String(p.date || "");
+    if (predictionDate === todayIso) groupedPreds.today.push(p);
+    else if (predictionDate >= weekIso) groupedPreds.week.push(p);
+    else if (predictionDate >= monthIso) groupedPreds.month.push(p);
+    else groupedPreds.ytd.push(p);
+  });
+
+  const renderPredictionRow = p => {
+    const basePrice = Number(p.price_at_prediction);
+    const hasBasePrice = Number.isFinite(basePrice) && basePrice > 0;
+    const currentPrice = Number(p.current_price);
+    const hasCurrentPrice = Number.isFinite(currentPrice) && currentPrice > 0;
+
+    const fmtProjectedPct = val => {
+      if (val == null) return "—";
+      const cls = val >= 0 ? "change-pos" : "change-neg";
+      return `<span class="${cls}">${val >= 0 ? "+" : ""}${Number(val).toFixed(2)}%</span>`;
+    };
+    const fmtTargetPrice = val => {
+      if (val == null || !hasBasePrice) return "";
+      const targetPrice = basePrice * (1 + Number(val) / 100);
+      if (!Number.isFinite(targetPrice)) return "";
+      return `<div class="pred-target-price">Target $${targetPrice.toFixed(2)}</div>`;
+    };
+    const renderProjectedCell = val => `
+      <div class="pred-horizon-cell">
+        ${fmtProjectedPct(val)}
+        ${fmtTargetPrice(val)}
+      </div>
+    `;
+
+    const scoreValue = p.score != null ? p.score : (p.predicted_pct != null ? Math.max(0, Math.min(100, Math.round(50 + p.predicted_pct * 14))) : null);
+    const directionValue = p.direction || (p.predicted_pct == null ? "pending" : (p.predicted_pct >= 0.35 ? "bullish" : p.predicted_pct <= -0.35 ? "bearish" : "neutral"));
+    const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
+    predictionReasoningMap[rowKey] = {
+      ticker: p.ticker || "—",
+      name: p.name || p.ticker || "—",
+      date: p.date || "—",
+      price_at_prediction: hasBasePrice ? basePrice : null,
+      current_price: hasCurrentPrice ? currentPrice : null,
+      confidence: p.confidence || "pending",
+      direction: directionValue,
+      score: scoreValue,
+      predicted_pct: p.predicted_pct,
+      predicted_3m_pct: p.predicted_3m_pct,
+      predicted_6m_pct: p.predicted_6m_pct,
+      predicted_12m_pct: p.predicted_12m_pct,
+      predicted_24m_pct: p.predicted_24m_pct,
+      predicted_36m_pct: p.predicted_36m_pct,
+      actual_pct: p.actual_pct,
+      reasoning: p.reasoning || "No reasoning available.",
+    };
+
+    const scoreCls = scoreValue >= 61 ? "change-pos" : scoreValue <= 39 ? "change-neg" : "";
+    const scoreStr = scoreValue != null ? `<span class="${scoreCls}">${scoreValue}/100</span>` : "—";
+
+    let actualStr = '<span class="result-pending">Pending</span>';
+    let varianceStr = '<span class="result-pending">—</span>';
+    let resultStr = '<span class="result-pending">—</span>';
+    if (p.actual_pct != null) {
+      const actCls = p.actual_pct >= 0 ? "change-pos" : "change-neg";
+      actualStr = `<span class="${actCls}">${p.actual_pct >= 0 ? "+" : ""}${p.actual_pct.toFixed(2)}%</span>`;
+      const actualDirection = p.actual_pct >= 0.35 ? "bullish" : p.actual_pct <= -0.35 ? "bearish" : "neutral";
+      varianceStr = `<span>${actualDirection.toUpperCase()}</span>`;
+      const correct = directionValue === actualDirection || (directionValue === "neutral" && Math.abs(p.actual_pct) < 0.35);
+      resultStr = correct
+        ? '<span class="result-correct">✓ Correct</span>'
+        : '<span class="result-wrong">✕ Wrong</span>';
+    }
+
+    const isPending = p.confidence === "pending" || scoreValue == null;
+    const direction = isPending ? "" : (directionValue === "bullish" ? "▲ BULLISH" : directionValue === "bearish" ? "▼ BEARISH" : "• NEUTRAL");
+    const dirClass = isPending ? "" : (directionValue === "bullish" ? "dir-bull" : directionValue === "bearish" ? "dir-bear" : "");
+    const confBadge = isPending
+      ? `<span class="badge-pending">NOT ANALYSED</span>`
+      : `<span class="badge-${p.confidence || "medium"}">${(p.confidence || "medium").toUpperCase()}</span> <span class="${dirClass}">${direction}</span>`;
+
+    const fs = p.factor_scores || {};
+    const factorBadge = (label, key, title) => {
+      const val = fs[key];
+      if (val == null) return `<span class="factor-badge factor-na" title="${title}">—</span>`;
+      const cls = val >= 70 ? "factor-green" : val >= 45 ? "factor-amber" : "factor-red";
+      return `<span class="factor-badge ${cls}" title="${title}: ${val}/100">${label}</span>`;
+    };
+    const dcfMoS = p.dcf && p.dcf.margin_of_safety_pct != null
+      ? (() => {
+          const v = p.dcf.margin_of_safety_pct;
+          const cls = v >= 0 ? "change-pos" : "change-neg";
+          return `<span class="${cls}" title="DCF Margin of Safety">${v >= 0 ? "▲" : "▼"}${Math.abs(v).toFixed(0)}%</span>`;
+        })()
+      : "";
+    const currentPriceStr = hasCurrentPrice ? `<span>${fmtUsd(currentPrice)}</span>` : '<span class="result-pending">—</span>';
+
+    return `
+      <tr>
+        <td>${p.date}</td>
+        <td><strong>${p.ticker}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${safe(p.name || "—")}</td>
+        <td>${currentPriceStr}</td>
+        <td>${scoreStr}</td>
+        <td class="factor-cell">${factorBadge("V","value","Value")}${factorBadge("M","momentum","Momentum")}${factorBadge("Q","quality","Quality")}${factorBadge("G","growth","Growth")}${factorBadge("⊕","composite","Composite")}${dcfMoS ? `<br><span style="font-size:0.75rem">${dcfMoS} MoS</span>` : ""}</td>
+        <td>${renderProjectedCell(p.predicted_3m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_6m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_12m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_24m_pct)}</td>
+        <td>${renderProjectedCell(p.predicted_36m_pct)}</td>
+        <td>${actualStr}</td>
+        <td>${varianceStr}</td>
+        <td>${resultStr}</td>
+        <td>${confBadge}</td>
+        <td class="reasoning-cell">${safe(p.reasoning || "—")}</td>
+      </tr>
+    `;
+  };
+
+  const sections = [
+    ["today", "Today"],
+    ["week", "This Week"],
+    ["month", "This Month"],
+    ["ytd", "YTD"],
+  ];
+
+  body.innerHTML = sections
+    .filter(([key]) => groupedPreds[key].length > 0)
+    .map(([key, label]) => `
+      <tr class="pred-group-row">
+        <td colspan="16">
+          <div class="pred-group-heading">
+            <span>${label}</span>
+            <span class="pred-group-count">${groupedPreds[key].length}</span>
+          </div>
+        </td>
+      </tr>
+      ${groupedPreds[key].map(renderPredictionRow).join("")}
+    `)
+    .join("");
+
+  Array.from(body.querySelectorAll("tr"))
+    .filter(row => !row.classList.contains("pred-group-row"))
+    .forEach((row, index) => {
+      const p = preds[index];
+      if (!p) return;
+      const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
+      const cell = row.lastElementChild;
+      if (!cell) return;
+      cell.className = "pred-reasoning-col";
+      cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`;
+    });
+
+  return body.innerHTML;
+}
+
+function applyPredictionPeriodFilter(period) {
+  const body = document.getElementById("pred-body");
+  if (!body) return;
+  const groups = body.querySelectorAll("tr.pred-group-row");
+  groups.forEach(groupRow => {
+    const heading = groupRow.querySelector(".pred-group-heading span")?.textContent?.trim() || "";
+    const periodMap = { today: "Today", week: "This Week", month: "This Month", ytd: "YTD" };
+    const match = period === "all" || periodMap[period] === heading;
+    const siblings = [];
+    let next = groupRow.nextElementSibling;
+    while (next && !next.classList.contains("pred-group-row")) {
+      siblings.push(next);
+      next = next.nextElementSibling;
+    }
+    groupRow.style.display = match ? "" : "none";
+    siblings.forEach(r => { r.style.display = match ? "" : "none"; });
+  });
+}
+
+document.querySelectorAll(".pred-period-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".pred-period-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    applyPredictionPeriodFilter(btn.dataset.period);
+  });
 });
 
 function openRecReasoning(key) {
@@ -1950,7 +1818,6 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
     }
 
     invalidatePredictionsSnapshotCache();
-    TabCache.invalidate('recommendations');
     loadPredictions(true);
   } catch (err) {
     status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
@@ -1960,47 +1827,9 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("btn-refresh-preds").addEventListener("click", async () => {
-  const status = document.getElementById("pred-status");
-  const btn = document.getElementById("btn-refresh-preds");
-  btn.disabled = true;
-  status.textContent = "Refreshing predictions and actuals...";
-  showLoader("Refreshing predictions...");
-  try {
-    const res = await authFetch(`${API}/api/predictions`);
-    const preds = await res.json();
-    const pendingCount = Array.isArray(preds)
-      ? preds.filter(p => (p.confidence === "pending") || (p.predicted_pct == null && p.score == null)).length
-      : 0;
-
-    if (pendingCount > 0) {
-      status.textContent = `Found ${pendingCount} pending stock${pendingCount === 1 ? "" : "s"} - generating predictions...`;
-      const genRes = await authFetch(`${API}/api/predictions/generate`, { method: "POST" });
-      const rawText = await genRes.text();
-      let data = {};
-      try { data = rawText ? JSON.parse(rawText) : {}; } catch {}
-      if (!genRes.ok) {
-        status.textContent = "Error: " + (data.detail || data.error || "Predictions refresh failed.");
-        return;
-      }
-      if (data.message) {
-        status.textContent = data.message;
-      } else {
-        status.textContent = `Refreshed actuals and generated ${data.predictions?.length || 0} prediction(s).`;
-      }
-      TabCache.invalidate('recommendations');
-    } else {
-      status.textContent = "Actuals refreshed.";
-    }
-
-    invalidatePredictionsSnapshotCache();
-    await loadPredictions(true);
-  } catch (err) {
-    status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
-  } finally {
-    btn.disabled = false;
-    hideLoader();
-  }
+document.getElementById("btn-refresh-preds").addEventListener("click", () => {
+  invalidatePredictionsSnapshotCache();
+  loadPredictions(true);
 });
 
 // ── Backtest ───────────────────────────────────────────────────
@@ -2228,15 +2057,8 @@ document.getElementById("btn-simulate")?.addEventListener("click", async () => {
 
 // ── Recommendations ───────────────────────────────────────────
 
-async function loadRecommendations(forceRefresh = false) {
+async function loadRecommendations() {
   const status = document.getElementById("rec-status");
-
-  const cached = !forceRefresh && TabCache.get('recommendations');
-  if (cached) {
-    status.textContent = "";
-    renderRecommendations(cached);
-    return;
-  }
   const fmtEta = ms => {
     if (ms <= 0) return "0s";
     if (ms < 1000) return "<1s";
@@ -2309,7 +2131,6 @@ async function loadRecommendations(forceRefresh = false) {
         }
       }, 900);
     });
-    TabCache.set('recommendations', data);
     status.textContent = "";
     renderRecommendations(data);
   } catch (err) {
@@ -2431,7 +2252,7 @@ function renderRecommendations(data) {
   }
 }
 
-document.getElementById("btn-load-recs").addEventListener("click", () => { TabCache.invalidate('recommendations'); loadRecommendations(true); });
+document.getElementById("btn-load-recs").addEventListener("click", loadRecommendations);
 
 // ── Paper Portfolio ───────────────────────────────────────────
 
@@ -2440,21 +2261,12 @@ function fmtGbp(n) {
   return (n < 0 ? "-" : "") + "£" + Math.abs(n).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-async function loadPaperPortfolio(forceRefresh = false) {
+async function loadPaperPortfolio() {
   const status = document.getElementById("paper-status");
-
-  const cached = !forceRefresh && TabCache.get('paper');
-  if (cached) {
-    status.textContent = "";
-    renderPaperPortfolio(cached);
-    return;
-  }
-
   status.textContent = "Loading…";
   try {
     const res  = await authFetch(`${API}/api/paper-portfolio`);
     const data = await res.json();
-    TabCache.set('paper', data);
     status.textContent = "";
     renderPaperPortfolio(data);
   } catch (err) {
@@ -2474,17 +2286,13 @@ function renderPaperPortfolio(data) {
   const pnlPct = summary.total_pnl_pct ?? 0;
   const pnlCls = pnl >= 0 ? "change-pos" : "change-neg";
   const rlsCls = (summary.realised_pnl ?? 0) >= 0 ? "change-pos" : "change-neg";
+  const holdingsValue = summary.total_current_value ?? ((summary.total_value ?? 0) - (summary.cash ?? 0));
+  const unrealised = summary.total_unrealised_pnl ?? (holdingsValue - (summary.total_invested ?? 0));
 
-  document.getElementById("paper-initial").textContent  = fmtGbp(summary.initial_float);
-  const subtitle = document.getElementById("paper-subtitle");
-  if (subtitle && summary.initial_float != null) {
-    subtitle.textContent = `Simulated trading starting from ${fmtGbp(summary.initial_float)}. Trades are added from Recommendations.`;
-  }
   document.getElementById("paper-cash").textContent     = fmtGbp(summary.cash);
-  document.getElementById("paper-invested").textContent = fmtGbp(summary.total_invested);
+  document.getElementById("paper-invested").textContent = fmtGbp(holdingsValue);
   document.getElementById("paper-total").textContent    = fmtGbp(summary.total_value);
 
-  const unrealised = (summary.total_value ?? 0) - (summary.cash ?? 0) - (summary.total_invested ?? 0);
   document.getElementById("paper-unrealised").innerHTML =
     `<span class="${unrealised >= 0 ? "change-pos" : "change-neg"}">${fmtGbp(unrealised)}</span>`;
   document.getElementById("paper-realised").innerHTML =
@@ -2504,7 +2312,7 @@ function renderPaperPortfolio(data) {
     posBody.innerHTML = positions.map(p => {
       const uCls = p.unrealised_pnl >= 0 ? "change-pos" : "change-neg";
       const rCls = p.realised_pnl  >= 0 ? "change-pos" : "change-neg";
-      return `<tr data-ticker="${safe(p.ticker)}">
+      return `<tr>
         <td><strong>${safe(p.ticker)}</strong></td>
         <td style="color:var(--text-muted);font-size:0.85rem">${safe(p.name)}</td>
         <td>${p.shares}</td>
@@ -2532,6 +2340,10 @@ function renderPaperPortfolio(data) {
     histBody.innerHTML = txs.map(tx => {
       const typeCls = tx.type === "buy" ? "paper-trade-type-buy" : "paper-trade-type-sell";
       const value   = (tx.qty || 0) * (tx.price || 0);
+      const tradePnl = tx.realised_pnl;
+      const pnlHtml = tradePnl == null
+        ? '<span class="result-pending">Open</span>'
+        : `<span class="${tradePnl >= 0 ? "change-pos" : "change-neg"}">${fmtGbp(tradePnl)}</span>`;
       return `<tr>
         <td>${safe(tx.date)}</td>
         <td><span class="${typeCls}">${tx.type.toUpperCase()}</span></td>
@@ -2539,6 +2351,7 @@ function renderPaperPortfolio(data) {
         <td>${tx.qty}</td>
         <td>${fmtGbp(tx.price)}</td>
         <td>${fmtGbp(value)}</td>
+        <td>${pnlHtml}</td>
       </tr>`;
     }).join("");
   } else {
@@ -2569,19 +2382,14 @@ async function paperTrade(btn, type, ticker, qty, price) {
     }
     btn.textContent = type === "buy" ? "✓ Bought" : "✓ Sold";
     btn.style.opacity = "0.6";
-    TabCache.invalidate('paper');
-    if (type === "sell") {
-      TabCache.invalidate('recommendations');
-      const row = btn.closest("tr");
-      if (row) {
-        row.remove();
-        const tbody = document.getElementById("rec-sells-body");
-        if (tbody && tbody.querySelectorAll("tr").length === 0) {
-          document.getElementById("rec-sells-wrap")?.classList.add("hidden");
-        }
-      }
+    const activeTab = document.querySelector(".tab-btn.active")?.dataset.tab || "";
+
+    // Refresh the visible screen in place after every paper trade.
+    if (activeTab === "recommendations") {
+      await loadRecommendations();
+    } else {
+      await loadPaperPortfolio();
     }
-    loadPaperPortfolio(true);
   } catch (err) {
     alert("Error: " + err.message);
     btn.textContent = origText;
@@ -2589,14 +2397,13 @@ async function paperTrade(btn, type, ticker, qty, price) {
   }
 }
 
-document.getElementById("btn-refresh-paper").addEventListener("click", () => { TabCache.invalidate('paper'); loadPaperPortfolio(true); });
+document.getElementById("btn-refresh-paper").addEventListener("click", loadPaperPortfolio);
 
 document.getElementById("btn-reset-paper").addEventListener("click", async () => {
   if (!confirm("Reset your entire paper portfolio back to £100,000? This cannot be undone.")) return;
   try {
     await authFetch(`${API}/api/paper-portfolio/reset`, { method: "DELETE" });
-    TabCache.invalidate('paper');
-    loadPaperPortfolio(true);
+    loadPaperPortfolio();
   } catch (err) {
     document.getElementById("paper-status").textContent = "Reset failed: " + err.message;
   }
@@ -2604,18 +2411,8 @@ document.getElementById("btn-reset-paper").addEventListener("click", async () =>
 
 // ── Alerts ────────────────────────────────────────────────────
 
-async function loadAlerts(forceRefresh = false) {
+async function loadAlerts() {
   const status = document.getElementById("alerts-status");
-
-  const cached = !forceRefresh && TabCache.get('alerts');
-  if (cached) {
-    status.textContent = "";
-    renderMonitorBar(cached.monStatus);
-    renderAlertsTable(cached.alerts);
-    populateAlertSettings(cached.settings);
-    return;
-  }
-
   status.textContent = "Loading…";
   try {
     const [alertsRes, statusRes, settingsRes] = await Promise.all([
@@ -2626,7 +2423,6 @@ async function loadAlerts(forceRefresh = false) {
     const alerts = await alertsRes.json();
     const monStatus = await statusRes.json();
     const settings = await settingsRes.json();
-    TabCache.set('alerts', { alerts, monStatus, settings });
     status.textContent = "";
     renderMonitorBar(monStatus);
     renderAlertsTable(alerts);
@@ -2638,7 +2434,6 @@ async function loadAlerts(forceRefresh = false) {
 
 function populateAlertSettings(s) {
   const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
-  set("as-initial-float", s.initial_float);
   set("as-price-swing", s.alert_price_swing_pct);
   set("as-cooldown",    s.alert_cooldown_hours);
   set("as-top-buys",    s.alert_top_buys);
@@ -2677,48 +2472,33 @@ function renderAlertsTable(alerts) {
   empty.classList.remove("visible");
 
   body.innerHTML = alerts.map(a => {
-    const dt = new Date(a.timestamp);
-    const dateStr = dt.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
-    const timeStr = dt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const time = new Date(a.timestamp).toLocaleString();
+    const signals = a.signals || [];
+    const primarySignal = signals[0] || {};
+    const allSignals = signals.map(s =>
+      `<span class="signal-tag signal-${s.type}">${safe(s.signal)}</span>`
+    ).join(" ");
+    const type = signals.map(s => SIGNAL_LABELS[s.type] || s.type).join(", ");
 
-    // Message: use stored message field, fall back to building from legacy fields
-    let message = a.message || "";
-    if (!message) {
-      const signals = a.signals || [];
-      const sig = signals[0] || {};
-      const action = a.action || "";
-      const ticker = a.ticker ? `${a.ticker}${a.name ? " (" + a.name + ")" : ""}` : "";
-      message = [action, ticker, sig.signal].filter(Boolean).join(" — ");
-    }
-
-    // Channels: use stored channels array, fall back to legacy notified_* booleans
-    let channels = a.channels;
-    if (!channels || channels.length === 0) {
-      channels = [];
-      if (a.notified_email) channels.push("Email");
-      if (a.notified_sms)   channels.push("WhatsApp");
-      if (channels.length === 0) channels.push("Log only");
-    }
-    const channelBadges = channels.map(ch => {
-      const cls = ch === "WhatsApp" ? "badge-whatsapp" : ch === "Email" ? "badge-email" : "badge-log";
-      return `<span class="alert-channel-badge ${cls}">${safe(ch)}</span>`;
-    }).join(" ");
-
-    // Trigger
-    const trigger = a.trigger || (a.signals?.[0]?.type ? (SIGNAL_LABELS[a.signals[0].type] || a.signals[0].type) : "—");
+    const changePct = primarySignal.change_pct;
+    const priceHtml = `$${a.price?.toFixed(2) ?? "—"}` +
+      (changePct != null ? ` <span class="${changePct >= 0 ? "change-pos" : "change-neg"}">${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%</span>` : "");
 
     return `
       <tr>
-        <td style="white-space:nowrap;font-size:0.82rem"><strong>${dateStr}</strong><br><span style="color:var(--text-muted)">${timeStr}</span></td>
-        <td style="font-size:0.82rem;max-width:340px">${safe(message)}</td>
-        <td style="white-space:nowrap">${channelBadges}</td>
-        <td style="font-size:0.82rem;color:var(--text-muted);max-width:220px">${safe(trigger)}</td>
+        <td style="white-space:nowrap;font-size:0.82rem">${time}</td>
+        <td><strong>${safe(a.ticker)}</strong><br><span style="color:var(--text-muted);font-size:0.78rem">${safe(a.name || "")}</span></td>
+        <td>${priceHtml}</td>
+        <td>${allSignals}</td>
+        <td style="font-size:0.82rem;color:var(--text-muted)">${type}</td>
+        <td class="${a.notified_email ? "notif-yes" : "notif-no"}">${a.notified_email ? "✓ Sent" : "—"}</td>
+        <td class="${a.notified_sms ? "notif-yes" : "notif-no"}">${a.notified_sms ? "✓ Sent" : "—"}</td>
       </tr>
     `;
   }).join("");
 }
 
-document.getElementById("btn-refresh-alerts").addEventListener("click", () => { TabCache.invalidate('alerts'); loadAlerts(true); });
+document.getElementById("btn-refresh-alerts").addEventListener("click", loadAlerts);
 
 document.getElementById("btn-test-alert").addEventListener("click", async () => {
   const btn = document.getElementById("btn-test-alert");
@@ -2741,34 +2521,10 @@ document.getElementById("btn-test-alert").addEventListener("click", async () => 
   }
 });
 
-document.getElementById("btn-test-whatsapp").addEventListener("click", async () => {
-  const btn = document.getElementById("btn-test-whatsapp");
-  const status = document.getElementById("alerts-status");
-  btn.disabled = true;
-  status.textContent = "Sending WhatsApp test…";
-  try {
-    const res = await authFetch(`${API}/api/alerts/test-whatsapp`, { method: "POST" });
-    const data = await res.json();
-    if (data.sms_sent) {
-      const parts = ["WhatsApp accepted by Twilio ✓"];
-      if (data.status) parts.push(`status: ${data.status}`);
-      if (data.sid) parts.push(`SID: ${data.sid}`);
-      status.textContent = parts.join(" · ");
-    } else {
-      status.textContent = data.error ? `WhatsApp failed: ${data.error}` : "WhatsApp not configured";
-    }
-  } catch (err) {
-    status.textContent = "Error: " + err.message;
-  } finally {
-    btn.disabled = false;
-  }
-});
-
 document.getElementById("btn-clear-alerts").addEventListener("click", async () => {
   if (!confirm("Clear all alert history?")) return;
   await authFetch(`${API}/api/alerts`, { method: "DELETE" });
-  TabCache.invalidate('alerts');
-  loadAlerts(true);
+  loadAlerts();
 });
 
 document.getElementById("btn-save-alert-settings").addEventListener("click", async () => {
@@ -2780,7 +2536,6 @@ document.getElementById("btn-save-alert-settings").addEventListener("click", asy
     const existing = await (await authFetch(`${API}/api/settings`)).json();
     const updated = {
       ...existing,
-      initial_float:         parseFloat(document.getElementById("as-initial-float").value),
       alert_price_swing_pct: parseFloat(document.getElementById("as-price-swing").value),
       alert_cooldown_hours:  parseFloat(document.getElementById("as-cooldown").value),
       alert_top_buys:        parseInt(document.getElementById("as-top-buys").value, 10),
@@ -2793,11 +2548,6 @@ document.getElementById("btn-save-alert-settings").addEventListener("click", asy
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updated),
     });
-    TabCache.invalidate('alerts');
-    TabCache.invalidate('paper');
-    TabCache.invalidate('recommendations');
-    if (document.getElementById("tab-paper")?.classList.contains("active")) loadPaperPortfolio(true);
-    if (document.getElementById("tab-recommendations")?.classList.contains("active")) loadRecommendations(true);
     msg.textContent = "Saved ✓";
     setTimeout(() => { msg.textContent = ""; }, 3000);
   } catch (err) {
@@ -2820,66 +2570,57 @@ function fmtUsd(val) {
   return "$" + Number(val).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-async function loadPortfolio(forceRefresh = false) {
+async function loadPortfolio() {
   const status  = document.getElementById("portfolio-status");
   const body    = document.getElementById("portfolio-body");
   const empty   = document.getElementById("portfolio-empty");
   const summary = document.getElementById("portfolio-summary");
 
-  const cached = !forceRefresh && TabCache.get('portfolio');
-  if (cached) {
-    status.textContent = "";
-    _renderPortfolioData(cached, body, empty, summary);
-    return;
-  }
-
   status.textContent = "Loading…";
   try {
     const res  = await authFetch(`${API}/api/portfolio`);
     const data = await res.json();
-    TabCache.set('portfolio', data);
     status.textContent = "";
 
-    _renderPortfolioData(data, body, empty, summary);
+    const { positions, summary: s } = data;
+
+    summary.classList.remove("hidden");
+    document.getElementById("port-invested").textContent    = fmtUsd(s.total_invested);
+    document.getElementById("port-current").textContent     = fmtUsd(s.total_current_value);
+    document.getElementById("port-unrealised").innerHTML    = pnlHtml(s.total_unrealised_pnl);
+    document.getElementById("port-realised").innerHTML      = pnlHtml(s.total_realised_pnl);
+    const totalEl = document.getElementById("port-total");
+    totalEl.innerHTML = pnlHtml(s.total_pnl);
+
+    if (!positions || positions.length === 0) {
+      body.innerHTML = "";
+      empty.classList.add("visible");
+      return;
+    }
+
+    empty.classList.remove("visible");
+
+    body.innerHTML = positions.map(p => `
+      <tr data-ticker="${p.ticker}">
+        <td><strong>${p.ticker}</strong></td>
+        <td style="color:var(--text-muted);font-size:0.85rem">${p.name}</td>
+        <td>${p.shares}</td>
+        <td>$${p.avg_cost.toFixed(2)}</td>
+        <td>$${p.current_price.toFixed(2)}</td>
+        <td>${fmtUsd(p.cost_basis)}</td>
+        <td>${fmtUsd(p.current_value)}</td>
+        <td>${pnlHtml(p.unrealised_pnl)} <span style="color:var(--text-muted);font-size:0.78rem">(${p.unrealised_pct >= 0 ? "+" : ""}${p.unrealised_pct}%)</span></td>
+        <td>${pnlHtml(p.realised_pnl)}</td>
+      </tr>
+    `).join("");
+
+    body.querySelectorAll("tr").forEach(row => {
+      row.addEventListener("click", () => openDetail(row.dataset.ticker));
+    });
 
   } catch (err) {
     status.textContent = err?.message || "Error loading portfolio.";
   }
-}
-
-function _renderPortfolioData(data, body, empty, summary) {
-  const { positions, summary: s } = data;
-
-  summary.classList.remove("hidden");
-  document.getElementById("port-invested").textContent    = fmtUsd(s.total_invested);
-  document.getElementById("port-current").textContent     = fmtUsd(s.total_current_value);
-  document.getElementById("port-unrealised").innerHTML    = pnlHtml(s.total_unrealised_pnl);
-  document.getElementById("port-realised").innerHTML      = pnlHtml(s.total_realised_pnl);
-  document.getElementById("port-total").innerHTML         = pnlHtml(s.total_pnl);
-
-  if (!positions || positions.length === 0) {
-    body.innerHTML = "";
-    empty.classList.add("visible");
-    return;
-  }
-
-  empty.classList.remove("visible");
-  body.innerHTML = positions.map(p => `
-    <tr data-ticker="${p.ticker}">
-      <td><strong>${p.ticker}</strong></td>
-      <td style="color:var(--text-muted);font-size:0.85rem">${p.name}</td>
-      <td>${p.shares}</td>
-      <td>$${p.avg_cost.toFixed(2)}</td>
-      <td>$${p.current_price.toFixed(2)}</td>
-      <td>${fmtUsd(p.cost_basis)}</td>
-      <td>${fmtUsd(p.current_value)}</td>
-      <td>${pnlHtml(p.unrealised_pnl)} <span style="color:var(--text-muted);font-size:0.78rem">(${p.unrealised_pct >= 0 ? "+" : ""}${p.unrealised_pct}%)</span></td>
-      <td>${pnlHtml(p.realised_pnl)}</td>
-    </tr>
-  `).join("");
-  body.querySelectorAll("tr").forEach(row => {
-    row.addEventListener("click", () => openDetail(row.dataset.ticker));
-  });
 }
 
 async function submitTrade(type) {
@@ -2913,8 +2654,7 @@ async function submitTrade(type) {
       document.getElementById("trade-ticker").value = "";
       document.getElementById("trade-qty").value    = "";
       document.getElementById("trade-price").value  = "";
-      TabCache.invalidate('portfolio');
-      loadPortfolio(true);
+      loadPortfolio();
     }
   } catch (err) {
     status.textContent = "Error: " + err.message;
@@ -2925,66 +2665,7 @@ async function submitTrade(type) {
 
 document.getElementById("btn-buy").addEventListener("click",  () => submitTrade("buy"));
 document.getElementById("btn-sell").addEventListener("click", () => submitTrade("sell"));
-document.getElementById("btn-refresh-portfolio").addEventListener("click", () => { TabCache.invalidate('portfolio'); loadPortfolio(true); });
-
-// ── Near-realtime price polling ───────────────────────────────
-let _liveTimer = null;
-
-function _stopLive() {
-  if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; }
-}
-
-async function _tickPortfolioPrices() {
-  try {
-    const res = await authFetch(`${API}/api/portfolio/prices`);
-    if (!res.ok) return;
-    const { prices, totals } = await res.json();
-    document.querySelectorAll("#portfolio-body tr[data-ticker]").forEach(row => {
-      const d = prices[row.dataset.ticker];
-      if (!d) return;
-      row.cells[4].textContent = "$" + d.current_price.toFixed(2);
-      row.cells[6].textContent = fmtUsd(d.current_value);
-      row.cells[7].innerHTML   = pnlHtml(d.unrealised_pnl) +
-        ` <span style="color:var(--text-muted);font-size:0.78rem">(${d.unrealised_pct >= 0 ? "+" : ""}${d.unrealised_pct}%)</span>`;
-    });
-    if (totals) {
-      document.getElementById("port-current").textContent    = fmtUsd(totals.total_current_value);
-      document.getElementById("port-unrealised").innerHTML   = pnlHtml(totals.total_unrealised_pnl);
-      document.getElementById("port-total").innerHTML        = pnlHtml(totals.total_pnl);
-    }
-  } catch {}
-}
-
-async function _tickPaperPrices() {
-  try {
-    const res = await authFetch(`${API}/api/paper-portfolio/prices`);
-    if (!res.ok) return;
-    const { prices, totals } = await res.json();
-    document.querySelectorAll("#paper-positions-body tr[data-ticker]").forEach(row => {
-      const d = prices[row.dataset.ticker];
-      if (!d) return;
-      const uCls = d.unrealised_pnl >= 0 ? "change-pos" : "change-neg";
-      row.cells[4].textContent = fmtGbp(d.current_price);
-      row.cells[6].textContent = fmtGbp(d.current_value);
-      row.cells[7].innerHTML   = `<span class="${uCls}">${fmtGbp(d.unrealised_pnl)}</span>`;
-      row.cells[8].innerHTML   = `<span class="${uCls}">${d.unrealised_pct >= 0 ? "+" : ""}${d.unrealised_pct}%</span>`;
-    });
-    if (totals) {
-      const pnlCls = totals.total_pnl >= 0 ? "change-pos" : "change-neg";
-      const uCls   = totals.unrealised >= 0 ? "change-pos" : "change-neg";
-      document.getElementById("paper-total").textContent       = fmtGbp(totals.total_value);
-      document.getElementById("paper-unrealised").innerHTML    = `<span class="${uCls}">${fmtGbp(totals.unrealised)}</span>`;
-      document.getElementById("paper-pnl").innerHTML           =
-        `<span class="${pnlCls}">${fmtGbp(totals.total_pnl)} (${totals.total_pnl >= 0 ? "+" : ""}${totals.total_pnl_pct}%)</span>`;
-    }
-  } catch {}
-}
-
-function _startLive(type) {
-  _stopLive();
-  const fn = type === "paper" ? _tickPaperPrices : _tickPortfolioPrices;
-  _liveTimer = setInterval(fn, 30000);
-}
+document.getElementById("btn-refresh-portfolio").addEventListener("click", loadPortfolio);
 
 document.getElementById("btn-import-portfolio").addEventListener("click", () => {
   document.getElementById("import-file-input").click();
@@ -3046,8 +2727,7 @@ document.getElementById("import-pdf-input").addEventListener("change", async (e)
       : "";
 
     overlay.classList.remove("hidden");
-    TabCache.invalidate('portfolio');
-    loadPortfolio(true);
+    loadPortfolio();
   } catch (err) {
     status.textContent = "PDF import error: " + err.message;
   } finally {
@@ -3082,8 +2762,7 @@ document.getElementById("import-file-input").addEventListener("change", async (e
     let msg = `Imported ${data.imported} transaction(s).`;
     if (data.skipped > 0) msg += ` ${data.skipped} row(s) skipped: ${data.errors.join("; ")}`;
     status.textContent = msg;
-    TabCache.invalidate('portfolio');
-    loadPortfolio(true);
+    loadPortfolio();
   } catch (err) {
     status.textContent = "Import error: " + err.message;
   } finally {

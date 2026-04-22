@@ -130,7 +130,7 @@ USERS_FILE  = Path(__file__).parent / "users.json"
 _reset_tokens: dict[str, tuple[str, datetime]] = {}
 
 # Auth public routes — no JWT required
-_AUTH_PUBLIC = {"/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/unlock-test", "/api/alerts/log"}
+_AUTH_PUBLIC = {"/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password", "/api/health"}
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001").strip() or "claude-haiku-4-5-20251001"
 STOCK_RESEARCH_MAX_TOKENS = max(256, int(os.getenv("STOCK_RESEARCH_MAX_TOKENS", "6000")))
 RECOMMEND_MAX_TOKENS = max(256, int(os.getenv("RECOMMEND_MAX_TOKENS", "800")))
@@ -140,7 +140,7 @@ RECOMMENDATION_INFO_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_INFO_
 RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HISTORY_TIMEOUT_SEC", "4.0")))
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
 PREDICTIONS_UNIVERSE_FILL_LIMIT = max(0, int(os.getenv("PREDICTIONS_UNIVERSE_FILL_LIMIT", "6")))
-PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192")))
+PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "2048")))
 
 def load_users() -> dict:
     if USERS_FILE.exists():
@@ -288,6 +288,14 @@ async def auth_middleware(request: Request, call_next):
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
+@app.get("/api/health", include_in_schema=False)
+def health_check():
+    return {
+        "status": "ok",
+        "frontend_ready": (FRONTEND_DIR / "index.html").exists(),
+        "scheduler_running": bool(getattr(scheduler, "running", False)),
+    }
+
 @app.get("/", include_in_schema=False)
 def serve_index():
     return FileResponse(
@@ -311,16 +319,8 @@ ALERTS_FILE          = Path(__file__).parent / "alerts.json"
 PORTFOLIO_FILE       = Path(__file__).parent / "portfolio.json"
 SETTINGS_FILE        = Path(__file__).parent / "settings.json"
 PAPER_PORTFOLIO_FILE = Path(__file__).parent / "paper_portfolio.json"
-ALERT_COOLDOWN_FILE  = Path(__file__).parent / "alert_cooldown_state.json"
 
 PAPER_INITIAL_FLOAT = 200_000.0
-
-
-def get_paper_initial_float() -> float:
-    try:
-        return float(load_settings().get("initial_float", PAPER_INITIAL_FLOAT))
-    except Exception:
-        return PAPER_INITIAL_FLOAT
 
 def load_paper_portfolio() -> list[dict]:
     if PAPER_PORTFOLIO_FILE.exists():
@@ -388,25 +388,7 @@ FTSE250_TICKERS = [
     "SXS.L", "TRN.L", "TLW.L", "VCT.L", "VTY.L", "VSVS.L", "WKP.L", "WOSG.L",
 ]
 
-FTSE100_TICKERS = [
-    "AAL.L", "ABF.L", "ADM.L", "AHT.L", "ANTO.L", "AUTO.L", "AV.L", "AZN.L",
-    "BA.L", "BARC.L", "BATS.L", "BP.L", "BT-A.L", "CCEP.L", "CPG.L", "CRDA.L",
-    "DGE.L", "ENT.L", "EXPN.L", "FLTR.L", "FRES.L", "GSK.L", "HLMA.L", "HSBA.L",
-    "HSX.L", "IMB.L", "INF.L", "III.L", "IHG.L", "ITRK.L", "JD.L", "KGF.L",
-    "LAND.L", "LGEN.L", "LLOY.L", "LSEG.L", "MKS.L", "NG.L", "NWG.L", "OCDO.L",
-    "PHNX.L", "PRU.L", "PSH.L", "PSON.L", "REL.L", "RIO.L", "RKT.L", "RMV.L",
-    "RR.L", "SBRY.L", "SDR.L", "SHEL.L", "SMIN.L", "SMT.L", "SN.L", "SPX.L",
-    "SSE.L", "STAN.L", "SVT.L", "TSCO.L", "ULVR.L", "UU.L", "VOD.L", "WEIR.L",
-    "WTB.L",
-]
-
-SCREENER_EXTRA_TICKERS = [
-    "TSM", "BE", "ASML", "NVO", "SAP", "SHOP", "ARM", "RYCEY", "RKLB",
-]
-
-UNIVERSE = list(dict.fromkeys(
-    SP500_TICKERS + NASDAQ100_TICKERS + FTSE100_TICKERS + FTSE250_TICKERS + SCREENER_EXTRA_TICKERS
-))
+UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
 
 
 _WIKI_HEADERS = {
@@ -450,40 +432,6 @@ def _fetch_nasdaq100_from_wiki() -> list:
         logger.warning(f"Failed to fetch NASDAQ 100 from Wikipedia: {e}")
         return []
 
-
-def _fetch_ftse100_from_wiki() -> list:
-    try:
-        import pandas as pd
-        import requests
-        html = requests.get(
-            "https://en.wikipedia.org/wiki/FTSE_100_Index",
-            headers=_WIKI_HEADERS, timeout=15
-        ).text
-        tables = pd.read_html(io.StringIO(html), header=0)
-        for table in tables:
-            cols = {str(c).strip().lower(): c for c in table.columns}
-            symbol_col = cols.get("epic") or cols.get("ticker") or cols.get("symbol")
-            if not symbol_col:
-                continue
-            tickers = []
-            for raw in table[symbol_col].tolist():
-                ticker = str(raw).strip().upper()
-                if not ticker or ticker == "NAN":
-                    continue
-                if not ticker.endswith(".L"):
-                    ticker = f"{ticker}.L"
-                tickers.append(ticker)
-            if tickers:
-                return tickers
-        return []
-    except Exception as e:
-        logger.warning(f"Failed to fetch FTSE 100 from Wikipedia: {e}")
-        return []
-
-
-def _normalize_search_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
-
 TICKER_NAMES = {
     "AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation", "GOOGL": "Alphabet Inc.",
     "AMZN": "Amazon.com Inc.", "NVDA": "NVIDIA Corporation", "META": "Meta Platforms Inc.",
@@ -504,10 +452,6 @@ TICKER_NAMES = {
     "ISRG": "Intuitive Surgical Inc.", "GILD": "Gilead Sciences Inc.", "CI": "The Cigna Group",
     "TSM": "Taiwan Semiconductor Manufacturing Company Limited",
     "BE": "Bloom Energy Corporation",
-    "RR.L": "Rolls-Royce Holdings plc",
-    "RYCEY": "Rolls-Royce Holdings plc ADR",
-    "BT-A.L": "BT Group plc",
-    "SHEL.L": "Shell plc",
 }
 
 SEARCH_ALIASES = {
@@ -518,13 +462,6 @@ SEARCH_ALIASES = {
     "FACEBOOK": "META",
     "BLOOM ENERGY": "BE",
     "BLOOM": "BE",
-    "ROLLS ROYCE": "RR.L",
-    "ROLLS-ROYCE": "RR.L",
-    "ROLLSROYCE": "RR.L",
-    "ROLLS ROYCE HOLDINGS": "RR.L",
-    "ROLLS-ROYCE HOLDINGS": "RR.L",
-    "RYCEY": "RYCEY",
-    "RR.L": "RR.L",
 }
 
 MACRO_SYMBOLS = {
@@ -545,41 +482,18 @@ RSS_FEEDS = [
 
 # In-memory state for monitoring
 price_cache: dict[str, float] = {}       # ticker -> last seen price
+alert_cooldown: dict[str, datetime] = {} # alert key -> last alert time
+alert_price_cache: dict[str, float] = {}  # "ACTION:ticker" -> price at last sent alert
 monitor_status = {"last_check": None, "active": False, "checks_run": 0}
 recommendation_alert_snapshot: dict[str, object] = {"generated_at": None, "data": None}
-
-
-def _load_alert_cooldown_state() -> tuple[dict[str, datetime], dict[str, float]]:
-    """Load persisted alert cooldown and price cache from disk."""
-    if not ALERT_COOLDOWN_FILE.exists():
-        return {}, {}
-    try:
-        raw = json.loads(ALERT_COOLDOWN_FILE.read_text(encoding="utf-8"))
-        cooldown = {k: datetime.fromisoformat(v) for k, v in raw.get("cooldown", {}).items()}
-        prices = {k: float(v) for k, v in raw.get("prices", {}).items()}
-        return cooldown, prices
-    except Exception:
-        return {}, {}
-
-
-def _save_alert_cooldown_state():
-    try:
-        data = {
-            "cooldown": {k: v.isoformat() for k, v in alert_cooldown.items()},
-            "prices": alert_price_cache,
-        }
-        _atomic_write(ALERT_COOLDOWN_FILE, json.dumps(data, indent=2))
-    except Exception as e:
-        logger.warning("Could not save alert cooldown state: %s", e)
-
-
-_ac, _ap = _load_alert_cooldown_state()
-alert_cooldown: dict[str, datetime] = _ac       # alert key -> last alert time
-alert_price_cache: dict[str, float] = _ap       # "ACTION:ticker" -> price at last sent alert
 
 # yfinance info cache — 5 minute TTL to avoid redundant network calls
 _info_cache: dict[str, tuple[dict, datetime]] = {}
 _INFO_TTL = 300  # seconds
+
+# Portfolio price cache — refresh held-stock prices at most every 15 minutes
+_portfolio_price_cache: dict[str, tuple[float, datetime]] = {}
+_PORTFOLIO_PRICE_TTL = 900  # seconds
 
 async def get_info(ticker: str) -> dict:
     now = datetime.now(timezone.utc)
@@ -664,85 +578,6 @@ def legacy_predicted_pct(direction: str | None, score: Optional[float]) -> float
     if label == "bearish":
         return round(-magnitude, 2)
     return 0.0
-
-
-def direction_from_score(score: Optional[float]) -> str:
-    if score is None:
-        return "neutral"
-    if score >= 61:
-        return "bullish"
-    if score <= 39:
-        return "bearish"
-    return "neutral"
-
-
-def refine_prediction_signal(
-    raw_pct: Optional[float],
-    raw_direction: str | None,
-    score: Optional[float],
-    confidence: str,
-    stock_data: dict,
-) -> tuple[str, float]:
-    """
-    Separate direction from magnitude so weak or conflicting signals default to neutral
-    instead of producing spurious precise percentages.
-    """
-    llm_direction = (raw_direction or prediction_direction(raw_pct) or "neutral").lower()
-    score_direction = direction_from_score(score)
-    sentiment_score = float(stock_data.get("sentiment_score") or 0.0)
-    factors = stock_data.get("factor_scores") or {}
-    composite = float(factors.get("composite") or 50.0)
-    momentum = float(factors.get("momentum") or 50.0)
-    quality = float(factors.get("quality") or 50.0)
-    vol_pct = float(stock_data.get("annualised_vol_pct") or 0.0)
-    dte = stock_data.get("days_to_earnings")
-
-    quant_direction = "neutral"
-    if sentiment_score >= 0.35 and composite >= 55 and momentum >= 50:
-        quant_direction = "bullish"
-    elif sentiment_score <= -0.35 and composite <= 45 and momentum <= 50:
-        quant_direction = "bearish"
-
-    votes = [d for d in [llm_direction, score_direction, quant_direction] if d in {"bullish", "bearish", "neutral"}]
-    bullish_votes = votes.count("bullish")
-    bearish_votes = votes.count("bearish")
-    neutral_votes = votes.count("neutral")
-
-    final_direction = "neutral"
-    if bullish_votes >= 2:
-        final_direction = "bullish"
-    elif bearish_votes >= 2:
-        final_direction = "bearish"
-    elif neutral_votes >= 2:
-        final_direction = "neutral"
-    elif llm_direction == score_direction and llm_direction in {"bullish", "bearish"}:
-        final_direction = llm_direction
-
-    # Force weaker calls to neutral around major uncertainty or poor quality.
-    if quality < 35:
-        final_direction = "neutral"
-    if dte is not None and 0 <= int(dte) <= 7 and confidence == "low":
-        final_direction = "neutral"
-
-    if final_direction == "neutral":
-        return "neutral", 0.0
-
-    raw_magnitude = abs(float(raw_pct or 0.0))
-    score_magnitude = 0.0 if score is None else min(2.5, abs(float(score) - 50.0) / 18.0)
-    base_magnitude = max(raw_magnitude, score_magnitude)
-    conf_cap = {"low": 0.6, "medium": 1.2, "high": 2.0}.get((confidence or "medium").lower(), 1.0)
-    if composite >= 70 and momentum >= 60:
-        conf_cap += 0.2
-    if composite <= 40 or momentum <= 40:
-        conf_cap = min(conf_cap, 0.8)
-    if vol_pct >= 45:
-        conf_cap = min(conf_cap, 0.8)
-    if dte is not None and 0 <= int(dte) <= 7:
-        conf_cap = min(conf_cap, 0.5)
-
-    final_magnitude = min(max(base_magnitude, 0.35), conf_cap)
-    signed_pct = final_magnitude if final_direction == "bullish" else -final_magnitude
-    return final_direction, round(signed_pct, 2)
 
 PREDICTION_HORIZON_MONTHS = (3, 6, 12, 24, 36)
 
@@ -880,8 +715,6 @@ _predictions_cache: dict[str, object] = {
     "data": None,
 }
 _screen_universe_cache: dict[str, tuple[list[dict], datetime]] = {}
-_screen_loading: dict[str, bool] = {}          # pool_key -> True while background fetch is running
-_screen_partial: dict[str, list[dict]] = {}    # pool_key -> partial rows accumulated so far
 
 
 def invalidate_predictions_cache() -> None:
@@ -892,7 +725,7 @@ def invalidate_predictions_cache() -> None:
 
 def save_predictions(predictions: list[dict]):
     invalidate_predictions_cache()
-    _atomic_write(PREDICTIONS_FILE, json.dumps(predictions[-1000:], indent=2))
+    _atomic_write(PREDICTIONS_FILE, json.dumps(predictions[:1000], indent=2))
 
 
 _recommendation_jobs: dict[str, dict] = {}
@@ -1144,20 +977,6 @@ def compute_dcf_valuation(info: dict) -> Optional[dict]:
         if fcf <= 0 or shares <= 0 or price <= 0:
             return None
 
-        # Sanity check 1: FCF/share must be positive and credible relative to price.
-        # If FCF per share > 3x the current price the input data is almost certainly
-        # distorted by one-off working capital movements or accounting items.
-        fcf_per_share = fcf / shares
-        if fcf_per_share > price * 3:
-            return None
-
-        # Sanity check 2: if the company is loss-making on a reported basis (negative EPS)
-        # and FCF yield > 30% something unusual is inflating FCF — don't trust the DCF.
-        trailing_eps = info.get("trailingEps") or 0
-        fcf_yield = fcf / (price * shares) if price and shares else 0
-        if trailing_eps < 0 and fcf_yield > 0.30:
-            return None
-
         wacc          = 0.045 + max(0.5, min(2.5, float(beta))) * 0.05
         terminal_g    = 0.025
         fcf_growth    = min(float(rev_g) * 0.7, 0.25)
@@ -1169,11 +988,6 @@ def compute_dcf_valuation(info: dict) -> Optional[dict]:
 
         intrinsic_per_share = total_val / shares
         mos_pct = (intrinsic_per_share - price) / price * 100
-
-        # Cap margin of safety display at ±150% — beyond that the inputs are too uncertain
-        # to present a specific number without misleading the user
-        if abs(mos_pct) > 150:
-            return None
 
         return {
             "intrinsic_per_share": round(intrinsic_per_share, 2),
@@ -1230,6 +1044,41 @@ def compute_positions(transactions: list[dict]) -> dict:
             if pos["shares"] <= 0:
                 pos["shares"] = 0.0
     return positions
+
+
+def annotate_transactions_with_realised_pnl(transactions: list[dict]) -> list[dict]:
+    """Attach realised P&L for sell trades using rolling average cost."""
+    positions: dict[str, dict] = {}
+    annotated: list[dict] = []
+
+    for tx in sorted(transactions, key=lambda x: x["timestamp"]):
+        item = dict(tx)
+        ticker = item["ticker"]
+        qty = float(item.get("qty", 0) or 0)
+        price = float(item.get("price", 0) or 0)
+
+        if ticker not in positions:
+            positions[ticker] = {"shares": 0.0, "avg_cost": 0.0}
+        pos = positions[ticker]
+
+        if item["type"] == "buy":
+            total = pos["shares"] * pos["avg_cost"] + qty * price
+            pos["shares"] += qty
+            pos["avg_cost"] = total / pos["shares"] if pos["shares"] > 0 else 0.0
+            item["realised_pnl"] = None
+        elif item["type"] == "sell":
+            sell_qty = min(qty, pos["shares"])
+            realised_pnl = (price - pos["avg_cost"]) * sell_qty
+            item["realised_pnl"] = round(realised_pnl, 2)
+            pos["shares"] -= sell_qty
+            if pos["shares"] <= 0:
+                pos["shares"] = 0.0
+        else:
+            item["realised_pnl"] = None
+
+        annotated.append(item)
+
+    return annotated
 
 
 def compute_portfolio_state(transactions: list[dict], price_map: Optional[dict[str, float]] = None) -> dict:
@@ -1313,7 +1162,7 @@ def send_email(subject: str, body: str, to_email: Optional[str] = None) -> bool:
         return False
 
 
-def send_whatsapp_message(message: str) -> dict:
+def send_sms(message: str) -> bool:
     try:
         from twilio.rest import Client
         account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -1322,29 +1171,14 @@ def send_whatsapp_message(message: str) -> dict:
         to_number   = os.getenv("TWILIO_TO_NUMBER", "")
 
         if not all([account_sid, auth_token, from_number, to_number]):
-            return {"ok": False, "error": "Twilio WhatsApp is not fully configured."}
-
-        if not from_number.startswith("whatsapp:"):
-            from_number = f"whatsapp:{from_number}"
-        if not to_number.startswith("whatsapp:"):
-            to_number = f"whatsapp:{to_number}"
+            return False
 
         client = Client(account_sid, auth_token)
-        msg = client.messages.create(body=message[:1600], from_=from_number, to=to_number)
-        return {
-            "ok": True,
-            "sid": getattr(msg, "sid", None),
-            "status": getattr(msg, "status", None),
-            "to": to_number,
-            "from": from_number,
-        }
+        client.messages.create(body=message[:1600], from_=from_number, to=to_number)
+        return True
     except Exception as e:
         print(f"[SMS] Failed: {e}")
-        return {"ok": False, "error": str(e)}
-
-
-def send_sms(message: str) -> bool:
-    return bool(send_whatsapp_message(message).get("ok"))
+        return False
 
 
 # ── Market hours helper ───────────────────────────────────────────────────────
@@ -1381,6 +1215,46 @@ def _price_from_info_for_alerts(info: Optional[dict]) -> float:
         if value > 0:
             return value
     return 0.0
+
+
+async def _get_portfolio_price_map(held: list[str], positions: dict[str, dict]) -> dict[str, float]:
+    now = datetime.now(timezone.utc)
+    price_map: dict[str, float] = {}
+    stale_tickers: list[str] = []
+
+    for ticker in held:
+        cached_entry = _portfolio_price_cache.get(ticker)
+        if cached_entry:
+            cached_price, cached_at = cached_entry
+            if (now - cached_at).total_seconds() < _PORTFOLIO_PRICE_TTL and cached_price > 0:
+                price_map[ticker] = cached_price
+                continue
+        stale_tickers.append(ticker)
+
+    if stale_tickers:
+        infos = await asyncio.gather(
+            *[get_info_with_timeout(ticker, SEARCH_INFO_TIMEOUT_SEC) for ticker in stale_tickers],
+            return_exceptions=True,
+        )
+        for ticker, info in zip(stale_tickers, infos):
+            if not isinstance(info, Exception):
+                live_price = _price_from_info_for_alerts(info)
+                if live_price > 0:
+                    price_map[ticker] = live_price
+                    _portfolio_price_cache[ticker] = (live_price, now)
+                    continue
+
+            cached_entry = _portfolio_price_cache.get(ticker)
+            if cached_entry and cached_entry[0] > 0:
+                price_map[ticker] = cached_entry[0]
+
+    for ticker in held:
+        if not price_map.get(ticker):
+            fallback_price = positions.get(ticker, {}).get("avg_cost", 0) or 0
+            if fallback_price:
+                price_map[ticker] = float(fallback_price)
+
+    return price_map
 
 
 async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: int = 3) -> dict:
@@ -1667,32 +1541,11 @@ def _build_alert_email(buy_alerts: list, sell_alerts: list, time_str: str, previ
         SEP,
     ]
 
-    def _short_reason(a: dict) -> str:
-        """One-line reason: use trigger signal, else first sentence of reasoning."""
-        trigger = (a.get("signals") or [{}])[0].get("signal", "").strip()
-        if trigger:
-            # Strip boilerplate prefixes like "BUY signal triggered: " / "SELL signal triggered: "
-            trigger = trigger.split(": ", 1)[-1]
-            return trigger[:80]
-        reasoning = (a.get("reasoning") or "").strip()
-        if reasoning:
-            first = reasoning.split(".")[0].strip()
-            return first[:80]
-        return ""
-
     sms_parts = [f"StockPicker {time_str}"]
     for a in buy_alerts:
-        line = f"▲ BUY {a['ticker']} {float(a.get('projected_12m_pct') or 0):+.1f}% 12M"
-        reason = _short_reason(a)
-        if reason:
-            line += f"\n  {reason}"
-        sms_parts.append(line)
+        sms_parts.append(f"BUY {a['ticker']} {float(a.get('projected_12m_pct') or 0):+.1f}% 12M")
     for a in sell_alerts:
-        line = f"▼ SELL {a['ticker']} {float(a.get('projected_12m_pct') or 0):+.1f}% 12M"
-        reason = _short_reason(a)
-        if reason:
-            line += f"\n  {reason}"
-        sms_parts.append(line)
+        sms_parts.append(f"SELL {a['ticker']} {float(a.get('projected_12m_pct') or 0):+.1f}% 12M")
 
     return subject, "\n".join(body_lines), "\n".join(sms_parts)
 
@@ -1752,7 +1605,6 @@ async def monitor_stocks():
         pending_alerts.append(item)
 
     if pending_alerts:
-        _save_alert_cooldown_state()
         time_str = now.astimezone(ET).strftime("%d %b %Y, %H:%M ET")
         buy_alerts  = [a for a in pending_alerts if a.get("action") == "BUY"]
         sell_alerts = [a for a in pending_alerts if a.get("action") == "SELL"]
@@ -1760,32 +1612,17 @@ async def monitor_stocks():
         emailed = send_email(subject, body)
         texted  = send_sms(sms_body[:1600])
 
-        channels = []
-        if emailed:
-            channels.append("Email")
-        if texted:
-            channels.append("WhatsApp")
-        if not channels:
-            channels.append("Log only")
-
         for alert in pending_alerts:
-            action_label = alert.get("action", "ALERT")
-            signal_text = alert.get("signal", "")
-            message = f"{action_label}: {alert['ticker']} ({alert['name']}) — {signal_text}"
-            trigger = alert.get("type", "recommendation")
             record = {
                 "id": str(uuid.uuid4()),
                 "timestamp": now.isoformat(),
                 "ticker": alert["ticker"],
                 "name": alert["name"],
                 "price": alert["price"],
-                "action": action_label,
-                "message": message,
-                "channels": channels,
-                "trigger": trigger,
+                "action": alert.get("action"),
                 "signals": [{
                     "type": alert.get("type"),
-                    "signal": signal_text,
+                    "signal": alert.get("signal"),
                     "change_pct": alert.get("projected_12m_pct"),
                 }],
                 "score_value": alert.get("score_value"),
@@ -1834,23 +1671,17 @@ class ResetPasswordRequest(BaseModel):
 @app.on_event("startup")
 async def startup():
     # Refresh index constituent lists from Wikipedia
-    global SP500_TICKERS, NASDAQ100_TICKERS, FTSE100_TICKERS, UNIVERSE
+    global SP500_TICKERS, NASDAQ100_TICKERS, UNIVERSE
     loop = asyncio.get_event_loop()
     sp500   = await loop.run_in_executor(None, _fetch_sp500_from_wiki)
     nasdaq  = await loop.run_in_executor(None, _fetch_nasdaq100_from_wiki)
-    ftse100 = await loop.run_in_executor(None, _fetch_ftse100_from_wiki)
     if sp500:
         SP500_TICKERS = sp500
         logger.info(f"S&P 500 tickers refreshed from Wikipedia ({len(sp500)} stocks)")
     if nasdaq:
         NASDAQ100_TICKERS = nasdaq
         logger.info(f"NASDAQ 100 tickers refreshed from Wikipedia ({len(nasdaq)} stocks)")
-    if ftse100:
-        FTSE100_TICKERS = ftse100
-        logger.info(f"FTSE 100 tickers refreshed from Wikipedia ({len(ftse100)} stocks)")
-    UNIVERSE = list(dict.fromkeys(
-        SP500_TICKERS + NASDAQ100_TICKERS + FTSE100_TICKERS + FTSE250_TICKERS + SCREENER_EXTRA_TICKERS
-    ))
+    UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
 
     # Create default admin account on first run
     users = load_users()
@@ -1871,11 +1702,9 @@ async def startup():
 
     scheduler.add_job(monitor_stocks, "interval", minutes=5,  id="monitor")
     scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
-    scheduler.add_job(lambda: asyncio.create_task(prewarm_screener_cache(force=True)), "interval", hours=3, id="screener_prewarm")
     scheduler.start()
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
-    asyncio.create_task(prewarm_screener_cache())
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -1899,19 +1728,6 @@ async def login(req: LoginRequest, request: Request):
     logger.info("LOGIN_OK username=%s ip=%s", username, request.client.host if request.client else "unknown")
     token = create_access_token(username)
     return {"access_token": token, "token_type": "bearer"}
-
-@app.post("/api/auth/unlock-test")
-async def unlock_test(request: Request):
-    """Dev/test only: clear all lockouts. Disabled unless TEST_UNLOCK_SECRET is set."""
-    secret = os.getenv("TEST_UNLOCK_SECRET")
-    if not secret:
-        raise HTTPException(status_code=404, detail="Not found")
-    body = await request.json()
-    if body.get("secret") != secret:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    _lockout_until.clear()
-    _failed_logins.clear()
-    return {"ok": True}
 
 @app.post("/api/auth/forgot-password")
 @limiter.limit("5/minute")
@@ -1985,44 +1801,27 @@ async def search_stocks(q: str = ""):
     if not q or len(q) < 1:
         return []
     q_upper = q.upper()
-    q_norm = _normalize_search_text(q)
-    alias_target = SEARCH_ALIASES.get(q_upper)
-
-    def _is_query_match(ticker: str) -> bool:
-        lowered = ticker.lower()
-        name = str(TICKER_NAMES.get(ticker, ticker)).lower()
-        ticker_norm = _normalize_search_text(ticker)
-        name_norm = _normalize_search_text(name)
-        return (
-            q in lowered
-            or q in name
-            or q_norm in ticker_norm
-            or q_norm in name_norm
-            or alias_target == ticker
-        )
 
     def _search_rank(ticker: str) -> tuple[int, int, str]:
         lowered = ticker.lower()
         name = str(TICKER_NAMES.get(ticker, ticker)).lower()
-        ticker_norm = _normalize_search_text(ticker)
-        name_norm = _normalize_search_text(name)
-        alias_exact = alias_target == ticker
-        if lowered == q or ticker_norm == q_norm:
+        alias_exact = SEARCH_ALIASES.get(q_upper) == ticker
+        if lowered == q:
             return (0, len(ticker), ticker)
         if alias_exact:
             return (0, len(ticker), ticker)
-        if lowered.startswith(q) or ticker_norm.startswith(q_norm):
+        if lowered.startswith(q):
             return (1, len(ticker), ticker)
-        if name.startswith(q) or name_norm.startswith(q_norm):
+        if name.startswith(q):
             return (2, len(ticker), ticker)
-        if all(token in name for token in q.split() if token):
-            return (3, len(ticker), ticker)
         return (3, len(ticker), ticker)
 
     # Broad one-letter searches can fan out into dozens of yfinance calls, so cap them.
     matched = sorted((
         t for t in UNIVERSE
-        if _is_query_match(t)
+        if q in t.lower()
+        or q in str(TICKER_NAMES.get(t, t)).lower()
+        or SEARCH_ALIASES.get(q_upper) == t
     ), key=_search_rank)[:SEARCH_RESULTS_LIMIT]
     if not matched:
         return []
@@ -2086,71 +1885,6 @@ async def search_stocks(q: str = ""):
     return results
 
 
-async def _build_screener_row(ticker: str, info: dict) -> dict | None:
-    try:
-        market_cap     = info.get("marketCap")
-        pe             = info.get("trailingPE")
-        peg            = info.get("pegRatio")
-        pb             = info.get("priceToBook")
-        ev_ebitda      = info.get("enterpriseToEbitda")
-        fcf            = info.get("freeCashflow")
-        volume         = info.get("averageVolume")
-        price          = info.get("currentPrice") or info.get("regularMarketPrice")
-        name           = info.get("shortName", ticker)
-        stock_sector   = info.get("sector", "")
-        fcf_yield      = calc_fcf_yield(fcf, market_cap)
-        rev_growth_raw = info.get("revenueGrowth")
-        rev_growth     = round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None
-        return {
-            "ticker": ticker, "name": name, "sector": stock_sector,
-            "price": round(price, 2) if price else None,
-            "pe": round(pe, 2) if pe else None,
-            "peg": round(peg, 2) if peg else None,
-            "pb": round(pb, 2) if pb else None,
-            "ev_ebitda": round(ev_ebitda, 2) if ev_ebitda else None,
-            "fcf_yield": fcf_yield,
-            "rev_growth": rev_growth,
-            "market_cap": market_cap, "volume": volume,
-        }
-    except Exception:
-        return None
-
-
-async def _fetch_universe_bg(pool_key: str, pool: list[str]):
-    BATCH_SIZE = 25
-    try:
-        for i in range(0, len(pool), BATCH_SIZE):
-            batch = pool[i:i + BATCH_SIZE]
-            results = await asyncio.gather(
-                *[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in batch],
-                return_exceptions=True,
-            )
-            for ticker, info in zip(batch, results):
-                if isinstance(info, Exception) or not info:
-                    continue
-                row = await _build_screener_row(ticker, info)
-                if row:
-                    _screen_partial[pool_key].append(row)
-            if i + BATCH_SIZE < len(pool):
-                await asyncio.sleep(0.4)
-        _screen_universe_cache[pool_key] = (list(_screen_partial[pool_key]), datetime.now(timezone.utc))
-        logger.info("Screener cache warm: %d tickers loaded for pool '%s'", len(_screen_partial[pool_key]), pool_key)
-    finally:
-        _screen_loading[pool_key] = False
-
-
-async def prewarm_screener_cache(force: bool = False):
-    """Pre-warm the screener universe cache in the background."""
-    pool_key = "__all__"
-    if not force and (_screen_loading.get(pool_key) or _screen_universe_cache.get(pool_key)):
-        return
-    _screen_universe_cache.pop(pool_key, None)
-    _screen_loading[pool_key] = True
-    _screen_partial[pool_key] = []
-    logger.info("Pre-warming screener cache (%d tickers)…", len(UNIVERSE))
-    asyncio.create_task(_fetch_universe_bg(pool_key, UNIVERSE))
-
-
 @app.get("/api/screen")
 async def screen_stocks(
     index: Optional[str] = None,
@@ -2176,53 +1910,55 @@ async def screen_stocks(
     index_map = {
         "sp500": SP500_TICKERS,
         "nasdaq100": NASDAQ100_TICKERS,
-        "ftse100": FTSE100_TICKERS,
         "ftse250": FTSE250_TICKERS,
     }
     pool_key = index or "__all__"
     cached_universe = _screen_universe_cache.get(pool_key)
     now = datetime.now(timezone.utc)
-    loading = False
-
-    if cached_universe and (now - cached_universe[1]).total_seconds() < 1800:
+    if cached_universe and (now - cached_universe[1]).total_seconds() < 300:
         universe_rows = cached_universe[0]
     else:
         pool = index_map.get(index, UNIVERSE) if index else UNIVERSE
-
-        if _screen_loading.get(pool_key):
-            # Background fetch already running — return whatever has loaded so far
-            universe_rows = list(_screen_partial.get(pool_key, []))
-            loading = True
-        else:
-            # Kick off background progressive fetch; return first batch synchronously
-            _screen_loading[pool_key] = True
-            _screen_partial[pool_key] = []
-            asyncio.create_task(_fetch_universe_bg(pool_key, pool))
-            first_batch = pool[:25]
-            first_infos = await asyncio.gather(
-                *[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in first_batch],
-                return_exceptions=True,
-            )
-            first_rows = []
-            for ticker, info in zip(first_batch, first_infos):
-                if isinstance(info, Exception) or not info:
-                    continue
-                row = await _build_screener_row(ticker, info)
-                if row:
-                    first_rows.append(row)
-                    _screen_partial[pool_key].append(row)
-            universe_rows = first_rows
-            loading = True
+        infos = await asyncio.gather(*[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in pool], return_exceptions=True)
+        universe_rows = []
+        for ticker, info in zip(pool, infos):
+            if isinstance(info, Exception):
+                continue
+            try:
+                stock_sector = info.get("sector", "")
+                market_cap   = info.get("marketCap")
+                pe           = info.get("trailingPE")
+                peg          = info.get("pegRatio")
+                pb           = info.get("priceToBook")
+                ev_ebitda    = info.get("enterpriseToEbitda")
+                fcf          = info.get("freeCashflow")
+                volume       = info.get("averageVolume")
+                price        = info.get("currentPrice") or info.get("regularMarketPrice")
+                name         = info.get("shortName", ticker)
+                fcf_yield    = calc_fcf_yield(fcf, market_cap)
+                rev_growth_raw = info.get("revenueGrowth")
+                rev_growth   = round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None
+                universe_rows.append({
+                    "ticker": ticker, "name": name, "sector": stock_sector,
+                    "price": round(price, 2) if price else None,
+                    "pe": round(pe, 2) if pe else None,
+                    "peg": round(peg, 2) if peg else None,
+                    "pb": round(pb, 2) if pb else None,
+                    "ev_ebitda": round(ev_ebitda, 2) if ev_ebitda else None,
+                    "fcf_yield": fcf_yield,
+                    "rev_growth": rev_growth,
+                    "market_cap": market_cap, "volume": volume,
+                })
+            except Exception:
+                continue
+        _screen_universe_cache[pool_key] = (universe_rows, now)
 
     results = []
     q_norm = (q or "").strip().lower()
-    q_compact = _normalize_search_text(q_norm)
     for row in universe_rows:
         if q_norm:
-            ticker_text = str(row.get("ticker", "")).lower()
-            name_text = str(row.get("name", "")).lower()
-            ticker_match = q_norm in ticker_text or q_compact in _normalize_search_text(ticker_text)
-            name_match = q_norm in name_text or q_compact in _normalize_search_text(name_text)
+            ticker_match = q_norm in str(row.get("ticker", "")).lower()
+            name_match = q_norm in str(row.get("name", "")).lower()
             if not ticker_match and not name_match:
                 continue
         stock_sector = row.get("sector", "")
@@ -2269,7 +2005,7 @@ async def screen_stocks(
         if max_rev_growth is not None and (rev_growth is None or rev_growth > max_rev_growth):
             continue
         results.append(row)
-    return {"results": results, "loading": loading, "loaded": len(universe_rows)}
+    return results
 
 
 @app.get("/api/stock/{ticker}")
@@ -2495,196 +2231,188 @@ def fetch_stock_research_for_ticker(ticker: str) -> str:
         return f"Failed to fetch stock research for {ticker}: {e}"
 
 
-def _stock_research_impl(req: RecommendRequest):
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in .env")
-    client = anthropic.Anthropic(api_key=api_key)
+def _extract_research_tickers(query: str) -> list[str]:
+    raw = (query or "").strip()
+    if not raw:
+        return []
 
-    # Extract ticker from query if it looks like a ticker or company name
-    query = req.query.strip().upper()
-    ticker_context = ""
+    import re as _re
 
-    def _resolve_ticker(q: str) -> str | None:
-        """Try to resolve a company name or partial name to a ticker symbol."""
-        # Already looks like a ticker
-        if len(q) <= 5 and q.replace(".", "").isalnum():
-            return q
-        _STRIP_SUFFIXES = {"technologies", "technology", "inc", "corp", "corporation",
-                           "ltd", "limited", "group", "holdings", "co"}
-        # Try full query, then first word as fallback for multi-word names
-        attempts = [q]
-        if " " in q:
-            attempts.append(q.split()[0])
-        for attempt in attempts:
-            try:
-                results = yf.Search(attempt, max_results=1).quotes
-                if results:
-                    t = results[0].get("symbol", "")
-                    if t:
-                        return t.upper()
-            except Exception:
-                pass
-        # Strip trailing generic suffixes and retry
-        words = q.lower().split()
-        while words and words[-1] in _STRIP_SUFFIXES:
-            words.pop()
-            if not words:
-                break
-            try:
-                results = yf.Search(" ".join(words), max_results=1).quotes
-                if results:
-                    t = results[0].get("symbol", "")
-                    if t:
-                        return t.upper()
-            except Exception:
-                pass
-        return None
+    tokens = [_re.sub(r"[^A-Za-z0-9.]", "", tok).upper().strip(".") for tok in raw.replace(",", " ").split()]
+    tokens = [tok for tok in tokens if tok]
+    if not tokens:
+        return []
 
-    resolved = _resolve_ticker(query)
-    # If it looks like a single ticker (1-5 characters, all letters/numbers), fetch live data
-    if resolved:
-        import re as _re
-        from datetime import datetime as _dt
+    if all(1 <= len(tok) <= 5 and tok.replace(".", "").isalnum() for tok in tokens):
+        return list(dict.fromkeys(tokens))
 
-        def _fmt_large(v):
-            try:
-                v = float(v)
-                if v <= 0: return "N/A"
-                if v >= 1e12: return f"${v/1e12:.2f}T"
-                if v >= 1e9:  return f"${v/1e9:.2f}B"
-                if v >= 1e6:  return f"${v/1e6:.2f}M"
-                return f"${v:,.0f}"
-            except Exception:
-                return "N/A"
+    if len(tokens) == 1 and 1 <= len(tokens[0]) <= 5 and tokens[0].replace(".", "").isalnum():
+        return tokens
 
-        def _fmt_pct(v):
-            try:
-                return f"{float(v)*100:.1f}%"
-            except Exception:
-                return "N/A"
+    return []
 
-        def _safe(v, fmt=None):
-            if v is None: return "N/A"
-            try:
-                return fmt(v) if fmt else str(v)
-            except Exception:
-                return "N/A"
 
-        query = resolved  # use resolved ticker (e.g. "MU" even if user typed "Micron")
-        lines = [f"## Live Market Data for {query} (as of {date.today()})"]
+def _build_live_research_context(ticker_symbol: str) -> tuple[str, bool]:
+    import re as _re
+    from datetime import datetime as _dt
 
-        # ── Core price & market data ─────────────────────────────────────────
+    def _fmt_large(v):
         try:
-            ticker = yf.Ticker(query)
-            hist   = ticker.history(period="1y")
-            info   = {}
+            v = float(v)
+            if v <= 0:
+                return "N/A"
+            if v >= 1e12:
+                return f"${v/1e12:.2f}T"
+            if v >= 1e9:
+                return f"${v/1e9:.2f}B"
+            if v >= 1e6:
+                return f"${v/1e6:.2f}M"
+            return f"${v:,.0f}"
+        except Exception:
+            return "N/A"
+
+    def _fmt_pct(v):
+        try:
+            return f"{float(v) * 100:.1f}%"
+        except Exception:
+            return "N/A"
+
+    def _safe(v, fmt=None):
+        if v is None:
+            return "N/A"
+        try:
+            return fmt(v) if fmt else str(v)
+        except Exception:
+            return "N/A"
+
+    as_of = _dt.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"## Live Market Data for {ticker_symbol} (as of {as_of})"]
+    has_live_data = False
+
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        hist = ticker.history(period="1y", interval="1d")
+        info = {}
+        try:
+            info = dict(ticker.info) if ticker.info else {}
+        except Exception:
+            pass
+
+        if not hist.empty:
+            has_live_data = True
             try:
-                info = dict(ticker.info) if ticker.info else {}
+                fi = ticker.fast_info
+                lp = getattr(fi, "last_price", None)
+                current_price = float(lp) if lp and float(lp) > 0 else float(hist["Close"].iloc[-1])
+            except Exception:
+                current_price = float(hist["Close"].iloc[-1])
+
+            prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else current_price
+            day_chg_pct = (current_price - prev_close) / prev_close * 100 if prev_close else 0
+            year_high = float(hist["Close"].max())
+            year_low = float(hist["Close"].min())
+            sma_50 = float(hist["Close"].iloc[-50:].mean()) if len(hist) >= 50 else None
+            sma_200 = float(hist["Close"].iloc[-200:].mean()) if len(hist) >= 200 else None
+            avg_vol_30 = int(hist["Volume"].iloc[-30:].mean()) if "Volume" in hist.columns and len(hist) >= 30 else None
+            last_vol = int(hist["Volume"].iloc[-1]) if "Volume" in hist.columns else None
+            vol_ratio = round(last_vol / avg_vol_30, 2) if last_vol and avg_vol_30 else None
+
+            rsi_14 = None
+            try:
+                closes = hist["Close"]
+                delta = closes.diff()
+                gain = delta.clip(lower=0).rolling(14).mean()
+                loss = (-delta.clip(upper=0)).rolling(14).mean()
+                rs = gain / loss.replace(0, float("nan"))
+                rsi_series = 100 - (100 / (1 + rs))
+                rsi_14 = round(float(rsi_series.iloc[-1]), 1)
             except Exception:
                 pass
 
-            if not hist.empty:
-                try:
-                    fi = ticker.fast_info
-                    lp = getattr(fi, "last_price", None)
-                    current_price = float(lp) if lp and float(lp) > 0 else float(hist["Close"].iloc[-1])
-                except Exception:
-                    current_price = float(hist["Close"].iloc[-1])
+            rec_key = info.get("recommendationKey") or ""
+            lines += [
+                f"**Current Price**: ${current_price:.2f}  ({day_chg_pct:+.2f}% vs prev close)",
+                f"**52-Week Range**: ${year_low:.2f} - ${year_high:.2f}",
+                f"**Market Cap**: {_fmt_large(info.get('marketCap'))}",
+                f"**Enterprise Value**: {_fmt_large(info.get('enterpriseValue'))}",
+                f"**Revenue (TTM)**: {_fmt_large(info.get('totalRevenue'))}",
+                f"**Revenue Growth (YoY)**: {_fmt_pct(info.get('revenueGrowth'))}",
+                f"**Gross Margin**: {_fmt_pct(info.get('grossMargins'))}",
+                f"**Operating Margin**: {_fmt_pct(info.get('operatingMargins'))}",
+                f"**Net Margin**: {_fmt_pct(info.get('profitMargins'))}",
+                f"**EPS (TTM)**: {_safe(info.get('trailingEps'))}",
+                f"**P/E (TTM)**: {_safe(info.get('trailingPE'))}",
+                f"**Forward P/E**: {_safe(info.get('forwardPE'))}",
+                f"**P/S Ratio**: {_safe(info.get('priceToSalesTrailing12Months'))}",
+                f"**EV/Revenue**: {_safe(info.get('enterpriseToRevenue'))}",
+                f"**EV/EBITDA**: {_safe(info.get('enterpriseToEbitda'))}",
+                f"**Total Cash**: {_fmt_large(info.get('totalCash'))}",
+                f"**Total Debt**: {_fmt_large(info.get('totalDebt'))}",
+                f"**Free Cash Flow**: {_fmt_large(info.get('freeCashflow'))}",
+                f"**Beta**: {_safe(info.get('beta'))}",
+                f"**Shares Outstanding**: {_fmt_large(info.get('sharesOutstanding'))}",
+                f"**Short % of Float**: {_fmt_pct(info.get('shortPercentOfFloat'))}",
+                f"**Analyst Target Price**: {_safe(info.get('targetMeanPrice'))}",
+                f"**Analyst Recommendation**: {rec_key.upper() if rec_key else 'N/A'}",
+                f"**50-Day SMA**: {'${:.2f}'.format(sma_50) if sma_50 else 'N/A'}",
+                f"**200-Day SMA**: {'${:.2f}'.format(sma_200) if sma_200 else 'N/A'}",
+                f"**Avg Volume (30d)**: {avg_vol_30:,}" if avg_vol_30 else "**Avg Volume (30d)**: N/A",
+                f"**Last Session Volume**: {last_vol:,}" if last_vol else "**Last Session Volume**: N/A",
+                f"**Volume vs 30d Avg**: {vol_ratio}x" if vol_ratio else "**Volume vs 30d Avg**: N/A",
+                (
+                    f"**RSI (14)**: {rsi_14}"
+                    + (" - overbought" if rsi_14 and rsi_14 > 70 else " - oversold" if rsi_14 and rsi_14 < 30 else " - neutral")
+                )
+                if rsi_14
+                else "**RSI (14)**: N/A",
+                (
+                    f"**Price vs 50d SMA**: {'above' if current_price > sma_50 else 'below'} "
+                    f"(${abs(current_price - sma_50):.2f} {'above' if current_price > sma_50 else 'below'})"
+                )
+                if sma_50
+                else "**Price vs 50d SMA**: N/A",
+                (
+                    f"**Price vs 200d SMA**: {'above' if current_price > sma_200 else 'below'} "
+                    f"(${abs(current_price - sma_200):.2f} {'above' if current_price > sma_200 else 'below'})"
+                )
+                if sma_200
+                else "**Price vs 200d SMA**: N/A",
+            ]
+        else:
+            lines.append("*Live price history could not be fetched for this ticker.*")
 
-                prev_close  = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else current_price
-                day_chg_pct = (current_price - prev_close) / prev_close * 100 if prev_close else 0
-                year_high   = float(hist["Close"].max())
-                year_low    = float(hist["Close"].min())
-                sma_50      = float(hist["Close"].iloc[-50:].mean())  if len(hist) >= 50  else None
-                sma_200     = float(hist["Close"].iloc[-200:].mean()) if len(hist) >= 200 else None
-                avg_vol_30  = int(hist["Volume"].iloc[-30:].mean()) if "Volume" in hist.columns and len(hist) >= 30 else None
-                last_vol    = int(hist["Volume"].iloc[-1])           if "Volume" in hist.columns else None
-                vol_ratio   = round(last_vol / avg_vol_30, 2) if last_vol and avg_vol_30 else None
-
-                # RSI-14
-                rsi_14 = None
-                try:
-                    closes = hist["Close"]
-                    delta  = closes.diff()
-                    gain   = delta.clip(lower=0).rolling(14).mean()
-                    loss   = (-delta.clip(upper=0)).rolling(14).mean()
-                    rs     = gain / loss.replace(0, float("nan"))
-                    rsi_series = 100 - (100 / (1 + rs))
-                    rsi_14 = round(float(rsi_series.iloc[-1]), 1)
-                except Exception:
-                    pass
-
-                rec_key = info.get("recommendationKey") or ""
-                lines += [
-                    f"**Current Price**: ${current_price:.2f}  ({day_chg_pct:+.2f}% vs prev close)",
-                    f"**52-Week Range**: ${year_low:.2f} – ${year_high:.2f}",
-                    f"**Market Cap**: {_fmt_large(info.get('marketCap'))}",
-                    f"**Enterprise Value**: {_fmt_large(info.get('enterpriseValue'))}",
-                    f"**Revenue (TTM)**: {_fmt_large(info.get('totalRevenue'))}",
-                    f"**Revenue Growth (YoY)**: {_fmt_pct(info.get('revenueGrowth'))}",
-                    f"**Gross Margin**: {_fmt_pct(info.get('grossMargins'))}",
-                    f"**Operating Margin**: {_fmt_pct(info.get('operatingMargins'))}",
-                    f"**Net Margin**: {_fmt_pct(info.get('profitMargins'))}",
-                    f"**EPS (TTM)**: {_safe(info.get('trailingEps'))}",
-                    f"**P/E (TTM)**: {_safe(info.get('trailingPE'))}",
-                    f"**Forward P/E**: {_safe(info.get('forwardPE'))}",
-                    f"**P/S Ratio**: {_safe(info.get('priceToSalesTrailing12Months'))}",
-                    f"**EV/Revenue**: {_safe(info.get('enterpriseToRevenue'))}",
-                    f"**EV/EBITDA**: {_safe(info.get('enterpriseToEbitda'))}",
-                    f"**Total Cash**: {_fmt_large(info.get('totalCash'))}",
-                    f"**Total Debt**: {_fmt_large(info.get('totalDebt'))}",
-                    f"**Free Cash Flow**: {_fmt_large(info.get('freeCashflow'))}",
-                    f"**Beta**: {_safe(info.get('beta'))}",
-                    f"**Shares Outstanding**: {_fmt_large(info.get('sharesOutstanding'))}",
-                    f"**Short % of Float**: {_fmt_pct(info.get('shortPercentOfFloat'))}",
-                    f"**Analyst Target Price**: {_safe(info.get('targetMeanPrice'))}",
-                    f"**Analyst Recommendation**: {rec_key.upper() if rec_key else 'N/A'}",
-                    f"**50-Day SMA**: {'${:.2f}'.format(sma_50) if sma_50 else 'N/A'}",
-                    f"**200-Day SMA**: {'${:.2f}'.format(sma_200) if sma_200 else 'N/A'}",
-                    f"**Avg Volume (30d)**: {avg_vol_30:,}" if avg_vol_30 else "**Avg Volume (30d)**: N/A",
-                    f"**Last Session Volume**: {last_vol:,}" if last_vol else "**Last Session Volume**: N/A",
-                    f"**Volume vs 30d Avg**: {vol_ratio}x" if vol_ratio else "**Volume vs 30d Avg**: N/A",
-                    f"**RSI (14)**: {rsi_14}" + (" — overbought" if rsi_14 and rsi_14 > 70 else " — oversold" if rsi_14 and rsi_14 < 30 else " — neutral") if rsi_14 else "**RSI (14)**: N/A",
-                    f"**Price vs 50d SMA**: {'above' if current_price > sma_50 else 'below'} (${abs(current_price - sma_50):.2f} {'above' if current_price > sma_50 else 'below'})" if sma_50 else "**Price vs 50d SMA**: N/A",
-                    f"**Price vs 200d SMA**: {'above' if current_price > sma_200 else 'below'} (${abs(current_price - sma_200):.2f} {'above' if current_price > sma_200 else 'below'})" if sma_200 else "**Price vs 200d SMA**: N/A",
-                ]
-        except Exception as _e:
-            logger.warning("price/info fetch failed for %s: %s", query, _e)
-            lines.append("*Price and info data could not be fetched.*")
-
-        # ── News headlines ───────────────────────────────────────────────────
         try:
             news_items = ticker.news or []
             news_lines = []
             for item in news_items[:10]:
-                content   = item.get("content", item)
-                title     = content.get("title", "")
-                pub_str   = content.get("pubDate", "")
-                pub_ts    = item.get("providerPublishTime", 0)
-                pub_date  = pub_str[:10] if pub_str else (_dt.utcfromtimestamp(int(pub_ts)).strftime("%Y-%m-%d") if pub_ts else "recent")
-                provider  = content.get("provider", {})
+                content = item.get("content", item)
+                title = content.get("title", "")
+                pub_str = content.get("pubDate", "")
+                pub_ts = item.get("providerPublishTime", 0)
+                pub_date = pub_str[:10] if pub_str else (_dt.utcfromtimestamp(int(pub_ts)).strftime("%Y-%m-%d") if pub_ts else "recent")
+                provider = content.get("provider", {})
                 publisher = provider.get("displayName", "") if isinstance(provider, dict) else content.get("publisher", "")
-                summary   = _re.sub(r"<[^>]+>", "", content.get("summary", "")).strip()
+                summary = _re.sub(r"<[^>]+>", "", content.get("summary", "")).strip()
                 if title:
                     entry = f"- [{pub_date}] {title}" + (f" ({publisher})" if publisher else "")
                     if summary and len(summary) < 250:
                         entry += f"\n  {summary}"
                     news_lines.append(entry)
             if news_lines:
+                has_live_data = True
                 lines.append("\n## Recent News Headlines (live from Yahoo Finance)")
                 lines.extend(news_lines)
             else:
-                lines.append("\n## Recent News Headlines\n*No headlines returned by Yahoo Finance for this ticker.*")
-        except Exception as _e:
-            logger.warning("news fetch failed for %s: %s", query, _e)
-            lines.append("\n## Recent News Headlines\n*News fetch failed.*")
+                lines.append("\n## Recent News Headlines\n*No live headlines returned for this ticker.*")
+        except Exception as news_error:
+            logger.warning("news fetch failed for %s: %s", ticker_symbol, news_error)
+            lines.append("\n## Recent News Headlines\n*Live news fetch failed.*")
 
-        # ── Quarterly income statement ───────────────────────────────────────
         try:
             qis = ticker.quarterly_income_stmt
             if qis is not None and not qis.empty:
-                lines.append("\n## Quarterly Income Statement (last 4 quarters, from SEC filings)")
+                has_live_data = True
+                lines.append("\n## Quarterly Income Statement (last 4 quarters, from recent filings)")
                 for row_name in ["Total Revenue", "Gross Profit", "Operating Income", "Net Income", "EBITDA", "Basic EPS"]:
                     if row_name in qis.index:
                         vals = []
@@ -2694,29 +2422,28 @@ def _stock_research_impl(req: RecommendRequest):
                             except Exception:
                                 vals.append(f"{str(c)[:10]}: N/A")
                         lines.append(f"**{row_name}**: " + " | ".join(vals))
-        except Exception as _e:
-            logger.debug("quarterly_income_stmt failed: %s", _e)
+        except Exception as income_error:
+            logger.debug("quarterly_income_stmt failed for %s: %s", ticker_symbol, income_error)
 
-        # ── Quarterly balance sheet ──────────────────────────────────────────
         try:
             qbs = ticker.quarterly_balance_sheet
             if qbs is not None and not qbs.empty:
+                has_live_data = True
                 col = qbs.columns[0]
                 lines.append(f"\n## Quarterly Balance Sheet (most recent: {str(col)[:10]})")
-                for row_name in ["Total Assets", "Total Liabilities Net Minority Interest", "Stockholders Equity",
-                                 "Cash And Cash Equivalents", "Total Debt", "Net Debt"]:
+                for row_name in ["Total Assets", "Total Liabilities Net Minority Interest", "Stockholders Equity", "Cash And Cash Equivalents", "Total Debt", "Net Debt"]:
                     if row_name in qbs.index:
                         try:
                             lines.append(f"**{row_name}**: {_fmt_large(float(qbs.loc[row_name, col]))}")
                         except Exception:
                             pass
-        except Exception as _e:
-            logger.debug("quarterly_balance_sheet failed: %s", _e)
+        except Exception as balance_error:
+            logger.debug("quarterly_balance_sheet failed for %s: %s", ticker_symbol, balance_error)
 
-        # ── Quarterly cash flow ──────────────────────────────────────────────
         try:
             qcf = ticker.quarterly_cashflow
             if qcf is not None and not qcf.empty:
+                has_live_data = True
                 lines.append("\n## Quarterly Cash Flow (last 4 quarters)")
                 for row_name in ["Operating Cash Flow", "Free Cash Flow", "Capital Expenditure", "Issuance Of Debt", "Repurchase Of Capital Stock"]:
                     if row_name in qcf.index:
@@ -2727,85 +2454,146 @@ def _stock_research_impl(req: RecommendRequest):
                             except Exception:
                                 vals.append(f"{str(c)[:10]}: N/A")
                         lines.append(f"**{row_name}**: " + " | ".join(vals))
-        except Exception as _e:
-            logger.debug("quarterly_cashflow failed: %s", _e)
+        except Exception as cashflow_error:
+            logger.debug("quarterly_cashflow failed for %s: %s", ticker_symbol, cashflow_error)
 
-        # ── Analyst recommendations ──────────────────────────────────────────
         try:
             recs = ticker.recommendations
             if recs is not None and not recs.empty:
-                lines.append("\n## Analyst Rating Changes (from published reports)")
+                has_live_data = True
+                lines.append("\n## Analyst Rating Changes (published reports)")
                 for _, row in recs.tail(10).iterrows():
-                    period     = str(row.name)[:10]
-                    firm       = str(row.get("Firm", row.get("firm", "")) or "")
-                    to_grade   = str(row.get("To Grade", row.get("toGrade", "")) or "")
+                    period = str(row.name)[:10]
+                    firm = str(row.get("Firm", row.get("firm", "")) or "")
+                    to_grade = str(row.get("To Grade", row.get("toGrade", "")) or "")
                     from_grade = str(row.get("From Grade", row.get("fromGrade", "")) or "")
-                    action     = str(row.get("Action", row.get("action", "")) or "")
+                    action = str(row.get("Action", row.get("action", "")) or "")
                     parts = [f"[{period}]"]
-                    if firm:       parts.append(firm)
-                    if action:     parts.append(action.upper())
-                    if to_grade:   parts.append(f"→ {to_grade}")
-                    if from_grade and from_grade != to_grade: parts.append(f"(was {from_grade})")
+                    if firm:
+                        parts.append(firm)
+                    if action:
+                        parts.append(action.upper())
+                    if to_grade:
+                        parts.append(f"-> {to_grade}")
+                    if from_grade and from_grade != to_grade:
+                        parts.append(f"(was {from_grade})")
                     lines.append("- " + " ".join(parts))
-        except Exception as _e:
-            logger.debug("recommendations failed: %s", _e)
+        except Exception as recs_error:
+            logger.debug("recommendations failed for %s: %s", ticker_symbol, recs_error)
 
         try:
             apt = ticker.analyst_price_targets
             if apt is not None:
+                has_live_data = True
                 lines.append("\n## Analyst Price Targets (consensus)")
                 for label, key in [("Current", "current"), ("Low", "low"), ("High", "high"), ("Mean", "mean"), ("Median", "median")]:
                     try:
-                        v = apt.get(key)
-                        if v: lines.append(f"**{label} Target**: ${float(v):.2f}")
+                        value = apt.get(key)
+                        if value:
+                            lines.append(f"**{label} Target**: ${float(value):.2f}")
                     except Exception:
                         pass
-        except Exception as _e:
-            logger.debug("analyst_price_targets failed: %s", _e)
+        except Exception as targets_error:
+            logger.debug("analyst_price_targets failed for %s: %s", ticker_symbol, targets_error)
 
-        # ── Earnings history ─────────────────────────────────────────────────
         try:
             eh = ticker.earnings_history
             if eh is not None and not eh.empty:
+                has_live_data = True
                 lines.append("\n## Earnings History (actual vs estimate)")
                 for _, row in eh.tail(6).iterrows():
-                    period   = str(row.get("quarter", row.name))[:10]
-                    est      = row.get("epsEstimate")
-                    actual   = row.get("epsActual")
+                    period = str(row.get("quarter", row.name))[:10]
+                    est = row.get("epsEstimate")
+                    actual = row.get("epsActual")
                     surp_pct = row.get("surprisePercent")
                     parts = [f"[{period}]"]
-                    if est      is not None: parts.append(f"Est: {est:.2f}")
-                    if actual   is not None: parts.append(f"Actual: {actual:.2f}")
-                    if surp_pct is not None: parts.append(f"Surprise: {surp_pct:+.1f}%")
+                    if est is not None:
+                        parts.append(f"Est: {est:.2f}")
+                    if actual is not None:
+                        parts.append(f"Actual: {actual:.2f}")
+                    if surp_pct is not None:
+                        parts.append(f"Surprise: {surp_pct:+.1f}%")
                     lines.append("- " + " | ".join(parts))
-        except Exception as _e:
-            logger.debug("earnings_history failed: %s", _e)
+        except Exception as earnings_error:
+            logger.debug("earnings_history failed for %s: %s", ticker_symbol, earnings_error)
+    except Exception as core_error:
+        logger.warning("live research context build failed for %s: %s", ticker_symbol, core_error)
+        lines.append("*Live market data could not be fetched for this ticker.*")
 
-        lines.append("\n**CRITICAL INSTRUCTION**: Base your entire report on the live data above. Do NOT substitute training-data figures for any metric. If a value shows N/A, report it as unavailable.")
-        ticker_context = "\n".join(lines)
-        logger.info("RESEARCH_CONTEXT built for %s: %d lines", query, len(lines))
+    lines.append(
+        "\n**CRITICAL INSTRUCTION**: Base your entire report on the live data above. "
+        "Do NOT substitute training-data figures for any metric. If a value shows N/A, "
+        "report it as unavailable. Do not add facts that are not present in the live data package."
+    )
+    return "\n".join(lines), has_live_data
 
-    # Stock research command content
-    stock_research_prompt = f"""# Stock Research Command
+
+def _stock_research_impl(req: RecommendRequest):
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in .env")
+    client = anthropic.Anthropic(api_key=api_key)
+
+    tickers = _extract_research_tickers(req.query)
+    if not tickers:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Real-time stock research now requires one or more explicit ticker symbols "
+                "(for example: NVDA or NVDA AMD TSM). Sector, theme, or company-description "
+                "queries without tickers are disabled because reports must be built from live market data, not training data."
+            ),
+        )
+
+    ticker_contexts = []
+    live_tickers = []
+    unavailable_tickers = []
+    for ticker in tickers[:8]:
+        context, has_live_data = _build_live_research_context(ticker)
+        ticker_contexts.append(context)
+        if has_live_data:
+            live_tickers.append(ticker)
+        else:
+            unavailable_tickers.append(ticker)
+
+    if not live_tickers:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Live market data was unavailable for the requested ticker(s), so no report was generated. "
+                "Please try again in a moment and only rely on reports when live data is present."
+            ),
+        )
+
+    ticker_context = "\n\n".join(ticker_contexts)
+    logger.info("RESEARCH_CONTEXT built for %s: %d tickers, live=%s unavailable=%s", req.query, len(tickers), live_tickers, unavailable_tickers)
+
+    stock_research_prompt = f'''# Stock Research Command
 
 {ticker_context}
 
-Research stocks, sectors, or company types based on the provided input: {req.query}
+User input: {req.query}
 
-Determine what was provided:
-- If it looks like **stock tickers** (e.g. `IONQ RGTI QBTS`): research each ticker individually
-- If it looks like a **sector or theme** (e.g. `quantum computing sector`): identify the top publicly traded companies in that space
-- If it looks like a **company description** (e.g. `pre-IPO AI companies 2026`): find and evaluate matching candidates
+Only analyze these explicit ticker symbols when they have a live data package above: {", ".join(tickers)}.
+Tickers with confirmed live market data: {", ".join(live_tickers)}.
+Tickers without live data: {", ".join(unavailable_tickers) if unavailable_tickers else "None"}.
+
+Hard rules:
+- Do NOT use model memory or training data to fill gaps.
+- Do NOT introduce companies or tickers that are not in the explicit ticker list.
+- If a ticker lacks live data, say it was unavailable and stop there for that ticker.
+- If a metric is not present in the live package, mark it unavailable.
+- If live news is absent, say live news was unavailable.
 
 ## Research Steps
 
-For each stock or company identified, perform the following:
+For each requested ticker, perform the following:
 
 ### 1. Company Overview
 - Full company name, ticker, exchange
 - Sector, industry, and sub-sector
-- Business model summary (what they do and how they make money)
-- Stage: early-stage, growth, mature, or turnaround
+- Business model summary based only on the live package
+- Stage: early-stage, growth, mature, or turnaround only if the live package supports that conclusion
 
 ### 2. Recent News & Catalysts
 Use the live news headlines provided above (if any). Summarise the most relevant:
@@ -2814,44 +2602,35 @@ Use the live news headlines provided above (if any). Summarise the most relevant
 - Regulatory approvals or government contracts
 - Executive changes or insider activity
 - Analyst upgrades/downgrades
-If no live headlines were provided, state clearly that live news was unavailable for this query. Do NOT invent or recall news from training data.
+If no live headlines were provided, state clearly that live news was unavailable. Do NOT invent or recall news from training data.
 
 ### 3. Financial Snapshot
 Use the live financial data provided above as the primary source. Summarise:
 - Market cap, enterprise value, revenue (TTM) and YoY growth
 - Gross margin, operating margin, net margin
 - Cash position, total debt, free cash flow
-- P/E, forward P/E, P/S, EV/Revenue, EV/EBITDA vs. sector peers
-Do not invent numbers — use exactly what was provided. Mark any field shown as N/A accordingly.
+- P/E, forward P/E, P/S, EV/Revenue, EV/EBITDA
+Do not invent numbers; use exactly what was provided. Mark any field shown as N/A accordingly.
 
 ### 4. Technical Analysis
 Use the live price data provided above:
 - Current price vs. 52-week range and vs. 50/200-day SMAs
 - Trend direction based on price vs. SMAs
 - Volume: compare last session volume vs. 30-day average
-- Note if price is extended or near support/resistance
+- Note if price is extended or near support/resistance only as an inference from the live range and moving averages above
 
 ### 5. Bull Case
-List 3–5 reasons this stock could outperform:
-- TAM expansion or market share gains
-- Upcoming catalysts (product launch, FDA decision, contract win, etc.)
-- Competitive moat or proprietary technology
-- Improving unit economics or path to profitability
+List 3-5 reasons this stock could outperform, but only if supported by the live package.
 
 ### 6. Bear Case
-List 3–5 risks:
-- Competition or commoditization risk
-- Dilution risk (frequent share issuances)
-- Regulatory, macro, or geopolitical headwinds
-- Execution risk or management credibility
-- Valuation stretched relative to fundamentals
+List 3-5 risks, but only if supported by the live package.
 
 ### 7. Verdict
 Provide a concise investment summary:
 - **Outlook**: Bullish / Neutral / Bearish
 - **Time horizon**: Short-term trade vs. long-term hold
 - **Entry considerations**: Current price attractive, wait for pullback, or avoid
-- **Key thing to watch**: The single most important metric or event to monitor
+- **Key thing to watch**: The single most important live metric or event to monitor
 
 ---
 
@@ -2863,7 +2642,7 @@ Present results as a structured report. If multiple tickers were given, use a se
 |--------|--------|------------|----------------|---------|---------------|
 | ...    | ...    | ...        | ...            | ...     | ...           |
 
-Be data-driven and concise. Cite sources where possible. Flag any data that could not be verified."""
+Be data-driven and concise. Cite the live package as the source. Flag any data that could not be verified from the live package.'''
 
     try:
         started = datetime.now(timezone.utc)
@@ -2893,65 +2672,34 @@ def stock_research(req: RecommendRequest, request: Request):
 
 # ── Predictions endpoints ─────────────────────────────────────────────────────
 
-ACTUAL_WINDOW_DAYS = 5  # Measure actual return over 5 trading days forward
-
 def update_actuals(predictions: list[dict]) -> tuple[list[dict], bool]:
-    """
-    Fill actual_pct for predictions whose measurement window has closed.
-    For predictions with prediction_window_days=5 (new format): use price_at_prediction
-    as anchor and find the close 5 trading days later.
-    For legacy predictions (no prediction_window_days): use same-day return for backward compat.
-    """
     today = str(date.today())
     updated = False
     for pred in predictions:
         if pred.get("actual_pct") is not None:
             continue
-        pred_date = pred.get("date", "")
-        if pred_date > today:
+        if pred["date"] > today:
             continue
-
-        window = pred.get("prediction_window_days", 1)  # legacy = 1-day
         try:
-            # Fetch enough history to cover the window
-            hist = yf.Ticker(pred["ticker"]).history(period="20d")
-            if hist is None or hist.empty:
-                continue
+            hist = yf.Ticker(pred["ticker"]).history(period="10d")
             dates = [str(d.date()) for d in hist.index]
-
-            if window == 1:
-                # Legacy: prev-close → same-day close
-                anchor = pred_date
-                if anchor not in dates:
-                    prior = [d for d in dates if d <= anchor]
-                    if not prior:
-                        continue
-                    anchor = prior[-1]
-                idx = dates.index(anchor)
-                if idx > 0:
-                    p0 = float(hist["Close"].iloc[idx - 1])
-                    p1 = float(hist["Close"].iloc[idx])
-                    if p0 and math.isfinite(p0) and math.isfinite(p1):
-                        pred["actual_pct"] = round(((p1 - p0) / p0) * 100, 2)
-                        updated = True
-            else:
-                # New format: anchor on prediction date close, measure N trading days forward
-                # Find the anchor date (prediction date or nearest prior trading day)
-                anchor = pred_date
-                if anchor not in dates:
-                    prior = [d for d in dates if d <= anchor]
-                    if not prior:
-                        continue
-                    anchor = prior[-1]
-                anchor_idx = dates.index(anchor)
-                forward_idx = anchor_idx + window
-                if forward_idx >= len(dates):
-                    continue  # Window not closed yet — wait
-                p0 = pred.get("price_at_prediction") or float(hist["Close"].iloc[anchor_idx])
-                p1 = float(hist["Close"].iloc[forward_idx])
-                if p0 and math.isfinite(float(p0)) and math.isfinite(p1):
-                    pred["actual_pct"] = round(((p1 - float(p0)) / float(p0)) * 100, 2)
-                    updated = True
+            # Find nearest trading day on or before the prediction date
+            # (handles weekends/holidays when markets were closed)
+            anchor = pred["date"]
+            if anchor not in dates:
+                prior = [d for d in dates if d <= anchor]
+                if not prior:
+                    continue
+                anchor = prior[-1]
+            idx = dates.index(anchor)
+            # Use prev-close → this-day-close (day's actual move)
+            # Works for today (no next-day data needed) and past dates
+            if idx > 0:
+                p0 = float(hist["Close"].iloc[idx - 1])
+                p1 = float(hist["Close"].iloc[idx])
+                if p0 and math.isfinite(p0) and math.isfinite(p1):
+                    pred["actual_pct"] = round(((p1 - p0) / p0) * 100, 2)
+                updated = True
         except Exception:
             continue
     return predictions, updated
@@ -2993,25 +2741,13 @@ async def fetch_macro_data() -> dict:
 def compute_calibration(predictions: list[dict]) -> dict:
     """
     Per-stock calibration from completed predictions.
-    Returns mean_bias (actual - predicted), directional accuracy, inversion flag,
-    and suppressed flag (>=10 samples with <40% accuracy — signal is noise).
+    Returns mean_bias (actual - predicted), directional accuracy, and inversion flag.
     Requires >= 3 samples to include a stock; inversion requires >= 5.
     """
-    # Prefer new 5-day window predictions for calibration; fall back to legacy (1-day)
-    # during the transition period until enough 5-day data accumulates (min 50 entries)
-    new_format = [
+    completed = [
         p for p in predictions
-        if p.get("actual_pct") is not None
-        and p.get("predicted_pct") is not None
-        and p.get("prediction_window_days", 1) == ACTUAL_WINDOW_DAYS
+        if p.get("actual_pct") is not None and p.get("predicted_pct") is not None
     ]
-    legacy = [
-        p for p in predictions
-        if p.get("actual_pct") is not None
-        and p.get("predicted_pct") is not None
-        and p.get("prediction_window_days", 1) == 1
-    ]
-    completed = new_format if len(new_format) >= 50 else legacy
     by_stock: dict[str, list] = {}
     for p in completed:
         by_stock.setdefault(p["ticker"], []).append(p)
@@ -3024,15 +2760,11 @@ def compute_calibration(predictions: list[dict]) -> dict:
         mean_bias = round(sum(biases) / len(biases), 3)
         correct = sum(1 for p in preds if (p["predicted_pct"] > 0) == (p["actual_pct"] > 0))
         acc = correct / len(preds)
-        # Suppress tickers where we have enough data (>=10) and accuracy is still below 40%
-        # — the model has no reliable signal here; predicting is worse than not predicting
-        suppressed = len(preds) >= 10 and acc < 0.40
         cal[ticker] = {
             "count":        len(preds),
             "mean_bias":    mean_bias,       # positive = we under-predict; negative = over-predict
             "accuracy_pct": round(acc * 100, 1),
             "inverted":     acc < 0.45 and len(preds) >= 5,
-            "suppressed":   suppressed,
         }
     return cal
 
@@ -3109,8 +2841,38 @@ def calculate_sentiment_scores(stocks_data: list[dict], macro: dict) -> list[dic
     return stocks_data
 
 
+async def _attach_current_prices_to_predictions(predictions: list[dict]) -> list[dict]:
+    if not predictions:
+        return []
+
+    enriched = [dict(prediction) for prediction in predictions]
+    tickers = sorted({prediction.get("ticker") for prediction in enriched if prediction.get("ticker")})
+    if not tickers:
+        return enriched
+
+    infos = await asyncio.gather(
+        *[get_info_with_timeout(ticker, SEARCH_INFO_TIMEOUT_SEC) for ticker in tickers],
+        return_exceptions=True,
+    )
+
+    price_map: dict[str, float] = {}
+    for ticker, info in zip(tickers, infos):
+        if isinstance(info, Exception):
+            continue
+        price = _price_from_info_for_alerts(info)
+        if price:
+            price_map[ticker] = float(price)
+
+    for prediction in enriched:
+        ticker = prediction.get("ticker")
+        live_price = price_map.get(ticker)
+        prediction["current_price"] = live_price if live_price else prediction.get("price_at_prediction")
+
+    return enriched
+
+
 @app.get("/api/predictions")
-def get_predictions():
+async def get_predictions():
     today = str(date.today())
     mtime_ns = PREDICTIONS_FILE.stat().st_mtime_ns if PREDICTIONS_FILE.exists() else None
     if (
@@ -3118,7 +2880,7 @@ def get_predictions():
         and _predictions_cache["date"] == today
         and _predictions_cache["mtime_ns"] == mtime_ns
     ):
-        return _predictions_cache["data"]
+        return await _attach_current_prices_to_predictions(_predictions_cache["data"])
 
     predictions = load_predictions()
     cleaned_predictions = sanitize_jsonable(predictions)
@@ -3209,7 +2971,7 @@ def get_predictions():
     _predictions_cache["date"] = today
     _predictions_cache["mtime_ns"] = PREDICTIONS_FILE.stat().st_mtime_ns if PREDICTIONS_FILE.exists() else None
     _predictions_cache["data"] = response
-    return response
+    return await _attach_current_prices_to_predictions(response)
 
 
 async def _generate_predictions_impl():
@@ -3258,35 +3020,11 @@ async def _generate_predictions_impl():
 
     already_predicted = {p["ticker"] for p in predictions if p["date"] == today}
     watchlist_tickers = load_watchlist()
-    calibration_early = compute_calibration(predictions)
-    suppressed_tickers = {t for t, c in calibration_early.items() if c.get("suppressed")}
-    if suppressed_tickers:
-        logger.info("SUPPRESSED tickers (>=10 predictions, <40%% accuracy): %s", sorted(suppressed_tickers))
 
-    # Watchlist stocks always get a prediction; held portfolio positions always get one too
-    # so recommendations and P&L have signal. UNIVERSE fills remaining slots.
-    # Suppressed tickers are excluded from universe fill — no reliable signal.
+    # Watchlist stocks always get a prediction; UNIVERSE fills remaining slots
     watchlist_missing = [t for t in watchlist_tickers if t not in already_predicted]
-
-    paper_positions = compute_positions(load_paper_portfolio())
-    real_positions  = compute_positions(load_portfolio())
-    held_tickers = list(dict.fromkeys(
-        [t for t, p in paper_positions.items() if p["shares"] > 0] +
-        [t for t, p in real_positions.items()  if p["shares"] > 0]
-    ))
-    held_missing = [
-        t for t in held_tickers
-        if t not in already_predicted and t not in watchlist_tickers
-    ]
-
-    covered = set(watchlist_tickers) | set(held_tickers)
-    universe_fill = [
-        t for t in UNIVERSE[:PREDICTIONS_UNIVERSE_FILL_LIMIT]
-        if t not in already_predicted and t not in covered and t not in suppressed_tickers
-    ]
-    to_analyze = list(dict.fromkeys(watchlist_missing + held_missing + universe_fill))[
-        :max(len(watchlist_missing) + len(held_missing) + PREDICTIONS_UNIVERSE_FILL_LIMIT, 1)
-    ]
+    universe_fill = [t for t in UNIVERSE[:PREDICTIONS_UNIVERSE_FILL_LIMIT] if t not in already_predicted and t not in watchlist_tickers]
+    to_analyze = list(dict.fromkeys(watchlist_missing + universe_fill))[:max(len(watchlist_missing) + PREDICTIONS_UNIVERSE_FILL_LIMIT, 1)]
 
     if not to_analyze:
         if updated:
@@ -3334,22 +3072,6 @@ async def _generate_predictions_impl():
                 drawdown = compute_max_drawdown(hist)
                 dcf      = compute_dcf_valuation(info)
 
-                # Earnings date — flag if within 7 days
-                earnings_date_str = None
-                days_to_earnings = None
-                try:
-                    raw_ed = info.get("earningsDate") or info.get("earningsTimestamp")
-                    if raw_ed:
-                        if isinstance(raw_ed, (int, float)):
-                            from datetime import datetime as _dt
-                            ed = _dt.utcfromtimestamp(raw_ed).date()
-                        else:
-                            ed = date.fromisoformat(str(raw_ed)[:10])
-                        days_to_earnings = (ed - date.today()).days
-                        earnings_date_str = str(ed)
-                except Exception:
-                    pass
-
                 payload = {
                     "ticker": ticker,
                     "name": info.get("shortName", TICKER_NAMES.get(ticker, ticker)),
@@ -3379,9 +3101,6 @@ async def _generate_predictions_impl():
                     "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
                     "recent_5d_change_pct": round(recent_chg, 2),
                     "recent_news": [n.get("title", "") for n in news if isinstance(n, dict) and n.get("title")],
-                    # Earnings calendar
-                    "earnings_date":     earnings_date_str,
-                    "days_to_earnings":  days_to_earnings,
                     # Quant factor scores
                     "factor_scores": factors,
                     "annualised_vol_pct": vol,
@@ -3415,12 +3134,6 @@ async def _generate_predictions_impl():
     accuracy_summary = "\n=== HISTORICAL CALIBRATION — apply these corrections to your predictions ===\n"
     if calibration:
         for ticker, c in calibration.items():
-            if c.get("suppressed"):
-                accuracy_summary += (
-                    f"  {ticker}: {c['count']} predictions, {c['accuracy_pct']}% directional accuracy — "
-                    f"*** SUPPRESSED: model has no reliable signal here. If you must predict, use confidence=low and note the suppression. ***\n"
-                )
-                continue
             if abs(c["mean_bias"]) >= 0.1:
                 bias_note = (f"you under-predict by {c['mean_bias']:+.2f}% on avg — add this to your prediction"
                              if c["mean_bias"] > 0
@@ -3473,65 +3186,12 @@ async def _generate_predictions_impl():
     else:
         watchlist_research_context = "No watchlist research available."
 
-    # ── Regime detection ──────────────────────────────────────────────────────
-    vix_now = macro.get("VIX (Fear Index)", {}).get("price", 20)
-    if vix_now >= 30:
-        regime_block = (
-            f"=== ⚠️  MARKET REGIME: EXTREME FEAR (VIX {vix_now:.1f}) ===\n"
-            "VIX is above 30 — this is a high-volatility, risk-off regime. "
-            "In regimes like this, stock-picking signal collapses and correlations spike toward 1. "
-            "RULES FOR THIS REGIME:\n"
-            "- Default all predictions to NEUTRAL unless there is an extremely strong, specific catalyst.\n"
-            "- Set confidence=low for ALL predictions.\n"
-            "- Do NOT generate bullish predictions based solely on fundamentals — they are not predictive at this time horizon during a fear spike.\n"
-            "- Only flag bearish if a stock has clear downside catalysts beyond the macro.\n"
-        )
-    elif vix_now >= 25:
-        regime_block = (
-            f"=== ⚠️  MARKET REGIME: ELEVATED FEAR (VIX {vix_now:.1f}) ===\n"
-            "VIX is elevated — market is in a risk-off phase. "
-            "Stock-specific signals are weakened by macro uncertainty. "
-            "RULES FOR THIS REGIME:\n"
-            "- Cap confidence at 'medium' for all bullish predictions.\n"
-            "- Lean toward NEUTRAL for stocks without strong near-term catalysts.\n"
-            "- Bearish predictions for high-beta or speculative stocks are valid.\n"
-        )
-    else:
-        regime_block = f"=== MARKET REGIME: NORMAL (VIX {vix_now:.1f}) ==="
-
-    # ── Earnings calendar ─────────────────────────────────────────────────────
-    earnings_flags = []
-    for s in stocks_data:
-        dte = s.get("days_to_earnings")
-        ed  = s.get("earnings_date", "")
-        if dte is not None and 0 <= dte <= 7:
-            earnings_flags.append(
-                f"  {s['ticker']}: earnings in {dte} day{'s' if dte != 1 else ''} ({ed}) — "
-                "BINARY EVENT, predictions near earnings are highly uncertain. "
-                "Use confidence=low and note the upcoming earnings in reasoning."
-            )
-        elif dte is not None and -2 <= dte < 0:
-            earnings_flags.append(
-                f"  {s['ticker']}: earnings just reported {abs(dte)} day{'s' if abs(dte) != 1 else ''} ago ({ed}) — "
-                "post-earnings volatility may persist. Factor in reaction."
-            )
-    earnings_block = (
-        "=== EARNINGS CALENDAR ===\n" + "\n".join(earnings_flags)
-        if earnings_flags
-        else "=== EARNINGS CALENDAR ===\n  No earnings events within 7 days for stocks in this batch."
-    )
-
-    prompt = f"""You are a quantitative stock analyst. Your goal: predict each stock's return over the next 5 trading days.
+    prompt = f"""You are a quantitative stock analyst with one goal: identify stocks with potential for >10% monthly returns (~0.5%+ per day).
 
 Today: {today}
-Prediction window: 5 trading days forward (not 1 day, not 12 months — specifically 5 trading days).
-
-{regime_block}
 
 === MACROECONOMIC CONDITIONS ===
 {json.dumps(macro, indent=2)}
-
-{earnings_block}
 
 === MARKET & FINANCIAL NEWS ===
 {chr(10).join(headlines[:20]) if headlines else "No headlines fetched."}
@@ -3549,17 +3209,9 @@ Each stock includes a pre-calculated `sentiment_score` (%) built from:
 
 {json.dumps(stocks_data, indent=2)}
 {accuracy_summary}
-=== SCORING RULES (5-DAY FORWARD RETURN) ===
-You are predicting the 5-day forward return. At this horizon:
-- MOMENTUM signals (RSI, 52-week position, vs SMA50, recent price trend) are the PRIMARY driver — they have genuine 1-2 week predictive power.
-- FUNDAMENTALS (P/E, FCF, ROE) are SECONDARY context only — they don't move prices in 5 days unless tied to a near-term catalyst like earnings.
-- SENTIMENT and NEWS are HIGH WEIGHT — a fresh catalyst in the headlines can move a stock in days.
-
+=== SCORING RULES ===
 1. START with `sentiment_score` as your baseline signal strength for each stock.
-2. Each stock now includes pre-computed `factor_scores` (0-100 each). WEIGHT THEM AS FOLLOWS for the 5-day horizon:
-   - MOMENTUM score: HIGH weight — most predictive at this time horizon
-   - QUALITY + GROWTH scores: MEDIUM weight — confirm the thesis but don't drive it
-   - VALUE score: LOW weight — cheap stocks don't re-rate in 5 days without a catalyst
+2. Each stock now includes pre-computed `factor_scores` (0-100 each). Use these to ANCHOR and VALIDATE your analysis:
 
    VALUE     — How cheap vs fundamentals (P/E, P/B, FCF yield, EV/EBITDA, PEG)
    MOMENTUM  — Price trend strength (RSI, 52-week position, vs 50-SMA, 5d return, short interest)
@@ -3598,11 +3250,10 @@ IMPORTANT: You MUST return a prediction for EVERY stock in the watchlist: {must_
 For any remaining stocks {also_consider}, only include the 2-3 with the strongest outlook.
 
 CONFIDENCE RULES — must directly reflect the reasoning, no contradictions:
-- "high": strong MOMENTUM signal + positive sentiment + no earnings within 7 days + normal VIX regime
-- "medium": mixed signals, or weak momentum, or elevated VIX, or earnings within 14 days
-- "low": negative sentiment_score, OR bearish momentum (RSI <40, below SMA50), OR earnings within 7 days, OR suppressed ticker, OR high-fear VIX regime
+- "high": sentiment_score positive AND strong fundamentals support it
+- "medium": mixed signals or at least one notable risk factor
+- "low": negative sentiment_score OR meaningful bearish fundamentals present
 If your reasoning mentions a sell-off, downtrend, overvaluation, or risk — confidence MUST be "low" or "medium", never "high".
-If there is an upcoming earnings event within 7 days — confidence MUST be "low" regardless of other signals.
 
 Return ONLY a valid JSON array, no explanation, no markdown:
 [
@@ -3726,27 +3377,15 @@ Rules:
         if raw_pct is None:
             raw_pct = legacy_predicted_pct(cp_direction, cp_score)
         cal     = calibration.get(ticker, {})
-        stock_data = stock_map.get(ticker, {})
-
-        base_direction, base_pct = refine_prediction_signal(
-            raw_pct,
-            cp_direction,
-            cp_score,
-            cp.get("confidence", "medium"),
-            stock_data,
-        )
 
         # 1. Bias correction — shift prediction by historical mean error
         bias         = cal.get("mean_bias", 0.0)
         bias_applied = abs(bias) >= 0.1   # only correct if systematic (>=0.1%)
-        corrected    = round(base_pct + bias, 2) if bias_applied else base_pct
+        corrected    = round(raw_pct + bias, 2) if bias_applied else raw_pct
 
         # 2. Signal inversion — flip direction if model has been consistently wrong
         inverted  = cal.get("inverted", False)
         final_pct = round(-corrected, 2) if inverted else corrected
-
-        # 3. Suppression flag — not enough signal quality for this ticker
-        is_suppressed = cal.get("suppressed", False)
 
         # Append calibration notes to reasoning
         cal_note = ""
@@ -3754,27 +3393,23 @@ Rules:
             cal_note += f" [Bias corrected {bias:+.2f}%: raw={raw_pct:+.2f}%]"
         if inverted:
             cal_note += f" [Direction INVERTED — historical accuracy {cal['accuracy_pct']}%, signal flipped]"
-        if is_suppressed:
-            cal_note += f" [SUPPRESSED — {cal['accuracy_pct']}% accuracy over {cal['count']} predictions: treat with very low confidence]"
 
+        stock_data = stock_map.get(ticker, {})
         entry = {
             "date":               today,
             "ticker":             ticker,
             "name":               name_map.get(ticker, ""),
             "predicted_pct":      final_pct,
             "raw_predicted_pct":  raw_pct,
-            "model_predicted_pct": base_pct,
-            "direction":          prediction_direction(final_pct),
+            "direction":          cp_direction or prediction_direction(final_pct),
             "score":              cp_score if cp_score is not None else prediction_score(final_pct, cp.get("confidence", "medium")),
             "bias_correction":    round(bias, 3) if bias_applied else 0.0,
             "inverted":           inverted,
-            "suppressed":         is_suppressed,
-            "confidence":         "low" if is_suppressed else cp.get("confidence", "medium"),
+            "confidence":         cp.get("confidence", "medium"),
             "reasoning":          cp.get("reasoning", "") + cal_note,
-            "actual_pct":              None,
-            "prediction_window_days":  ACTUAL_WINDOW_DAYS,
-            "price_at_prediction":     price_map.get(ticker),
-            "generated_at":            datetime.utcnow().isoformat(),
+            "actual_pct":         None,
+            "price_at_prediction": price_map.get(ticker),
+            "generated_at":       datetime.utcnow().isoformat(),
             # Quant data
             "factor_scores":      stock_data.get("factor_scores"),
             "dcf":                stock_data.get("dcf"),
@@ -4390,18 +4025,6 @@ def get_alerts():
     return load_alerts()
 
 
-@app.post("/api/alerts/log")
-async def log_alert_entry(request: Request):
-    """Internal endpoint for external processes (e.g. sentiment agent) to log an alert entry."""
-    entry = await request.json()
-    if not isinstance(entry, dict) or not entry.get("message"):
-        raise HTTPException(status_code=400, detail="Invalid alert entry")
-    entry.setdefault("id", str(uuid.uuid4()))
-    entry.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-    append_alert(entry)
-    return {"ok": True}
-
-
 @app.get("/api/alerts/status")
 def get_monitor_status():
     watchlist = load_watchlist()
@@ -4427,44 +4050,14 @@ def get_monitor_status():
     }
 
 
-@app.get("/api/alerts/debug-snapshot")
-async def get_alert_debug_snapshot(current_user: str = Depends(get_current_user)):
-    _s = load_settings()
-    buy_limit = max(1, int(_s.get("alert_top_buys") or os.getenv("ALERT_TOP_BUYS", "3")))
-    sell_limit = max(1, int(_s.get("alert_top_sells") or os.getenv("ALERT_TOP_SELLS", "3")))
-    snapshot = await _build_recommendation_alert_snapshot(buy_limit=buy_limit, sell_limit=sell_limit)
-    return {
-        "user": current_user,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "buy_count": len(snapshot.get("buys", [])),
-        "sell_count": len(snapshot.get("sells", [])),
-        "buys": snapshot.get("buys", []),
-        "sells": snapshot.get("sells", []),
-        "whatsapp_for_recommendation_alerts": True,
-        "whatsapp_note": "Recommendation monitor will attempt WhatsApp delivery when Twilio is configured.",
-    }
-
-
 @app.post("/api/alerts/test")
 def test_alert():
     emailed = send_email(
         "StockLens — Test Alert",
         "This is a test alert from your StockLens app.\nNotifications are working correctly."
     )
-    texted = send_sms("[TEST] StockPicker — notifications working! This is a TEST message.")
+    texted = send_sms("StockPicker test alert — notifications working!")
     return {"email_sent": emailed, "sms_sent": texted}
-
-
-@app.post("/api/alerts/test-whatsapp")
-def test_whatsapp_alert():
-    result = send_whatsapp_message("[TEST] StockPicker — WhatsApp notifications working. This is a dedicated WhatsApp test message.")
-    return {
-        "sms_sent": bool(result.get("ok")),
-        "sid": result.get("sid"),
-        "status": result.get("status"),
-        "error": result.get("error"),
-        "to": result.get("to"),
-    }
 
 
 @app.post("/api/alerts/test-preview")
@@ -4538,7 +4131,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
     paper_held       = {t for t, p in paper_positions.items() if p["shares"] > 0}
 
     # Paper cash remaining
-    paper_cash = initial_float
+    paper_cash = PAPER_INITIAL_FLOAT
     for tx in paper_txs:
         qty   = float(tx.get("qty", 0))
         price = float(tx.get("price", 0))
@@ -4703,7 +4296,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
         vol_adj = 30.0 / max(30.0, float(vol_pct))
         alloc_pct = alloc_pct * vol_adj
 
-        position_value = min(remaining_cash * alloc_pct, initial_float * 0.15)
+        position_value = min(remaining_cash * alloc_pct, PAPER_INITIAL_FLOAT * 0.15)
         qty = int(position_value / current_price)
         if qty < 1:
             continue
@@ -4779,7 +4372,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
             key=lambda item: (item[0], item[1].get("predicted_pct") or 0),
             reverse=True,
         )[:5]:
-            qty = int(min(remaining_cash * 0.04, initial_float * 0.08) / current_price)
+            qty = int(min(remaining_cash * 0.04, PAPER_INITIAL_FLOAT * 0.08) / current_price)
             if qty < 1:
                 continue
             estimated_cost = round(qty * current_price, 2)
@@ -5003,7 +4596,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
         "sells":           sells,
         "prediction_date": latest_date,
         "summary": {
-            "initial_float":         initial_float,
+            "initial_float":         PAPER_INITIAL_FLOAT,
             "target":                target,
             "target_months":         target_months,
             "available_cash":        round(float(portfolio_summary.get("available_cash") or paper_cash), 2),
@@ -5011,7 +4604,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
             "total_current_value":   round(float(portfolio_summary.get("total_current_value") or 0.0), 2),
             "cash_after_buys":       round(remaining_cash, 2),
             "total_portfolio_value": round(float(portfolio_summary.get("total_portfolio_value") or paper_total_value), 2),
-            "total_pnl":             round(float(portfolio_summary.get("total_pnl") or (paper_total_value - initial_float)), 2),
+            "total_pnl":             round(float(portfolio_summary.get("total_pnl") or (paper_total_value - PAPER_INITIAL_FLOAT)), 2),
             "progress_pct":          progress_pct,
             "remaining_to_target":   round(target - paper_total_value, 2),
         },
@@ -5167,24 +4760,8 @@ async def get_portfolio():
     transactions = load_portfolio()
     positions = compute_positions(transactions)
 
-    # Fetch current prices for all held tickers concurrently (bust info cache for fresh P&L)
     held = [t for t, p in positions.items() if p["shares"] > 0]
-    for t in held:
-        _info_cache.pop(t, None)
-    if held:
-        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
-        price_map = {}
-        for ticker, info in zip(held, infos):
-            if not isinstance(info, Exception):
-                price_map[ticker] = _price_from_info_for_alerts(info)
-    else:
-        price_map = {}
-
-    for ticker in held:
-        if not price_map.get(ticker):
-            fallback_price = positions.get(ticker, {}).get("avg_cost", 0) or 0
-            if fallback_price:
-                price_map[ticker] = fallback_price
+    price_map = await _get_portfolio_price_map(held, positions) if held else {}
 
     result = []
     total_invested = 0.0
@@ -5550,16 +5127,14 @@ PDF TEXT:
 
 @app.get("/api/paper-portfolio")
 async def get_paper_portfolio():
-    initial_float = get_paper_initial_float()
     transactions = load_paper_portfolio()
+    annotated_transactions = annotate_transactions_with_realised_pnl(transactions)
     positions    = compute_positions(transactions)
     held         = [t for t, p in positions.items() if p["shares"] > 0]
 
-    for t in held:
-        _info_cache.pop(t, None)
     if held:
-        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
-        price_map = {t: _price_from_info_for_alerts(i)
+        infos = await asyncio.gather(*[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
+        price_map = {t: (i.get("currentPrice") or i.get("regularMarketPrice") or 0)
                      for t, i in zip(held, infos) if not isinstance(i, Exception)}
     else:
         price_map = {}
@@ -5571,7 +5146,7 @@ async def get_paper_portfolio():
                 price_map[ticker] = fallback_price
 
     # Cash tracking: start at £100k, subtract buys, add sells
-    cash = initial_float
+    cash = PAPER_INITIAL_FLOAT
     for tx in transactions:
         qty   = float(tx.get("qty", 0))
         price = float(tx.get("price", 0))
@@ -5583,8 +5158,8 @@ async def get_paper_portfolio():
     total_current   = sum(positions[t]["shares"] * price_map.get(t, 0) for t in held)
     total_invested  = sum(positions[t]["shares"] * positions[t]["avg_cost"] for t in held)
     total_value     = cash + total_current
-    total_pnl       = total_value - initial_float
-    total_pnl_pct   = round(total_pnl / initial_float * 100, 2) if initial_float else 0.0
+    total_pnl       = total_value - PAPER_INITIAL_FLOAT
+    total_pnl_pct   = round(total_pnl / PAPER_INITIAL_FLOAT * 100, 2)
     realised_pnl    = sum(positions[t]["realised_pnl"] for t in positions)
 
     result = []
@@ -5610,11 +5185,13 @@ async def get_paper_portfolio():
 
     return {
         "positions": sorted(result, key=lambda x: x["ticker"]),
-        "transactions": list(reversed(transactions[-50:])),
+        "transactions": list(reversed(annotated_transactions[-50:])),
         "summary": {
-            "initial_float":   initial_float,
+            "initial_float":   PAPER_INITIAL_FLOAT,
             "cash":            round(cash, 2),
             "total_invested":  round(total_invested, 2),
+            "total_current_value": round(total_current, 2),
+            "total_unrealised_pnl": round(total_current - total_invested, 2),
             "total_value":     round(total_value, 2),
             "total_pnl":       round(total_pnl, 2),
             "total_pnl_pct":   total_pnl_pct,
@@ -5623,115 +5200,10 @@ async def get_paper_portfolio():
     }
 
 
-@app.get("/api/portfolio/prices")
-async def get_portfolio_prices():
-    """Lightweight live-price endpoint for near-realtime polling."""
-    transactions = load_portfolio()
-    positions = compute_positions(transactions)
-    held = [t for t, p in positions.items() if p["shares"] > 0]
-    for t in held:
-        _info_cache.pop(t, None)
-    if held:
-        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
-        price_map = {t: _price_from_info_for_alerts(i) for t, i in zip(held, infos) if not isinstance(i, Exception)}
-    else:
-        return {"prices": {}, "totals": {}}
-    for t in held:
-        if not price_map.get(t):
-            price_map[t] = positions[t].get("avg_cost", 0) or 0
-    prices = {}
-    total_current_value = 0.0
-    total_cost_basis = 0.0
-    total_unrealised_pnl = 0.0
-    total_realised_pnl = sum(p["realised_pnl"] for p in positions.values())
-    for ticker, pos in positions.items():
-        if pos["shares"] <= 0:
-            continue
-        current_price = price_map.get(ticker) or pos["avg_cost"]
-        cost_basis = pos["shares"] * pos["avg_cost"]
-        current_value = pos["shares"] * current_price
-        unrealised_pnl = current_value - cost_basis
-        total_current_value += current_value
-        total_cost_basis += cost_basis
-        total_unrealised_pnl += unrealised_pnl
-        prices[ticker] = {
-            "current_price":  round(current_price, 2),
-            "current_value":  round(current_value, 2),
-            "unrealised_pnl": round(unrealised_pnl, 2),
-            "unrealised_pct": round((unrealised_pnl / cost_basis * 100) if cost_basis else 0, 2),
-        }
-    return {
-        "prices": prices,
-        "totals": {
-            "total_current_value":  round(total_current_value, 2),
-            "total_unrealised_pnl": round(total_unrealised_pnl, 2),
-            "total_pnl":            round(total_unrealised_pnl + total_realised_pnl, 2),
-        },
-    }
-
-
-@app.get("/api/paper-portfolio/prices")
-async def get_paper_portfolio_prices():
-    """Lightweight live-price endpoint for near-realtime polling."""
-    initial_float = get_paper_initial_float()
-    transactions = load_paper_portfolio()
-    positions = compute_positions(transactions)
-    held = [t for t, p in positions.items() if p["shares"] > 0]
-    for t in held:
-        _info_cache.pop(t, None)
-    if held:
-        infos = await asyncio.gather(*[get_info_with_timeout(t, RECOMMENDATION_INFO_TIMEOUT_SEC) for t in held], return_exceptions=True)
-        price_map = {t: _price_from_info_for_alerts(i) for t, i in zip(held, infos) if not isinstance(i, Exception)}
-    else:
-        return {"prices": {}, "totals": {}}
-    for t in held:
-        if not price_map.get(t):
-            price_map[t] = positions[t].get("avg_cost", 0) or 0
-    cash = initial_float
-    for tx in transactions:
-        qty = float(tx.get("qty", 0))
-        price = float(tx.get("price", 0))
-        if tx["type"] == "buy":
-            cash -= qty * price
-        elif tx["type"] == "sell":
-            cash += qty * price
-    prices = {}
-    total_current = 0.0
-    total_invested = 0.0
-    for ticker, pos in positions.items():
-        if pos["shares"] <= 0:
-            continue
-        current_price = price_map.get(ticker) or pos["avg_cost"]
-        cost_basis = pos["shares"] * pos["avg_cost"]
-        current_value = pos["shares"] * current_price
-        unrealised_pnl = current_value - cost_basis
-        total_current += current_value
-        total_invested += cost_basis
-        prices[ticker] = {
-            "current_price":  round(current_price, 2),
-            "current_value":  round(current_value, 2),
-            "unrealised_pnl": round(unrealised_pnl, 2),
-            "unrealised_pct": round((unrealised_pnl / cost_basis * 100) if cost_basis else 0, 2),
-        }
-    total_value = cash + total_current
-    total_pnl = total_value - initial_float
-    unrealised = total_current - total_invested
-    return {
-        "prices": prices,
-        "totals": {
-            "total_value":   round(total_value, 2),
-            "total_pnl":     round(total_pnl, 2),
-            "total_pnl_pct": round(total_pnl / initial_float * 100, 2) if initial_float else 0.0,
-            "unrealised":    round(unrealised, 2),
-        },
-    }
-
-
 @app.post("/api/paper-portfolio/buy")
 async def paper_buy(req: TradeRequest):
-    initial_float = get_paper_initial_float()
     transactions = load_paper_portfolio()
-    cash = initial_float
+    cash = PAPER_INITIAL_FLOAT
     for tx in transactions:
         qty   = float(tx.get("qty", 0))
         price = float(tx.get("price", 0))
@@ -5801,3 +5273,60 @@ def clear_alerts(current_user: str = Depends(get_current_user)):
     save_alerts([])
     logger.info("ALERTS_CLEARED user=%s", current_user)
     return {"message": "Alert history cleared."}
+
+
+# ── Sentiment Agent endpoints ─────────────────────────────────────────────────
+
+SENTIMENT_AGENT_STATE_FILE = Path(__file__).parent / "sentiment_agent_state.json"
+
+@app.get("/api/sentiment-agent/status")
+def sentiment_agent_status():
+    """Return the last scan result from the sentiment agent state file."""
+    if not SENTIMENT_AGENT_STATE_FILE.exists():
+        return {"last_run": None, "last_alerts": {}, "seen_headlines_count": 0}
+    try:
+        state = json.loads(SENTIMENT_AGENT_STATE_FILE.read_text(encoding="utf-8"))
+        return {
+            "last_run": state.get("last_run"),
+            "last_alerts": state.get("last_alerts", {}),
+            "seen_headlines_count": len(state.get("seen_headlines", {})),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/sentiment-agent/scan")
+async def trigger_sentiment_scan(
+    dry_run: bool = False,
+    current_user: str = Depends(get_current_user)
+):
+    """Trigger an on-demand sentiment scan (runs in background thread)."""
+    import subprocess
+    script = Path(__file__).parent / "sentiment_agent.py"
+    if not script.exists():
+        raise HTTPException(status_code=500, detail="sentiment_agent.py not found")
+
+    cmd = [sys.executable, str(script)]
+    if dry_run:
+        cmd.append("--dry-run")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        try:
+            output = json.loads(result.stdout.strip())
+        except Exception:
+            output = {"raw": result.stdout[:2000]}
+        logger.info("SENTIMENT_SCAN user=%s dry_run=%s result=%s", current_user, dry_run, output)
+        return {"ok": True, "result": output, "stderr": result.stderr[:500] if result.stderr else ""}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Scan timed out after 5 minutes")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sentiment-agent/reset-state")
+def reset_sentiment_state(current_user: str = Depends(get_current_user)):
+    """Clear the agent's seen-headline cache and alert cooldowns."""
+    SENTIMENT_AGENT_STATE_FILE.unlink(missing_ok=True)
+    logger.info("SENTIMENT_STATE_RESET user=%s", current_user)
+    return {"ok": True, "message": "Sentiment agent state reset."}
