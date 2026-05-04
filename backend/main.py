@@ -29,7 +29,7 @@ import httpx
 import yfinance as yf
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -5330,3 +5330,193 @@ def reset_sentiment_state(current_user: str = Depends(get_current_user)):
     SENTIMENT_AGENT_STATE_FILE.unlink(missing_ok=True)
     logger.info("SENTIMENT_STATE_RESET user=%s", current_user)
     return {"ok": True, "message": "Sentiment agent state reset."}
+
+
+# ── Multi-Agent v1 API ────────────────────────────────────────────────────────
+# These endpoints expose the new structured agent pipeline alongside the
+# existing /api/* endpoints (fully backward-compatible).
+
+def _get_orchestrator():
+    """Lazy import to avoid circular imports at module load time."""
+    import sys, os
+    backend_dir = os.path.dirname(__file__)
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    from agents.orchestrator import OrchestratorAgent
+    return OrchestratorAgent()
+
+
+# Run state store (in-memory for MVP; replace with DB table if needed)
+_v1_runs: dict = {}
+
+
+class V1RunRequest(BaseModel):
+    tickers: list[str] | None = None
+    run_fresh: bool = False
+
+
+@app.post("/v1/runs")
+async def v1_create_run(
+    background_tasks: BackgroundTasks,
+    req: V1RunRequest | None = Body(default=None),
+    current_user: str = Depends(get_current_user),
+):
+    """Trigger thesis generation for one or more tickers."""
+    import db as _db
+
+    tickers = req.tickers if req else None
+    run_fresh = req.run_fresh if req else False
+    if not tickers:
+        tickers = load_watchlist()
+    tickers = [_validate_ticker(t) for t in tickers]
+    if not tickers:
+        raise HTTPException(status_code=400, detail="No tickers specified and watchlist is empty")
+
+    run_id = str(uuid.uuid4())
+    _v1_runs[run_id] = {
+        "run_id": run_id,
+        "status": "queued",
+        "tickers": tickers,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed": [],
+        "failed": [],
+    }
+    _db.create_thesis_run(run_id, tickers, run_fresh, current_user)
+
+    async def _run_all():
+        orch = _get_orchestrator()
+        for ticker in tickers:
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda t=ticker: orch.run_thesis(t, run_fresh=run_fresh))
+                _v1_runs[run_id]["completed"].append(ticker)
+                _db.update_thesis_run(
+                    run_id,
+                    status="running",
+                    completed=_v1_runs[run_id]["completed"],
+                    failed=_v1_runs[run_id]["failed"],
+                )
+            except Exception as exc:
+                logger.error("[v1/runs] %s failed: %s", ticker, exc)
+                _v1_runs[run_id]["failed"].append(ticker)
+                _db.update_thesis_run(
+                    run_id,
+                    status="running",
+                    completed=_v1_runs[run_id]["completed"],
+                    failed=_v1_runs[run_id]["failed"],
+                )
+        final_status = "completed"
+        if _v1_runs[run_id]["failed"] and _v1_runs[run_id]["completed"]:
+            final_status = "partial"
+        elif _v1_runs[run_id]["failed"] and not _v1_runs[run_id]["completed"]:
+            final_status = "failed"
+        _v1_runs[run_id]["status"] = final_status
+        _v1_runs[run_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _db.update_thesis_run(
+            run_id,
+            status=final_status,
+            completed=_v1_runs[run_id]["completed"],
+            failed=_v1_runs[run_id]["failed"],
+        )
+
+    _v1_runs[run_id]["status"] = "running"
+    _db.update_thesis_run(run_id, status="running")
+    background_tasks.add_task(_run_all)
+    return {"run_id": run_id, "status": "running", "tickers": tickers}
+
+
+@app.get("/v1/runs/{run_id}")
+def v1_get_run(run_id: str, current_user: str = Depends(get_current_user)):
+    """Poll the status of a thesis generation run."""
+    import db as _db
+
+    run = _v1_runs.get(run_id)
+    if not run:
+        run = _db.get_thesis_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.get("/v1/thesis/{ticker}/latest")
+def v1_latest_thesis(ticker: str, current_user: str = Depends(get_current_user)):
+    """Return the latest InvestmentThesis for a ticker."""
+    import db as _db
+    thesis = _db.get_latest_thesis(ticker.upper())
+    if not thesis:
+        raise HTTPException(status_code=404, detail=f"No thesis found for {ticker}. POST /v1/runs to generate one.")
+    return thesis.model_dump(mode="json")
+
+
+@app.get("/v1/thesis/id/{thesis_id}")
+def v1_thesis_by_id(thesis_id: str, current_user: str = Depends(get_current_user)):
+    """Return a reproducible thesis snapshot by ID."""
+    import db as _db
+    thesis = _db.get_thesis_by_id(thesis_id)
+    if not thesis:
+        raise HTTPException(status_code=404, detail="Thesis not found")
+    return thesis.model_dump(mode="json")
+
+
+@app.get("/v1/agents/health")
+def v1_agents_health(current_user: str = Depends(get_current_user)):
+    """Return agent health, last run times and stale status."""
+    import observability
+    return observability.agent_health_report()
+
+
+@app.get("/v1/thesis/{ticker}/quality")
+def v1_thesis_quality(ticker: str, current_user: str = Depends(get_current_user)):
+    """Return quality flag summary for the latest thesis of a ticker."""
+    import observability
+    return observability.thesis_quality_summary(ticker.upper())
+
+
+@app.get("/v1/backtest/{ticker}")
+def v1_backtest(ticker: str, current_user: str = Depends(get_current_user)):
+    """Return forecast accuracy metrics for a ticker."""
+    import db as _db
+    import evaluation
+
+    symbol = _validate_ticker(ticker)
+    return {
+        "ticker": symbol,
+        "summary": _db.get_backtest_summary(symbol),
+        "calibration": evaluation.confidence_calibration(symbol),
+    }
+
+
+@app.post("/v1/evaluate")
+async def v1_evaluate(
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user),
+):
+    """Trigger evaluation of matured forecast outcomes."""
+    import evaluation
+
+    async def _eval():
+        loop = asyncio.get_event_loop()
+        n = await loop.run_in_executor(None, evaluation.evaluate_pending_outcomes)
+        logger.info("[v1/evaluate] evaluated %d outcomes", n)
+
+    background_tasks.add_task(_eval)
+    return {"ok": True, "message": "Evaluation job started in background"}
+
+
+# Wire DB init into startup
+_original_startup = startup.__wrapped__ if hasattr(startup, "__wrapped__") else None
+
+
+@app.on_event("startup")
+async def _init_multiagent_db():
+    """Initialise the SQLite database for the multi-agent system."""
+    try:
+        import sys, os
+        backend_dir = os.path.dirname(__file__)
+        if backend_dir not in sys.path:
+            sys.path.insert(0, backend_dir)
+        import db as _db
+        _db.init_db()
+        logger.info("[v1] Multi-agent SQLite DB initialised")
+    except Exception as exc:
+        logger.error("[v1] DB init failed: %s", exc)

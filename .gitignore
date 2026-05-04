@@ -7,8 +7,15 @@ backend/users.json
 backend/settings.json
 backend/audit.log
 backend/*.log
+backend/stockpicker.db*
+backend/test-results/
 __pycache__/
 *.pyc
 *.pyo
 .gstack/
 backend/.tmp_*
+node_modules/
+test-results/
+test-results-run/
+.vscode/
+.claude/
