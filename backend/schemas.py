@@ -256,6 +256,7 @@ class InvestmentThesis(BaseModel):
     drivers: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     agent_scores: dict[str, float] = Field(default_factory=dict)
+    agent_meta: dict[str, dict] = Field(default_factory=dict)  # per-agent {direction, confidence, flags}
     weighted_scores: dict[str, float] = Field(default_factory=dict)  # by horizon
     narrative: dict[str, str] = Field(default_factory=dict)  # bull/base/bear
     quality_flags: list[QualityFlag] = Field(default_factory=list)

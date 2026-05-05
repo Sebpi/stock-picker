@@ -5,6 +5,7 @@ All agents inherit from BaseAgent and must implement run().
 from __future__ import annotations
 
 import logging
+import time as _time
 import uuid
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -51,18 +52,28 @@ class BaseAgent(ABC):
         if as_of is None:
             as_of = datetime.now(timezone.utc)
 
+        import observability
         db_run_id = db.start_run(self.agent_id, ticker)
         signal: AgentSignal | None = None
+        t0 = _time.monotonic()
         try:
             signal = self._run(ticker, run_id, as_of)
             db.upsert_signal(signal)
             db.complete_run(db_run_id, signal_id=signal.signal_id)
-            logger.info("[%s] %s score=%.1f flags=%s",
+            duration = _time.monotonic() - t0
+            logger.info("[%s] %s score=%.1f flags=%s dur=%.1fs",
                         self.agent_id, ticker, signal.score,
-                        [f.value for f in signal.quality_flags])
+                        [f.value for f in signal.quality_flags], duration)
+            observability.log_metric("agent_run_duration_secs", duration,
+                                     {"agent": self.agent_id, "ticker": ticker, "status": "ok"})
+            observability.log_metric("agent_score", signal.score,
+                                     {"agent": self.agent_id, "ticker": ticker})
         except Exception as exc:
+            duration = _time.monotonic() - t0
             logger.exception("[%s] %s failed: %s", self.agent_id, ticker, exc)
             db.complete_run(db_run_id, error_code=type(exc).__name__)
+            observability.log_metric("agent_run_duration_secs", duration,
+                                     {"agent": self.agent_id, "ticker": ticker, "status": "error"})
             signal = self._error_signal(ticker, run_id, as_of, str(exc))
         return signal
 

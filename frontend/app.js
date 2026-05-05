@@ -2684,6 +2684,7 @@ async function loadLatestThesis(tickerOverride = "") {
 function renderThesis(thesis, quality = {}, backtest = {}) {
   const forecast = thesis.forecast || {};
   const agentScores = thesis.agent_scores || {};
+  const agentMeta = thesis.agent_meta || {};
   const weighted = thesis.weighted_scores || {};
   const narrative = thesis.narrative || {};
   const generated = thesis.generated_at ? new Date(thesis.generated_at).toLocaleString() : "-";
@@ -2736,7 +2737,7 @@ function renderThesis(thesis, quality = {}, backtest = {}) {
     <div class="thesis-two-col">
       <div class="thesis-section">
         <h3>Agent Scores</h3>
-        ${renderAgentScores(agentScores)}
+        ${renderAgentScores(agentScores, agentMeta)}
       </div>
       <div class="thesis-section">
         <h3>Quality And Backtest</h3>
@@ -2766,17 +2767,27 @@ function renderThesisList(items, emptyText) {
   return `<ul class="thesis-list">${list.map(item => `<li>${safe(item)}</li>`).join("")}</ul>`;
 }
 
-function renderAgentScores(scores) {
+function renderAgentScores(scores, meta = {}) {
   const entries = Object.entries(scores || {}).sort((a, b) => b[1] - a[1]);
   if (!entries.length) return `<p class="thesis-muted">No agent scores recorded.</p>`;
   return `<div class="thesis-agent-score-list">
-    ${entries.map(([agent, score]) => `
-      <div class="thesis-agent-score-row">
-        <span>${safe(agent.replace("agent.", ""))}</span>
+    ${entries.map(([agent, score]) => {
+      const m = meta[agent] || {};
+      const dir = m.direction || "";
+      const conf = m.confidence || "";
+      const usable = m.usable !== false;
+      const flags = Array.isArray(m.flags) && m.flags.length ? m.flags.join(" ") : "";
+      const dirIcon = dir === "positive" ? "▲" : dir === "negative" ? "▼" : "–";
+      const dirCls = dir === "positive" ? "change-pos" : dir === "negative" ? "change-neg" : "";
+      return `
+      <div class="thesis-agent-score-row${usable ? "" : " is-stale"}">
+        <span title="${safe(flags)}">${safe(agent.replace("agent.", ""))}</span>
         <div class="thesis-score-bar"><i style="width:${Math.max(0, Math.min(100, Number(score || 0)))}%"></i></div>
         <strong class="${scoreClass(score)}">${Number(score || 0).toFixed(1)}</strong>
-      </div>
-    `).join("")}
+        <em class="${dirCls}">${dirIcon}</em>
+        <small>${safe(conf)}</small>
+      </div>`;
+    }).join("")}
   </div>`;
 }
 

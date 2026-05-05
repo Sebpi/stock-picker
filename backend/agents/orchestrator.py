@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import statistics
+import time as _time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -136,8 +137,10 @@ class OrchestratorAgent:
     """
 
     def run_thesis(self, ticker: str, run_fresh: bool = False) -> InvestmentThesis:
+        import observability
         run_id = str(uuid.uuid4())
         as_of = datetime.now(timezone.utc)
+        t0 = _time.monotonic()
         log: list[DecisionLogEntry] = []
 
         # ---- Step 1: Collect signals ----
@@ -182,6 +185,15 @@ class OrchestratorAgent:
 
         composite = weighted.get("12m", 50.0)
         agent_scores = {aid: round(s.score, 1) for aid, s in signals.items()}
+        agent_meta = {
+            aid: {
+                "direction": s.direction.value,
+                "confidence": s.confidence.value,
+                "flags": [f.value for f in s.quality_flags],
+                "usable": s.is_usable,
+            }
+            for aid, s in signals.items()
+        }
 
         # ---- Step 4: Supplementary data for risk rating ----
         tech_signal = signals.get("agent.technical_risk")
@@ -218,6 +230,7 @@ class OrchestratorAgent:
             drivers=drivers,
             risks=risks,
             agent_scores=agent_scores,
+            agent_meta=agent_meta,
             weighted_scores=weighted,
             narrative={k: v for k, v in narrative.items() if not k.startswith("_")},
             quality_flags=thesis_flags,
@@ -226,8 +239,12 @@ class OrchestratorAgent:
 
         # ---- Persist ----
         db.store_thesis(thesis)
-        logger.info("[orchestrator] %s: thesis stored id=%s composite=%.1f",
-                    ticker, thesis.thesis_id, composite)
+        duration = _time.monotonic() - t0
+        logger.info("[orchestrator] %s: thesis stored id=%s composite=%.1f dur=%.1fs",
+                    ticker, thesis.thesis_id, composite, duration)
+        observability.log_metric("thesis_run_duration_secs", duration, {"ticker": ticker})
+        observability.log_metric("thesis_composite_score", composite, {"ticker": ticker})
+        observability.log_metric("thesis_agents_usable", float(n_available), {"ticker": ticker})
         return thesis
 
     # ------------------------------------------------------------------
