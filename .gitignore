@@ -24,3 +24,12 @@ test-results/
 test-results-run/
 .vscode/
 .claude/
+backend/lockout_state.json
+backend/scheduler_settings.json
+screenshots/
+screenshot.js
+screenshot2.js
+screenshot_all.js
+frontend/logo-option-*.svg
+frontend/logo.svg
+frontend/style-guide.html
