@@ -2459,6 +2459,19 @@ body.login-active { overflow: hidden; }
   margin: 0 0.3rem;
 }
 .thesis-history-row:hover { background: var(--surface); border-radius: 6px; }
+.thesis-metrics-table .thesis-run-row { grid-template-columns: 180px 60px 1fr 70px; }
+.btn-ghost {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
 
 @media (max-width: 820px) {
   .thesis-summary,

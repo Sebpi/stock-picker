@@ -2549,7 +2549,12 @@ function renderThesisOperations(data) {
       <h3>Recent Runs</h3>
       ${renderRecentRuns(runs)}
     </div>
+    <div class="thesis-section thesis-run-section" id="thesis-metrics-section">
+      <h3>Recent Metrics <button class="btn-ghost btn-xs" id="btn-load-metrics">Load</button></h3>
+      <div id="thesis-metrics-content"><p class="thesis-muted">Click Load to fetch live metrics.</p></div>
+    </div>
   `;
+  document.getElementById("btn-load-metrics")?.addEventListener("click", loadRecentMetrics);
 }
 
 function renderOpsCard(title, status, rows) {
@@ -2578,6 +2583,37 @@ function renderRecentRuns(runs) {
       `).join("")}
     </div>
   `;
+}
+
+async function loadRecentMetrics() {
+  const el = document.getElementById("thesis-metrics-content");
+  if (!el) return;
+  el.innerHTML = `<p class="thesis-muted">Loading…</p>`;
+  try {
+    const res = await authFetch(`${API}/v1/metrics/latest?limit=30`);
+    const data = await res.json();
+    const metrics = data.metrics || [];
+    if (!metrics.length) {
+      el.innerHTML = `<p class="thesis-muted">No metrics recorded yet — run a thesis first.</p>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="thesis-run-table thesis-metrics-table">
+        ${metrics.map(m => {
+          const labels = Object.entries(m.labels || {}).map(([k, v]) => `${k}=${v}`).join(" ");
+          const ts = m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : "-";
+          return `
+            <div class="thesis-run-row">
+              <strong>${safe(m.metric)}</strong>
+              <em>${Number(m.value).toFixed(2)}</em>
+              <span class="thesis-muted">${safe(labels)}</span>
+              <small>${ts}</small>
+            </div>`;
+        }).join("")}
+      </div>`;
+  } catch (err) {
+    el.innerHTML = `<p class="thesis-muted">Could not load metrics: ${safe(err.message)}</p>`;
+  }
 }
 
 async function triggerThesisEvaluation() {

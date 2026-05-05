@@ -5643,6 +5643,22 @@ def v1_operations_status(request: Request, current_user: str = Depends(get_curre
     )
 
 
+@app.get("/v1/metrics/latest")
+@limiter.limit("30/minute")
+def v1_metrics_latest(
+    request: Request,
+    limit: int = 100,
+    metric: str | None = None,
+    current_user: str = Depends(get_current_user),
+):
+    """Return the most recent structured metric entries from the in-process buffer."""
+    import observability
+    return {
+        "metrics": observability.get_recent_metrics(limit=limit, metric=metric or None),
+        "buffer_size": observability._METRICS_BUFFER_SIZE,
+    }
+
+
 @app.get("/v1/thesis/{ticker}/quality")
 @limiter.limit("20/minute")
 def v1_thesis_quality(request: Request, ticker: str, current_user: str = Depends(get_current_user)):

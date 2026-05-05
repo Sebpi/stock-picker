@@ -3,12 +3,17 @@ observability.py — Agent health metrics, run tracking and quality flag summari
 """
 from __future__ import annotations
 
+import collections
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
 import db
+
+# In-memory ring buffer of the last N structured metric entries.
+_METRICS_BUFFER_SIZE = 500
+_metrics_buffer: collections.deque = collections.deque(maxlen=_METRICS_BUFFER_SIZE)
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +150,20 @@ def operations_status(
 
 
 def log_metric(metric: str, value: float, labels: dict[str, str] | None = None) -> None:
-    """Emit a structured metric line to stdout (can be piped to any log aggregator)."""
+    """Emit a structured metric line to stdout and buffer it for /v1/metrics/latest."""
     entry = {
         "metric": metric,
         "value": value,
         "labels": labels or {},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    _metrics_buffer.append(entry)
     print(json.dumps(entry), flush=True)
+
+
+def get_recent_metrics(limit: int = 100, metric: str | None = None) -> list[dict[str, Any]]:
+    """Return recent metric entries from the in-process buffer, newest first."""
+    entries = list(_metrics_buffer)
+    if metric:
+        entries = [e for e in entries if e["metric"] == metric]
+    return list(reversed(entries))[:max(1, min(limit, _METRICS_BUFFER_SIZE))]
