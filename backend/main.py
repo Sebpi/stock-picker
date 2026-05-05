@@ -1425,182 +1425,184 @@ async def _get_portfolio_price_map(held: list[str], positions: dict[str, dict]) 
 
 
 async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: int = 3) -> dict:
-    recommendations = await _build_recommendations()
-    predictions = load_predictions()
-    dated = [normalize_prediction(p) for p in predictions if p.get("score") is not None or p.get("predicted_pct") is not None]
-    if not dated:
+    """
+    Build buy/sell alert candidates using the full 9-agent thesis pipeline.
+    Agent signals are cached in SQLite (max_age_hours=26) so repeated calls
+    within the snapshot TTL reuse stored signals without hitting Claude again.
+    Position sizing respects the initial_float from Alert Settings.
+    """
+    from agents.orchestrator import OrchestratorAgent
+
+    _s = load_settings()
+    strong_buy_min_score = max(55, int(_s.get("alert_buy_min_score") or os.getenv("ALERT_BUY_MIN_SCORE", "72")))
+    sell_max_score       = min(50, int(_s.get("alert_sell_max_score") or os.getenv("ALERT_SELL_MAX_SCORE", "42")))
+    initial_float        = float(_s.get("initial_float") or 100_000.0)
+
+    # Load watchlist (buy candidates) and owned positions (sell candidates)
+    watchlist       = load_watchlist()  # list of ticker strings
+    buy_tickers     = [t for t in watchlist if isinstance(t, str) and t]
+    owned_positions = {t: pos for t, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0}
+    sell_tickers    = list(owned_positions.keys())
+
+    all_tickers = list(dict.fromkeys(buy_tickers + sell_tickers))  # deduplicated, order preserved
+    if not all_tickers:
         return {"buys": [], "sells": []}
 
-    latest_date = max(p["date"] for p in dated)
-    latest_preds = [p for p in dated if p["date"] == latest_date]
-    pred_map = {p["ticker"]: p for p in latest_preds}
-    _s = load_settings()
-    strong_buy_min_score = max(68, int(_s.get("alert_buy_min_score") or os.getenv("ALERT_BUY_MIN_SCORE", "72")))
-    buy_min_score = max(55, strong_buy_min_score - 12)
-    sell_max_score = min(50, int(_s.get("alert_sell_max_score") or os.getenv("ALERT_SELL_MAX_SCORE", "42")))
+    # Run agent theses concurrently — max 3 at a time to avoid overloading Claude
+    orchestrator = OrchestratorAgent()
+    semaphore    = asyncio.Semaphore(3)
 
-    strong_buys = []
-    for rec in recommendations.get("buys", []):
-        pred = pred_map.get(rec["ticker"], {})
-        score_value = int(rec.get("score_value") or pred.get("score") or 0)
-        confidence = str(rec.get("confidence") or pred.get("confidence") or "medium").lower()
-        projected_12m = float(pred.get("predicted_12m_pct") or 0.0)
-        projected_24m = float(pred.get("predicted_24m_pct") or 0.0)
-        if score_value < strong_buy_min_score or confidence not in {"medium", "high"}:
-            continue
-        if projected_12m < 12 and projected_24m < 25:
-            continue
-        strong_buys.append({
-            "ticker": rec["ticker"],
-            "name": rec.get("name", rec["ticker"]),
-            "action": "BUY",
-            "type": "buy_opportunity",
-            "trigger": rec.get("trigger", "BUY"),
-            "signal": f"BUY signal strengthened: {rec.get('trigger', 'BUY')} with a {score_value}/100 conviction score.",
-            "price": float(rec.get("current_price") or pred.get("price_at_prediction") or 0.0),
-            "score_value": score_value,
-            "confidence": confidence,
-            "projected_12m_pct": projected_12m,
-            "projected_24m_pct": projected_24m,
-            "reasoning": rec.get("reasoning") or "Model score, confidence, and longer-horizon return profile all remain supportive.",
-        })
-    strong_buys.sort(key=lambda item: (item["score_value"], item["projected_12m_pct"], item["projected_24m_pct"]), reverse=True)
-
-    if not strong_buys:
-        fallback_buys = []
-        for rec in recommendations.get("buys", []):
-            pred = pred_map.get(rec["ticker"], {})
-            score_value = int(rec.get("score_value") or pred.get("score") or 0)
-            confidence = str(rec.get("confidence") or pred.get("confidence") or "medium").lower()
-            projected_12m = float(pred.get("predicted_12m_pct") or 0.0)
-            projected_24m = float(pred.get("predicted_24m_pct") or 0.0)
-            if score_value < buy_min_score:
-                continue
-            if projected_12m < 8 and projected_24m < 18:
-                continue
-            fallback_buys.append({
-                "ticker": rec["ticker"],
-                "name": rec.get("name", rec["ticker"]),
-                "action": "BUY",
-                "type": "buy_opportunity",
-                "trigger": rec.get("trigger", "BUY"),
-                "signal": f"BUY candidate from the latest recommendation set: {rec.get('trigger', 'BUY')}.",
-                "price": float(rec.get("current_price") or pred.get("price_at_prediction") or 0.0),
-                "score_value": score_value,
-                "confidence": confidence,
-                "projected_12m_pct": projected_12m,
-                "projected_24m_pct": projected_24m,
-                "reasoning": rec.get("reasoning") or "This is the strongest currently available BUY candidate, even though the signal is not yet top-tier.",
-            })
-        fallback_buys.sort(key=lambda item: (item["score_value"], item["projected_12m_pct"], item["projected_24m_pct"]), reverse=True)
-        strong_buys = fallback_buys[:buy_limit]
-
-    owned_positions = {ticker: pos for ticker, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0}
-    owned_tickers = list(owned_positions.keys())
-    info_map: dict[str, dict] = {}
-    hist_map: dict[str, object] = {}
-    if owned_tickers:
-        info_tasks = [asyncio.create_task(get_info_with_timeout(ticker, RECOMMENDATION_INFO_TIMEOUT_SEC)) for ticker in owned_tickers]
-        info_results = await asyncio.gather(*info_tasks, return_exceptions=True)
-        for ticker, info in zip(owned_tickers, info_results):
-            if not isinstance(info, Exception):
-                info_map[ticker] = info
-
-        async def _fetch_hist_30d(ticker: str):
+    async def _run_thesis(ticker: str):
+        async with semaphore:
             try:
-                hist = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: yf.Ticker(ticker).history(period="30d")),
-                    timeout=RECOMMENDATION_HISTORY_TIMEOUT_SEC,
-                )
-                return ticker, hist
-            except Exception:
+                # run_fresh=False: reuse cached signals (<26h) before calling Claude
+                thesis = await asyncio.to_thread(orchestrator.run_thesis, ticker, False)
+                return ticker, thesis
+            except Exception as exc:
+                logger.warning("[AlertSnapshot] %s thesis failed: %s", ticker, exc)
                 return ticker, None
 
-        hist_results = await asyncio.gather(*[_fetch_hist_30d(ticker) for ticker in owned_tickers])
-        for ticker, hist in hist_results:
-            if hist is not None and not hist.empty:
-                hist_map[ticker] = hist
+    results = await asyncio.gather(*[_run_thesis(t) for t in all_tickers])
+    thesis_map = {ticker: thesis for ticker, thesis in results if thesis is not None}
 
+    # ── BUY candidates — watchlist tickers not already owned ──────────────────
+    strong_buys = []
+    for ticker in buy_tickers:
+        if ticker in owned_positions:
+            continue  # already held — skip buy signal
+        thesis = thesis_map.get(ticker)
+        if not thesis:
+            continue
+
+        composite    = float(thesis.composite_score)
+        forecast_12m = thesis.forecast.get("12m")
+        forecast_6m  = thesis.forecast.get("6m")
+        projected_12m = float(forecast_12m.base_return_pct) if forecast_12m else 0.0
+        projected_6m  = float(forecast_6m.base_return_pct)  if forecast_6m  else 0.0
+        confidence_f  = float(forecast_12m.confidence)       if forecast_12m else 0.5
+        confidence_s  = "high" if confidence_f >= 0.7 else "medium" if confidence_f >= 0.45 else "low"
+
+        if composite < strong_buy_min_score:
+            continue
+        if projected_12m < 8 and projected_6m < 5:
+            continue  # agents agree but upside is too thin
+
+        # Position sizing: scale allocation 5-15% of float by composite score
+        alloc_pct   = 0.05 + (composite - strong_buy_min_score) / (100 - strong_buy_min_score) * 0.10
+        est_cost    = round(initial_float * min(alloc_pct, 0.15), 2)
+
+        # Narrative: prefer agent narrative summary, fall back to drivers
+        narrative   = thesis.narrative or {}
+        reasoning   = (
+            narrative.get("summary")
+            or narrative.get("base")
+            or ("; ".join(thesis.drivers[:2]) if thesis.drivers else "")
+            or f"9-agent composite score {composite:.0f}/100 across fundamentals, valuation, growth, macro, sentiment and more."
+        )
+
+        strong_buys.append({
+            "ticker":           ticker,
+            "name":             ticker,  # watchlist is tickers only; name resolved by yfinance if needed
+            "action":           "BUY",
+            "type":             "buy_opportunity",
+            "trigger":          "AGENT CONSENSUS",
+            "signal":           f"9-agent composite score {composite:.0f}/100 — BUY signal confirmed.",
+            "price":            float(thesis.current_price or 0.0),
+            "score_value":      int(round(composite)),
+            "confidence":       confidence_s,
+            "projected_12m_pct": round(projected_12m, 2),
+            "projected_24m_pct": round(projected_12m * 1.6, 2),  # rough 24m extrapolation
+            "est_cost":         est_cost,
+            "reasoning":        reasoning,
+            "agent_scores":     thesis.agent_scores,
+        })
+
+    strong_buys.sort(key=lambda x: (x["score_value"], x["projected_12m_pct"]), reverse=True)
+
+    # ── SELL candidates — owned tickers ───────────────────────────────────────
     total_market_value = 0.0
     current_value_map: dict[str, float] = {}
     for ticker, pos in owned_positions.items():
-        current_price = _price_from_info_for_alerts(info_map.get(ticker)) or pos.get("avg_cost", 0.0)
+        thesis       = thesis_map.get(ticker)
+        current_price = (float(thesis.current_price) if thesis and thesis.current_price else None) or pos.get("avg_cost", 0.0)
         current_value = float(pos.get("shares", 0.0)) * float(current_price or 0.0)
         current_value_map[ticker] = current_value
         total_market_value += current_value
 
     strong_sells = []
     for ticker, pos in owned_positions.items():
-        pred = pred_map.get(ticker)
-        if not pred:
+        thesis = thesis_map.get(ticker)
+        if not thesis:
             continue
-        score_value = int(pred.get("score") or 0)
-        confidence = str(pred.get("confidence") or "medium").lower()
-        direction = pred.get("direction") or prediction_direction(pred.get("predicted_pct"))
-        projected_12m = float(pred.get("predicted_12m_pct") or 0.0)
-        projected_24m = float(pred.get("predicted_24m_pct") or 0.0)
-        current_price = _price_from_info_for_alerts(info_map.get(ticker)) or pos.get("avg_cost", 0.0)
-        cost_basis = float(pos.get("shares", 0.0)) * float(pos.get("avg_cost", 0.0))
-        current_value = current_value_map.get(ticker, 0.0)
+
+        composite     = float(thesis.composite_score)
+        forecast_12m  = thesis.forecast.get("12m")
+        projected_12m = float(forecast_12m.base_return_pct) if forecast_12m else 0.0
+        confidence_f  = float(forecast_12m.confidence)       if forecast_12m else 0.5
+        confidence_s  = "high" if confidence_f >= 0.7 else "medium" if confidence_f >= 0.45 else "low"
+
+        current_price  = (float(thesis.current_price) if thesis.current_price else None) or pos.get("avg_cost", 0.0)
+        cost_basis     = float(pos.get("shares", 0.0)) * float(pos.get("avg_cost", 0.0))
+        current_value  = current_value_map.get(ticker, 0.0)
         unrealised_pct = ((current_value - cost_basis) / cost_basis * 100) if cost_basis else 0.0
-        trigger = None
-        reasoning = pred.get("reasoning") or ""
-        severity = 0.0
 
-        if direction == "bearish" and score_value <= sell_max_score and confidence in {"medium", "high"} and projected_12m <= -8:
-            trigger = "MODEL SELL"
-            severity = (50 - score_value) + abs(projected_12m)
-            reasoning = reasoning or "The latest model snapshot has turned firmly bearish on a stock you hold."
-        else:
-            ticker_preds = sorted(
-                [p for p in dated if p["ticker"] == ticker and p.get("date")],
-                key=lambda item: item["date"],
-                reverse=True,
+        narrative  = thesis.narrative or {}
+        bear_text  = narrative.get("bear") or ""
+        trigger    = None
+        severity   = 0.0
+        reasoning  = ""
+
+        # Primary: composite score has fallen below sell threshold
+        if composite <= sell_max_score and projected_12m <= -5:
+            trigger   = "AGENT SELL"
+            severity  = (50 - composite) + abs(projected_12m)
+            reasoning = (
+                bear_text
+                or ("; ".join(thesis.risks[:2]) if thesis.risks else "")
+                or f"9-agent composite fell to {composite:.0f}/100 with a {projected_12m:.1f}% 12-month base return."
             )
-            if len(ticker_preds) >= 3 and all((p.get("direction") or prediction_direction(p.get("predicted_pct"))) == "bearish" for p in ticker_preds[:3]):
-                trigger = "PERSISTENT BEARISH"
-                severity = 18 + abs(projected_12m)
-                reasoning = "The last three model snapshots for this holding have all stayed bearish."
 
-        if not trigger:
-            hist = hist_map.get(ticker)
-            if hist is not None and len(hist) >= 20:
-                sma_20 = float(hist["Close"].iloc[-20:].mean())
-                if sma_20 > 0 and current_price < sma_20 * 0.97 and direction != "bullish":
-                    trigger = "TECHNICAL BREAKDOWN"
-                    severity = max(0.0, (1 - current_price / sma_20) * 100) + max(0.0, -projected_12m)
-                    reasoning = "Price is trading below the 20-day trend while the model has stopped supporting the position."
+        # Secondary: composite is bearish even if not fully below threshold
+        elif composite < 50 and projected_12m < -8:
+            trigger   = "AGENT BEARISH"
+            severity  = (50 - composite) + abs(projected_12m) * 0.5
+            reasoning = bear_text or f"Agents are net-bearish ({composite:.0f}/100) on a position you hold."
 
-        if not trigger and total_market_value > 0 and (current_value / total_market_value) > 0.25 and direction != "bullish":
-            trigger = "CONCENTRATION"
-            severity = (current_value / total_market_value) * 100
-            reasoning = "This holding has grown into a large portfolio weight without a strong bullish model signal."
+        # Tertiary: concentration risk — >25% of portfolio, agents not bullish
+        if not trigger and total_market_value > 0 and composite < 60:
+            conc = current_value / total_market_value if total_market_value > 0 else 0.0
+            if conc > 0.25:
+                trigger   = "CONCENTRATION"
+                severity  = conc * 100
+                reasoning = f"This holding is {conc*100:.0f}% of portfolio value with agent score only {composite:.0f}/100."
 
         if not trigger:
             continue
 
         strong_sells.append({
-            "ticker": ticker,
-            "name": pos.get("name", ticker),
-            "action": "SELL",
-            "type": "sell_signal",
-            "trigger": trigger,
-            "signal": f"SELL signal triggered: {trigger}.",
-            "price": float(current_price or 0.0),
-            "score_value": score_value,
-            "confidence": confidence,
-            "projected_12m_pct": projected_12m,
-            "projected_24m_pct": projected_24m,
-            "unrealised_pct": round(unrealised_pct, 2),
-            "reasoning": reasoning,
-            "severity": round(severity, 4),
+            "ticker":            ticker,
+            "name":              pos.get("name", ticker),
+            "action":            "SELL",
+            "type":              "sell_signal",
+            "trigger":           trigger,
+            "signal":            f"SELL signal: {trigger} — agent composite {composite:.0f}/100.",
+            "price":             float(current_price or 0.0),
+            "score_value":       int(round(composite)),
+            "confidence":        confidence_s,
+            "projected_12m_pct": round(projected_12m, 2),
+            "projected_24m_pct": round(projected_12m * 1.6, 2),
+            "unrealised_pct":    round(unrealised_pct, 2),
+            "reasoning":         reasoning,
+            "severity":          round(severity, 4),
+            "agent_scores":      thesis.agent_scores,
         })
-    strong_sells.sort(key=lambda item: (item["severity"], 100 - item["score_value"], -item["projected_12m_pct"]), reverse=True)
+
+    strong_sells.sort(key=lambda x: x["severity"], reverse=True)
 
     return {
-        "buys": strong_buys[:buy_limit],
+        "buys":  strong_buys[:buy_limit],
         "sells": strong_sells[:sell_limit],
-        "prediction_date": latest_date,
+        "scored_by": "multi-agent",
     }
 
 
