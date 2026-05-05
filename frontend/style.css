@@ -62,10 +62,13 @@ header nav::-webkit-scrollbar { display: none; }
 }
 
 /* DaisyUI tab active state */
-.tab-btn.active {
-  background-color: #38bdf8;
-  color: #ffffff;
-  border-color: #38bdf8;
+.tab-btn.active,
+.tab-btn.active:hover,
+.tab-btn.active:focus {
+  background-color: #38bdf8 !important;
+  color: #0f1729 !important;
+  border-color: #38bdf8 !important;
+  font-weight: 700;
 }
 
 .logo-container {
