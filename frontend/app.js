@@ -2880,7 +2880,7 @@ async function generateThesis() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tickers: [ticker], run_fresh: runFresh }),
-    });
+    }, { timeout: 15000 });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Could not start thesis run");
     pollThesisRun(data.run_id, ticker);
@@ -2894,14 +2894,16 @@ function pollThesisRun(runId, ticker) {
   clearInterval(thesisPollTimer);
   const btn = document.getElementById("btn-thesis-generate");
   let attempts = 0;
+  let consecutiveErrors = 0;
   thesisPollTimer = setInterval(async () => {
     attempts += 1;
     try {
-      const res = await authFetch(`${API}/v1/runs/${runId}`);
+      const res = await authFetch(`${API}/v1/runs/${runId}`, {}, { timeout: 10000 });
       const run = await res.json();
       if (!res.ok) throw new Error(run.detail || "Could not poll run");
+      consecutiveErrors = 0;
       setThesisStatus(`Run ${run.status}: ${run.completed?.length || 0} completed, ${run.failed?.length || 0} failed.`);
-      if (["completed", "partial", "failed"].includes(run.status) || attempts > 180) {
+      if (["completed", "partial", "failed"].includes(run.status) || attempts > 240) {
         clearInterval(thesisPollTimer);
         btn.disabled = false;
         if (run.status === "failed") {
@@ -2914,11 +2916,15 @@ function pollThesisRun(runId, ticker) {
         }
       }
     } catch (err) {
-      clearInterval(thesisPollTimer);
-      btn.disabled = false;
-      setThesisStatus(err.message || "Run polling failed.", true);
+      consecutiveErrors += 1;
+      // Tolerate up to 5 transient errors before giving up
+      if (consecutiveErrors >= 5) {
+        clearInterval(thesisPollTimer);
+        btn.disabled = false;
+        setThesisStatus("Lost contact with server while polling. Check the Ops tab for run status.", true);
+      }
     }
-  }, 2000);
+  }, 3000);
 }
 
 async function loadLatestThesis(tickerOverride = "") {
