@@ -1446,7 +1446,7 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
 
     all_tickers = list(dict.fromkeys(buy_tickers + sell_tickers))  # deduplicated, order preserved
     if not all_tickers:
-        return {"buys": [], "sells": []}
+        return {"buys": [], "sells": [], "scored_by": "multi-agent"}
 
     # Run agent theses concurrently — max 3 at a time to avoid overloading Claude
     orchestrator = OrchestratorAgent()
