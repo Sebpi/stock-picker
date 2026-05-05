@@ -27,7 +27,8 @@ from schemas import (
 logger = logging.getLogger(__name__)
 
 # Maximum seconds to wait for any single data-fetch call (yfinance / HTTP).
-FETCH_TIMEOUT_SECS = 15
+import os as _os
+FETCH_TIMEOUT_SECS = float(_os.getenv("FETCH_TIMEOUT_SECS", "15"))
 
 _T = TypeVar("_T")
 

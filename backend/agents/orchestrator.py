@@ -141,6 +141,18 @@ class OrchestratorAgent:
         run_id = str(uuid.uuid4())
         as_of = datetime.now(timezone.utc)
         t0 = _time.monotonic()
+        try:
+            return self._run_thesis_inner(ticker, run_fresh, run_id, as_of, t0, observability)
+        except Exception as exc:
+            duration = _time.monotonic() - t0
+            observability.log_metric("thesis_run_duration_secs", duration,
+                                     {"ticker": ticker, "status": "error"})
+            logger.exception("[orchestrator] %s: thesis run failed after %.1fs: %s", ticker, duration, exc)
+            raise
+
+    def _run_thesis_inner(self, ticker: str, run_fresh: bool,
+                          run_id: str, as_of: datetime, t0: float,
+                          observability) -> InvestmentThesis:
         log: list[DecisionLogEntry] = []
 
         # ---- Step 1: Collect signals ----
@@ -242,7 +254,8 @@ class OrchestratorAgent:
         duration = _time.monotonic() - t0
         logger.info("[orchestrator] %s: thesis stored id=%s composite=%.1f dur=%.1fs",
                     ticker, thesis.thesis_id, composite, duration)
-        observability.log_metric("thesis_run_duration_secs", duration, {"ticker": ticker})
+        observability.log_metric("thesis_run_duration_secs", duration,
+                                 {"ticker": ticker, "status": "ok"})
         observability.log_metric("thesis_composite_score", composite, {"ticker": ticker})
         observability.log_metric("thesis_agents_usable", float(n_available), {"ticker": ticker})
         return thesis

@@ -5497,7 +5497,9 @@ class V1RunRequest(BaseModel):
 
 
 @app.post("/v1/runs")
+@limiter.limit("3/minute")
 async def v1_create_run(
+    request: Request,
     background_tasks: BackgroundTasks,
     req: V1RunRequest | None = Body(default=None),
     current_user: str = Depends(get_current_user),
@@ -5567,7 +5569,8 @@ async def v1_create_run(
 
 
 @app.get("/v1/runs")
-def v1_list_runs(limit: int = 20, current_user: str = Depends(get_current_user)):
+@limiter.limit("30/minute")
+def v1_list_runs(request: Request, limit: int = 20, current_user: str = Depends(get_current_user)):
     """Return recent thesis generation runs."""
     import db as _db
 
@@ -5575,7 +5578,8 @@ def v1_list_runs(limit: int = 20, current_user: str = Depends(get_current_user))
 
 
 @app.get("/v1/runs/{run_id}")
-def v1_get_run(run_id: str, current_user: str = Depends(get_current_user)):
+@limiter.limit("60/minute")
+def v1_get_run(request: Request, run_id: str, current_user: str = Depends(get_current_user)):
     """Poll the status of a thesis generation run."""
     import db as _db
 
@@ -5588,7 +5592,8 @@ def v1_get_run(run_id: str, current_user: str = Depends(get_current_user)):
 
 
 @app.get("/v1/thesis/{ticker}/latest")
-def v1_latest_thesis(ticker: str, current_user: str = Depends(get_current_user)):
+@limiter.limit("30/minute")
+def v1_latest_thesis(request: Request, ticker: str, current_user: str = Depends(get_current_user)):
     """Return the latest InvestmentThesis for a ticker."""
     import db as _db
     thesis = _db.get_latest_thesis(ticker.upper())
@@ -5597,8 +5602,18 @@ def v1_latest_thesis(ticker: str, current_user: str = Depends(get_current_user))
     return thesis.model_dump(mode="json")
 
 
+@app.get("/v1/thesis/{ticker}/history")
+@limiter.limit("20/minute")
+def v1_thesis_history(request: Request, ticker: str, limit: int = 10, current_user: str = Depends(get_current_user)):
+    """Return recent thesis snapshots for a ticker (newest first)."""
+    import db as _db
+    symbol = _validate_ticker(ticker)
+    return {"ticker": symbol, "theses": _db.get_thesis_history(symbol, limit)}
+
+
 @app.get("/v1/thesis/id/{thesis_id}")
-def v1_thesis_by_id(thesis_id: str, current_user: str = Depends(get_current_user)):
+@limiter.limit("30/minute")
+def v1_thesis_by_id(request: Request, thesis_id: str, current_user: str = Depends(get_current_user)):
     """Return a reproducible thesis snapshot by ID."""
     import db as _db
     thesis = _db.get_thesis_by_id(thesis_id)
@@ -5608,14 +5623,16 @@ def v1_thesis_by_id(thesis_id: str, current_user: str = Depends(get_current_user
 
 
 @app.get("/v1/agents/health")
-def v1_agents_health(current_user: str = Depends(get_current_user)):
+@limiter.limit("20/minute")
+def v1_agents_health(request: Request, current_user: str = Depends(get_current_user)):
     """Return agent health, last run times and stale status."""
     import observability
     return observability.agent_health_report()
 
 
 @app.get("/v1/operations/status")
-def v1_operations_status(current_user: str = Depends(get_current_user)):
+@limiter.limit("20/minute")
+def v1_operations_status(request: Request, current_user: str = Depends(get_current_user)):
     """Return a production operations snapshot for the multi-agent pipeline."""
     import observability
 
@@ -5627,14 +5644,16 @@ def v1_operations_status(current_user: str = Depends(get_current_user)):
 
 
 @app.get("/v1/thesis/{ticker}/quality")
-def v1_thesis_quality(ticker: str, current_user: str = Depends(get_current_user)):
+@limiter.limit("20/minute")
+def v1_thesis_quality(request: Request, ticker: str, current_user: str = Depends(get_current_user)):
     """Return quality flag summary for the latest thesis of a ticker."""
     import observability
     return observability.thesis_quality_summary(ticker.upper())
 
 
 @app.get("/v1/backtest/{ticker}")
-def v1_backtest(ticker: str, current_user: str = Depends(get_current_user)):
+@limiter.limit("20/minute")
+def v1_backtest(request: Request, ticker: str, current_user: str = Depends(get_current_user)):
     """Return forecast accuracy metrics for a ticker."""
     import db as _db
     import evaluation
@@ -5648,7 +5667,9 @@ def v1_backtest(ticker: str, current_user: str = Depends(get_current_user)):
 
 
 @app.get("/v1/evaluate/status")
+@limiter.limit("20/minute")
 def v1_evaluate_status(
+    request: Request,
     ticker: str | None = None,
     current_user: str = Depends(get_current_user),
 ):
@@ -5663,7 +5684,9 @@ def v1_evaluate_status(
 
 
 @app.post("/v1/evaluate")
+@limiter.limit("5/hour")
 async def v1_evaluate(
+    request: Request,
     background_tasks: BackgroundTasks,
     sync: bool = False,
     current_user: str = Depends(get_current_user),

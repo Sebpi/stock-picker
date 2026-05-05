@@ -332,6 +332,23 @@ def get_thesis_by_id(thesis_id: str) -> InvestmentThesis | None:
         return None
 
 
+def get_thesis_history(ticker: str, limit: int = 10) -> list[dict]:
+    """Return lightweight thesis summaries for a ticker, newest first."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT thesis_id, generated_at, composite_score, risk_rating,
+                   evidence_quality, current_price
+            FROM investment_thesis
+            WHERE ticker = ?
+            ORDER BY generated_at DESC
+            LIMIT ?
+            """,
+            (ticker, max(1, min(limit, 50))),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Forecast outcome helpers
 # ---------------------------------------------------------------------------
