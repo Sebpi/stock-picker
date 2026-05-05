@@ -735,6 +735,62 @@ _predictions_cache: dict[str, object] = {
     "data": None,
 }
 _screen_universe_cache: dict[str, tuple[list[dict], datetime]] = {}
+_PREWARM_BATCH = 25          # tickers per batch
+_PREWARM_DELAY = 1.2         # seconds between batches (avoids yfinance rate-limit)
+_SCREEN_TTL    = 300         # cache TTL seconds
+
+
+def _build_universe_row(ticker: str, info: dict) -> dict | None:
+    """Convert a yfinance info dict into a screener row. Returns None if unusable."""
+    try:
+        price       = info.get("currentPrice") or info.get("regularMarketPrice")
+        market_cap  = info.get("marketCap")
+        fcf         = info.get("freeCashflow")
+        rev_growth_raw = info.get("revenueGrowth")
+        return {
+            "ticker":    ticker,
+            "name":      info.get("shortName", ticker),
+            "sector":    info.get("sector", ""),
+            "price":     round(price, 2) if price else None,
+            "pe":        round(info["trailingPE"], 2) if info.get("trailingPE") else None,
+            "peg":       round(info["pegRatio"], 2) if info.get("pegRatio") else None,
+            "pb":        round(info["priceToBook"], 2) if info.get("priceToBook") else None,
+            "ev_ebitda": round(info["enterpriseToEbitda"], 2) if info.get("enterpriseToEbitda") else None,
+            "fcf_yield": calc_fcf_yield(fcf, market_cap),
+            "rev_growth": round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None,
+            "market_cap": market_cap,
+            "volume":    info.get("averageVolume"),
+        }
+    except Exception:
+        return None
+
+
+async def _prewarm_universe_cache():
+    """Fetch universe data in small batches so the screener cache is always full."""
+    await asyncio.sleep(5)          # let startup finish first
+    index_pools = {
+        "sp500":      SP500_TICKERS,
+        "nasdaq100":  NASDAQ100_TICKERS,
+        "ftse250":    FTSE250_TICKERS,
+        "__all__":    UNIVERSE,
+    }
+    for pool_key, pool in index_pools.items():
+        rows: list[dict] = []
+        for i in range(0, len(pool), _PREWARM_BATCH):
+            batch = pool[i: i + _PREWARM_BATCH]
+            infos = await asyncio.gather(
+                *[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in batch],
+                return_exceptions=True,
+            )
+            for ticker, info in zip(batch, infos):
+                if isinstance(info, Exception) or not isinstance(info, dict):
+                    continue
+                row = _build_universe_row(ticker, info)
+                if row:
+                    rows.append(row)
+            await asyncio.sleep(_PREWARM_DELAY)
+        _screen_universe_cache[pool_key] = (rows, datetime.now(timezone.utc))
+        logger.info("Screener cache pre-warmed: %s (%d rows)", pool_key, len(rows))
 
 
 def invalidate_predictions_cache() -> None:
@@ -1818,6 +1874,10 @@ async def startup():
         logger.info("First-run admin account created")
 
     scheduler.add_job(monitor_stocks, "interval", minutes=5,  id="monitor")
+    scheduler.add_job(
+        lambda: asyncio.ensure_future(_prewarm_universe_cache()),
+        "interval", hours=6, id="screener_prewarm", max_instances=1, coalesce=True,
+    )
     scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
     if THESIS_AUTO_RUN_ENABLED:
         scheduler.add_job(
@@ -1838,6 +1898,7 @@ async def startup():
             coalesce=True,
         )
     scheduler.start()
+    asyncio.ensure_future(_prewarm_universe_cache())
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
     if THESIS_AUTO_RUN_ENABLED:
@@ -2054,42 +2115,18 @@ async def screen_stocks(
     pool_key = index or "__all__"
     cached_universe = _screen_universe_cache.get(pool_key)
     now = datetime.now(timezone.utc)
-    if cached_universe and (now - cached_universe[1]).total_seconds() < 300:
+    if cached_universe and (now - cached_universe[1]).total_seconds() < _SCREEN_TTL:
         universe_rows = cached_universe[0]
     else:
         pool = index_map.get(index, UNIVERSE) if index else UNIVERSE
         infos = await asyncio.gather(*[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in pool], return_exceptions=True)
         universe_rows = []
         for ticker, info in zip(pool, infos):
-            if isinstance(info, Exception):
+            if isinstance(info, Exception) or not isinstance(info, dict):
                 continue
-            try:
-                stock_sector = info.get("sector", "")
-                market_cap   = info.get("marketCap")
-                pe           = info.get("trailingPE")
-                peg          = info.get("pegRatio")
-                pb           = info.get("priceToBook")
-                ev_ebitda    = info.get("enterpriseToEbitda")
-                fcf          = info.get("freeCashflow")
-                volume       = info.get("averageVolume")
-                price        = info.get("currentPrice") or info.get("regularMarketPrice")
-                name         = info.get("shortName", ticker)
-                fcf_yield    = calc_fcf_yield(fcf, market_cap)
-                rev_growth_raw = info.get("revenueGrowth")
-                rev_growth   = round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None
-                universe_rows.append({
-                    "ticker": ticker, "name": name, "sector": stock_sector,
-                    "price": round(price, 2) if price else None,
-                    "pe": round(pe, 2) if pe else None,
-                    "peg": round(peg, 2) if peg else None,
-                    "pb": round(pb, 2) if pb else None,
-                    "ev_ebitda": round(ev_ebitda, 2) if ev_ebitda else None,
-                    "fcf_yield": fcf_yield,
-                    "rev_growth": rev_growth,
-                    "market_cap": market_cap, "volume": volume,
-                })
-            except Exception:
-                continue
+            row = _build_universe_row(ticker, info)
+            if row:
+                universe_rows.append(row)
         _screen_universe_cache[pool_key] = (universe_rows, now)
 
     results = []
