@@ -2529,3 +2529,11 @@ body.login-active { overflow: hidden; }
 #pred-thead-row th.sort-active { color: #3b82f6; }
 #pred-thead-row th[data-sort-dir='asc']::after  { content: ' ▲'; font-size: 0.7em; opacity: 0.8; }
 #pred-thead-row th[data-sort-dir='desc']::after { content: ' ▼'; font-size: 0.7em; opacity: 0.8; }
+
+/* ── Scheduler settings ── */
+.sched-settings-grid { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 4px; }
+.sched-block { flex: 1; min-width: 200px; }
+.sched-block h4 { font-size: 12px; color: var(--accent); margin: 0 0 8px; text-transform: uppercase; letter-spacing: .05em; }
+.sched-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 12px; color: var(--text-muted); }
+.sched-row input[type=number] { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 2px 6px; }
+.sched-row input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }

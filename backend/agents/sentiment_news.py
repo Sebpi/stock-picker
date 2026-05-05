@@ -236,41 +236,93 @@ class SentimentNewsAgent(BaseAgent):
 
     @staticmethod
     def _fetch_existing_agent_news(ticker: str) -> list[dict[str, Any]]:
-        """Use the established sentiment agent's yfinance parser when available."""
+        """Fetch news via sentiment agent → yfinance → Yahoo RSS → Finviz RSS fallback chain."""
+        # 1. Existing sentiment agent
         try:
             from sentiment_agent import fetch_ticker_news
-            return fetch_ticker_news(ticker)
+            items = fetch_ticker_news(ticker)
+            if items:
+                return items
         except Exception as exc:
             logger.debug("Existing sentiment news fetch failed for %s: %s", ticker, exc)
-            try:
-                import yfinance as yf
-                t = yf.Ticker(ticker)
-                raw_news = SentimentNewsAgent._timed_fetch(lambda: t.news, f"{ticker}/news") or []
-                items: list[dict[str, Any]] = []
-                for item in raw_news[:15]:
-                    if not hasattr(item, "get"):
-                        continue
-                    content = item.get("content") or {}
-                    title = content.get("title") if content else item.get("title")
-                    url = (
-                        (content.get("clickThroughUrl") or {}).get("url")
-                        if content else item.get("link")
-                    ) or (
-                        (content.get("canonicalUrl") or {}).get("url")
-                        if content else item.get("url", "")
-                    )
-                    published = content.get("pubDate") if content else item.get("providerPublishTime")
-                    if title:
-                        items.append({
-                            "ticker": ticker,
-                            "title": title,
-                            "publisher": item.get("publisher", ""),
-                            "published_at": published,
-                            "url": url or "",
-                        })
+
+        # 2. yfinance .news
+        try:
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            raw_news = SentimentNewsAgent._timed_fetch(lambda: t.news, f"{ticker}/news") or []
+            items = []
+            for item in raw_news[:15]:
+                if not hasattr(item, "get"):
+                    continue
+                content = item.get("content") or {}
+                title = content.get("title") if content else item.get("title")
+                url = (
+                    (content.get("clickThroughUrl") or {}).get("url")
+                    if content else item.get("link")
+                ) or (
+                    (content.get("canonicalUrl") or {}).get("url")
+                    if content else item.get("url", "")
+                )
+                published = content.get("pubDate") if content else item.get("providerPublishTime")
+                if title:
+                    items.append({
+                        "ticker": ticker, "title": title,
+                        "publisher": item.get("publisher", ""),
+                        "published_at": published, "url": url or "",
+                    })
+            if items:
                 return items
-            except Exception:
+        except Exception:
+            pass
+
+        # 3. Yahoo Finance RSS (no key required)
+        rss_items = SentimentNewsAgent._fetch_rss(
+            f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US",
+            ticker, "Yahoo RSS",
+        )
+        if rss_items:
+            return rss_items
+
+        # 4. Finviz RSS
+        finviz_items = SentimentNewsAgent._fetch_rss(
+            f"https://finviz.com/rss.ashx?t={ticker}",
+            ticker, "Finviz RSS",
+        )
+        return finviz_items
+
+    @staticmethod
+    def _fetch_rss(url: str, ticker: str, source: str) -> list[dict[str, Any]]:
+        """Generic RSS fetcher — returns normalised news dicts."""
+        try:
+            import httpx
+            import xml.etree.ElementTree as ET
+            r = httpx.get(url, timeout=8, headers={"User-Agent": "StockPicker/1.0"})
+            if r.status_code != 200:
                 return []
+            root = ET.fromstring(r.text)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            items: list[dict[str, Any]] = []
+            # RSS 2.0
+            for item in root.findall(".//item")[:15]:
+                title = item.findtext("title", "").strip()
+                link  = item.findtext("link", "").strip()
+                pubDate = item.findtext("pubDate", "")
+                if title:
+                    items.append({"ticker": ticker, "title": title, "url": link,
+                                  "publisher": source, "published_at": pubDate})
+            # Atom
+            for entry in root.findall(".//atom:entry", ns)[:15]:
+                title = (entry.findtext("atom:title", "", ns) or "").strip()
+                link  = (entry.find("atom:link", ns) or {}).get("href", "")
+                pub   = entry.findtext("atom:published", "", ns)
+                if title:
+                    items.append({"ticker": ticker, "title": title, "url": link,
+                                  "publisher": source, "published_at": pub})
+            return items
+        except Exception as exc:
+            logger.debug("RSS fetch failed [%s] %s: %s", source, ticker, exc)
+            return []
 
     def _try_existing_claude_analysis(
         self,

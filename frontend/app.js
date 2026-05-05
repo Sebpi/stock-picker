@@ -2674,8 +2674,13 @@ function renderThesisOperations(data) {
       <h3>Recent Metrics <button class="btn-ghost btn-xs" id="btn-load-metrics">Load</button></h3>
       <div id="thesis-metrics-content"><p class="thesis-muted">Click Load to fetch live metrics.</p></div>
     </div>
+    <div class="thesis-section thesis-run-section">
+      <h3>Scheduler Settings</h3>
+      <div id="scheduler-settings-form"><p class="thesis-muted">Loading…</p></div>
+    </div>
   `;
   document.getElementById("btn-load-metrics")?.addEventListener("click", loadRecentMetrics);
+  loadSchedulerSettings();
 }
 
 function renderOpsCard(title, status, rows) {
@@ -2704,6 +2709,73 @@ function renderRecentRuns(runs) {
       `).join("")}
     </div>
   `;
+}
+
+async function loadSchedulerSettings() {
+  const el = document.getElementById("scheduler-settings-form");
+  if (!el) return;
+  try {
+    const res = await authFetch(`${API}/v1/settings/scheduler`);
+    const cfg = await res.json();
+    el.innerHTML = `
+      <div class="sched-settings-grid">
+        <div class="sched-block">
+          <h4>Thesis Auto-Run</h4>
+          <label class="sched-row">
+            <span>Enabled</span>
+            <input type="checkbox" id="sched-thesis-enabled" ${cfg.thesis_auto_run_enabled ? "checked" : ""} />
+          </label>
+          <label class="sched-row">
+            <span>Interval (minutes)</span>
+            <input type="number" id="sched-thesis-interval" value="${cfg.thesis_auto_run_interval_minutes}" min="15" step="60" style="width:80px" />
+          </label>
+          <label class="sched-row">
+            <span>Max tickers per run</span>
+            <input type="number" id="sched-thesis-max" value="${cfg.thesis_auto_run_max_tickers}" min="1" max="50" style="width:60px" />
+          </label>
+        </div>
+        <div class="sched-block">
+          <h4>Evaluation Auto-Run</h4>
+          <label class="sched-row">
+            <span>Enabled</span>
+            <input type="checkbox" id="sched-eval-enabled" ${cfg.evaluation_auto_run_enabled ? "checked" : ""} />
+          </label>
+          <label class="sched-row">
+            <span>Interval (minutes)</span>
+            <input type="number" id="sched-eval-interval" value="${cfg.evaluation_auto_run_interval_minutes}" min="60" step="60" style="width:80px" />
+          </label>
+        </div>
+      </div>
+      <div id="sched-save-status" style="font-size:12px;color:var(--muted);margin-top:6px"></div>
+      <button class="btn-primary" style="margin-top:8px;font-size:12px" onclick="saveSchedulerSettings()">Save &amp; Apply</button>
+    `;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--red);font-size:12px">${safe(err.message)}</p>`;
+  }
+}
+
+async function saveSchedulerSettings() {
+  const status = document.getElementById("sched-save-status");
+  const payload = {
+    thesis_auto_run_enabled:            document.getElementById("sched-thesis-enabled")?.checked ?? false,
+    thesis_auto_run_interval_minutes:   parseInt(document.getElementById("sched-thesis-interval")?.value) || 1440,
+    thesis_auto_run_max_tickers:        parseInt(document.getElementById("sched-thesis-max")?.value) || 8,
+    evaluation_auto_run_enabled:        document.getElementById("sched-eval-enabled")?.checked ?? false,
+    evaluation_auto_run_interval_minutes: parseInt(document.getElementById("sched-eval-interval")?.value) || 1440,
+  };
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await authFetch(`${API}/v1/settings/scheduler`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Save failed");
+    if (status) status.textContent = `Saved and applied at ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    if (status) status.textContent = `Error: ${safe(err.message)}`;
+  }
 }
 
 async function loadRecentMetrics() {

@@ -219,9 +219,33 @@ class GrowthRevisionsAgent(BaseAgent):
         )
         score = float(min(100, max(0, score)))
 
+        # ---- Analyst recommendations fallback ----
+        # When estimate data is sparse, use buy/sell/hold counts as a revision-breadth proxy
+        if revision_breadth is None or analyst_count is None or analyst_count < 2:
+            try:
+                rec_summary = self._timed_fetch(lambda: t.recommendations_summary, f"{ticker}/rec_summary")
+                if rec_summary is not None and not rec_summary.empty:
+                    latest = rec_summary.iloc[0]
+                    strong_buy = float(latest.get("strongBuy", 0) or 0)
+                    buy        = float(latest.get("buy", 0) or 0)
+                    hold       = float(latest.get("hold", 0) or 0)
+                    sell       = float(latest.get("sell", 0) or 0)
+                    strong_sell= float(latest.get("strongSell", 0) or 0)
+                    total_rec  = strong_buy + buy + hold + sell + strong_sell
+                    if total_rec > 0:
+                        if analyst_count is None or analyst_count < 2:
+                            analyst_count = int(total_rec)
+                        if revision_breadth is None:
+                            bullish = strong_buy + buy
+                            bearish = sell + strong_sell
+                            revision_breadth = (bullish - bearish) / total_rec
+            except Exception as exc:
+                logger.debug("[%s] recommendations_summary parse error: %s", ticker, exc)
+
         # ---- Flags ----
         flags: list[QualityFlag] = []
-        if analyst_count is not None and analyst_count < 3:
+        # Only flag LOW_COVERAGE for truly uncovered stocks (0-1 analysts)
+        if analyst_count is not None and analyst_count < 2:
             flags.append(QualityFlag.LOW_COVERAGE)
         if rev_growth_next_fy is None and eps_growth_next_fy is None:
             flags.append(QualityFlag.MISSING_FIELD)

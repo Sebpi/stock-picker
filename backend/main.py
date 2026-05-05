@@ -1879,20 +1879,30 @@ async def startup():
         "interval", hours=6, id="screener_prewarm", max_instances=1, coalesce=True,
     )
     scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
-    if THESIS_AUTO_RUN_ENABLED:
+    # Load persisted scheduler settings (overrides .env)
+    import scheduler_settings as _ss
+    _sched_cfg = _ss.load()
+    _thesis_enabled  = _sched_cfg["thesis_auto_run_enabled"]
+    _thesis_interval = _sched_cfg["thesis_auto_run_interval_minutes"]
+    _eval_enabled    = _sched_cfg["evaluation_auto_run_enabled"]
+    _eval_interval   = _sched_cfg["evaluation_auto_run_interval_minutes"]
+    thesis_scheduler_status["enabled"] = _thesis_enabled
+    evaluation_scheduler_status["enabled"] = _eval_enabled
+
+    if _thesis_enabled:
         scheduler.add_job(
             auto_thesis,
             "interval",
-            minutes=THESIS_AUTO_RUN_INTERVAL_MINUTES,
+            minutes=_thesis_interval,
             id="multiagent_thesis",
             max_instances=1,
             coalesce=True,
         )
-    if EVALUATION_AUTO_RUN_ENABLED:
+    if _eval_enabled:
         scheduler.add_job(
             auto_evaluate,
             "interval",
-            minutes=EVALUATION_AUTO_RUN_INTERVAL_MINUTES,
+            minutes=_eval_interval,
             id="forecast_evaluation",
             max_instances=1,
             coalesce=True,
@@ -5753,6 +5763,61 @@ def v1_thesis_compare(request: Request, tickers: str, current_user: str = Depend
         else:
             results.append({"ticker": sym, "error": "No thesis found"})
     return {"tickers": symbols, "comparison": results}
+
+
+@app.get("/v1/settings/scheduler")
+@limiter.limit("30/minute")
+def v1_get_scheduler_settings(request: Request, current_user: str = Depends(get_current_user)):
+    """Return current scheduler configuration."""
+    import scheduler_settings as _ss
+    return _ss.load()
+
+
+@app.patch("/v1/settings/scheduler")
+@limiter.limit("20/minute")
+def v1_patch_scheduler_settings(request: Request, body: dict, current_user: str = Depends(get_current_user)):
+    """Update scheduler settings and apply to the running scheduler immediately."""
+    import scheduler_settings as _ss
+    allowed = {
+        "thesis_auto_run_enabled", "thesis_auto_run_interval_minutes",
+        "thesis_auto_run_max_tickers", "evaluation_auto_run_enabled",
+        "evaluation_auto_run_interval_minutes",
+    }
+    patch = {k: v for k, v in body.items() if k in allowed}
+    if not patch:
+        raise HTTPException(status_code=400, detail="No valid settings fields provided")
+    _ss.save(patch)
+    cfg = _ss.load()
+
+    # Apply thesis scheduler changes live
+    if "thesis_auto_run_enabled" in patch or "thesis_auto_run_interval_minutes" in patch:
+        try:
+            scheduler.remove_job("multiagent_thesis")
+        except Exception:
+            pass
+        if cfg["thesis_auto_run_enabled"]:
+            scheduler.add_job(
+                auto_thesis, "interval",
+                minutes=cfg["thesis_auto_run_interval_minutes"],
+                id="multiagent_thesis", max_instances=1, coalesce=True,
+            )
+        thesis_scheduler_status["enabled"] = cfg["thesis_auto_run_enabled"]
+
+    # Apply evaluation scheduler changes live
+    if "evaluation_auto_run_enabled" in patch or "evaluation_auto_run_interval_minutes" in patch:
+        try:
+            scheduler.remove_job("forecast_evaluation")
+        except Exception:
+            pass
+        if cfg["evaluation_auto_run_enabled"]:
+            scheduler.add_job(
+                auto_evaluate, "interval",
+                minutes=cfg["evaluation_auto_run_interval_minutes"],
+                id="forecast_evaluation", max_instances=1, coalesce=True,
+            )
+        evaluation_scheduler_status["enabled"] = cfg["evaluation_auto_run_enabled"]
+
+    return {"status": "ok", "settings": cfg}
 
 
 @app.get("/v1/agents/health")
