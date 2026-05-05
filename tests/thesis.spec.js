@@ -44,6 +44,58 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
+  await page.route('**/v1/operations/status', route => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        generated_at: '2026-05-05T08:05:00Z',
+        agents: { total_agents: 8, healthy: 2, stale: 1, never_run: 5 },
+        thesis_scheduler: {
+          enabled: false,
+          active: false,
+          runs_started: 1,
+          last_run: '2026-05-05T07:00:00Z',
+          last_error: null,
+        },
+        evaluation_scheduler: {
+          enabled: true,
+          active: false,
+          runs_started: 2,
+          last_evaluated_count: 3,
+          last_error: null,
+        },
+        forecast_outcomes: {
+          total: 9,
+          pending: 6,
+          evaluated: 3,
+          matured_pending: 1,
+          last_evaluated_at: '2026-05-05 07:30:00',
+          by_horizon: {},
+        },
+        recent_runs: [
+          {
+            run_id: 'run-1',
+            status: 'completed',
+            tickers: ['MSFT'],
+            started_at: '2026-05-05T07:00:00Z',
+            completed: ['MSFT'],
+            failed: [],
+          },
+        ],
+        recent_failures: [],
+      }),
+    });
+  });
+
+  await page.route('**/v1/evaluate**', route => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, message: 'Evaluation job started in background' }),
+    });
+  });
+
   await page.route('**/v1/thesis/MSFT/latest', route => {
     route.fulfill({
       status: 200,
@@ -117,6 +169,8 @@ test('multi-agent thesis tab renders health and latest thesis', async ({ page })
   await page.getByRole('button', { name: 'Thesis' }).click();
   await expect(page.locator('#tab-thesis')).toBeVisible();
   await expect(page.locator('#thesis-health')).toContainText('Agent Health');
+  await expect(page.locator('#thesis-ops')).toContainText('Operations Status');
+  await expect(page.locator('#thesis-ops')).toContainText('1 ready to evaluate');
 
   await page.fill('#thesis-ticker', 'MSFT');
   await page.getByRole('button', { name: 'Refresh Latest' }).click();
@@ -125,4 +179,7 @@ test('multi-agent thesis tab renders health and latest thesis', async ({ page })
   await expect(page.locator('#thesis-output')).toContainText('68.4');
   await expect(page.locator('#thesis-output')).toContainText('Strong margin profile');
   await expect(page.locator('#thesis-output')).toContainText('Base case remains constructive');
+
+  await page.getByRole('button', { name: 'Evaluate Outcomes' }).click();
+  await expect(page.locator('#thesis-status')).toContainText('Evaluation job started');
 });

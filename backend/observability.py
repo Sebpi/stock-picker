@@ -113,6 +113,37 @@ def thesis_quality_summary(ticker: str) -> dict[str, Any]:
     }
 
 
+def operations_status(
+    thesis_scheduler: dict[str, Any] | None = None,
+    evaluation_scheduler: dict[str, Any] | None = None,
+    recent_run_limit: int = 10,
+) -> dict[str, Any]:
+    """Return a compact operational snapshot for the multi-agent pipeline."""
+    health = agent_health_report()
+    outcome_status = db.get_forecast_outcome_status()
+    recent_runs = db.list_thesis_runs(recent_run_limit)
+    recent_failures = [
+        {
+            "run_id": run["run_id"],
+            "status": run["status"],
+            "failed": run["failed"],
+            "started_at": run["started_at"],
+        }
+        for run in recent_runs
+        if run["status"] in {"failed", "partial"} or run["failed"]
+    ]
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "agents": health["summary"],
+        "thesis_scheduler": thesis_scheduler or {},
+        "evaluation_scheduler": evaluation_scheduler or {},
+        "forecast_outcomes": outcome_status,
+        "recent_runs": recent_runs,
+        "recent_failures": recent_failures,
+    }
+
+
 def log_metric(metric: str, value: float, labels: dict[str, str] | None = None) -> None:
     """Emit a structured metric line to stdout (can be piped to any log aggregator)."""
     entry = {

@@ -9,7 +9,7 @@ import logging
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -435,16 +435,34 @@ def get_agent_health() -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT agent_id,
-                   MAX(completed_at) as last_run,
-                   AVG(duration_secs) as avg_duration_secs,
-                   SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failures,
+            WITH recent AS (
+                SELECT *
+                FROM agent_run
+                WHERE started_at >= datetime('now', '-7 days')
+            ),
+            latest AS (
+                SELECT agent_id, status AS last_status
+                FROM (
+                    SELECT agent_id,
+                           status,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY agent_id
+                               ORDER BY COALESCE(completed_at, started_at) DESC
+                           ) AS rn
+                    FROM recent
+                )
+                WHERE rn = 1
+            )
+            SELECT r.agent_id,
+                   MAX(r.completed_at) as last_run,
+                   AVG(r.duration_secs) as avg_duration_secs,
+                   SUM(CASE WHEN r.status='failed' THEN 1 ELSE 0 END) as failures,
                    COUNT(*) as total_runs,
-                   MAX(status) as last_status
-            FROM agent_run
-            WHERE started_at >= datetime('now', '-7 days')
-            GROUP BY agent_id
-            ORDER BY agent_id
+                   l.last_status as last_status
+            FROM recent r
+            LEFT JOIN latest l ON l.agent_id = r.agent_id
+            GROUP BY r.agent_id
+            ORDER BY r.agent_id
             """,
         ).fetchall()
     return [dict(r) for r in rows]
@@ -475,7 +493,7 @@ def update_thesis_run(run_id: str, status: str | None = None,
     if status is not None:
         updates.append("status = ?")
         params.append(status)
-        if status in {"completed", "failed"}:
+        if status in {"completed", "partial", "failed"}:
             updates.append("completed_at = datetime('now')")
     if completed is not None:
         updates.append("completed_json = ?")
@@ -513,6 +531,37 @@ def get_thesis_run(run_id: str) -> dict[str, Any] | None:
         "completed": json.loads(data.get("completed_json") or "[]"),
         "failed": json.loads(data.get("failed_json") or "[]"),
     }
+
+
+def list_thesis_runs(limit: int = 20) -> list[dict[str, Any]]:
+    """Return recent thesis pipeline runs, newest first."""
+    safe_limit = max(1, min(int(limit or 20), 100))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM thesis_run
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+
+    runs: list[dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        runs.append({
+            "run_id": data["run_id"],
+            "status": data["status"],
+            "tickers": json.loads(data["tickers_json"] or "[]"),
+            "run_fresh": bool(data["run_fresh"]),
+            "requested_by": data.get("requested_by"),
+            "started_at": data["started_at"],
+            "completed_at": data.get("completed_at"),
+            "completed": json.loads(data.get("completed_json") or "[]"),
+            "failed": json.loads(data.get("failed_json") or "[]"),
+        })
+    return runs
 
 
 # ---------------------------------------------------------------------------
@@ -672,3 +721,68 @@ def get_backtest_summary(ticker: str) -> dict[str, Any]:
             "sector_relative_alpha": round(r["avg_alpha"] or 0, 2),
         }
     return result
+
+
+def get_forecast_outcome_status(ticker: str | None = None) -> dict[str, Any]:
+    """Return pending/evaluated forecast outcome counts, including matured pending rows."""
+    params: tuple[Any, ...] = (ticker.upper(),) if ticker else ()
+    where = "WHERE ticker = ?" if ticker else ""
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT outcome_id, ticker, horizon, realised_return_pct,
+                   evaluated_at, thesis_generated_at
+            FROM forecast_outcome
+            {where}
+            """,
+            params,
+        ).fetchall()
+
+    horizon_days = {"3m": 91, "6m": 182, "12m": 365}
+    now = datetime.now(timezone.utc)
+    status: dict[str, Any] = {
+        "ticker": ticker.upper() if ticker else None,
+        "generated_at": now.isoformat(),
+        "total": 0,
+        "pending": 0,
+        "evaluated": 0,
+        "matured_pending": 0,
+        "last_evaluated_at": None,
+        "by_horizon": {},
+    }
+
+    for row in rows:
+        data = dict(row)
+        horizon = data["horizon"]
+        item = status["by_horizon"].setdefault(horizon, {
+            "total": 0,
+            "pending": 0,
+            "evaluated": 0,
+            "matured_pending": 0,
+        })
+        status["total"] += 1
+        item["total"] += 1
+
+        evaluated = data["realised_return_pct"] is not None
+        if evaluated:
+            status["evaluated"] += 1
+            item["evaluated"] += 1
+            evaluated_at = data.get("evaluated_at")
+            if evaluated_at and (status["last_evaluated_at"] is None or evaluated_at > status["last_evaluated_at"]):
+                status["last_evaluated_at"] = evaluated_at
+            continue
+
+        status["pending"] += 1
+        item["pending"] += 1
+        try:
+            generated = datetime.fromisoformat((data.get("thesis_generated_at") or "").replace("Z", "+00:00"))
+            if generated.tzinfo is None:
+                generated = generated.replace(tzinfo=timezone.utc)
+            days = horizon_days.get(horizon)
+            if days and generated + timedelta(days=days) <= now:
+                status["matured_pending"] += 1
+                item["matured_pending"] += 1
+        except Exception:
+            pass
+
+    return status

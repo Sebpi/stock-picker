@@ -2342,6 +2342,43 @@ body.login-active { overflow: hidden; }
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 0.75rem;
 }
+.thesis-ops-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.thesis-ops-list {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+}
+.thesis-ops-list div,
+.thesis-run-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 0.6rem;
+  align-items: center;
+}
+.thesis-ops-list span,
+.thesis-run-row em,
+.thesis-run-row small {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-style: normal;
+}
+.thesis-ops-list em {
+  color: var(--text);
+  font-style: normal;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.thesis-run-section { margin-top: 1rem; }
+.thesis-run-table { display: grid; gap: 0.4rem; }
+.thesis-run-row {
+  grid-template-columns: 86px 1fr 180px 90px;
+  padding: 0.45rem 0;
+  border-top: 1px solid var(--border);
+}
 .thesis-agent-top {
   display: flex;
   align-items: center;
@@ -2357,11 +2394,16 @@ body.login-active { overflow: hidden; }
   .thesis-summary,
   .thesis-two-col,
   .thesis-forecast-grid,
+  .thesis-ops-grid,
   .thesis-narrative-grid {
     grid-template-columns: 1fr;
   }
   .thesis-meta-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .thesis-run-row {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
   }
 }
 / *   F o o t e r   s t y l e s   * / 

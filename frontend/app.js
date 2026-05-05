@@ -272,7 +272,7 @@ let recReasoningMap = {};
 const TAB_LOADERS = {
   watchlist: () => loadWatchlist(),
   predictions: () => loadPredictions(),
-  thesis: () => loadThesisHealth(false),
+  thesis: () => { loadThesisHealth(false); loadThesisOperations(false); },
   recommendations: () => loadRecommendations(),
   alerts: () => loadAlerts(),
   portfolio: () => loadPortfolio(),
@@ -2495,6 +2495,108 @@ function renderThesisHealth(data) {
   `;
 }
 
+async function loadThesisOperations(showPanel = true) {
+  const panel = document.getElementById("thesis-ops");
+  if (!panel) return;
+  try {
+    const res = await authFetch(`${API}/v1/operations/status`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not load operations status");
+    renderThesisOperations(data);
+    if (showPanel) panel.classList.remove("hidden");
+  } catch (err) {
+    panel.classList.remove("hidden");
+    panel.innerHTML = `<div class="thesis-empty">Operations status unavailable: ${safe(err.message)}</div>`;
+  }
+}
+
+function renderThesisOperations(data) {
+  const panel = document.getElementById("thesis-ops");
+  const outcomes = data.forecast_outcomes || {};
+  const thesisScheduler = data.thesis_scheduler || {};
+  const evalScheduler = data.evaluation_scheduler || {};
+  const runs = Array.isArray(data.recent_runs) ? data.recent_runs.slice(0, 6) : [];
+  const failures = Array.isArray(data.recent_failures) ? data.recent_failures : [];
+
+  panel.innerHTML = `
+    <div class="thesis-health-head">
+      <div>
+        <h3>Operations Status</h3>
+        <p>${outcomes.pending || 0} pending outcomes | ${outcomes.matured_pending || 0} ready to evaluate | ${failures.length} recent run issue${failures.length === 1 ? "" : "s"}</p>
+      </div>
+      <span class="thesis-generated">Updated ${safe(new Date(data.generated_at).toLocaleString())}</span>
+    </div>
+    <div class="thesis-ops-grid">
+      ${renderOpsCard("Thesis Scheduler", thesisScheduler.enabled ? "enabled" : "disabled", [
+        ["Active", thesisScheduler.active ? "yes" : "no"],
+        ["Runs", thesisScheduler.runs_started ?? 0],
+        ["Last run", thesisScheduler.last_run ? new Date(thesisScheduler.last_run).toLocaleString() : "never"],
+        ["Last error", thesisScheduler.last_error || "none"],
+      ])}
+      ${renderOpsCard("Evaluation Scheduler", evalScheduler.enabled ? "enabled" : "disabled", [
+        ["Active", evalScheduler.active ? "yes" : "no"],
+        ["Runs", evalScheduler.runs_started ?? 0],
+        ["Last evaluated", evalScheduler.last_evaluated_count ?? "-"],
+        ["Last error", evalScheduler.last_error || "none"],
+      ])}
+      ${renderOpsCard("Forecast Outcomes", `${outcomes.evaluated || 0}/${outcomes.total || 0} evaluated`, [
+        ["Pending", outcomes.pending || 0],
+        ["Matured", outcomes.matured_pending || 0],
+        ["Last evaluated", outcomes.last_evaluated_at || "never"],
+      ])}
+    </div>
+    <div class="thesis-section thesis-run-section">
+      <h3>Recent Runs</h3>
+      ${renderRecentRuns(runs)}
+    </div>
+  `;
+}
+
+function renderOpsCard(title, status, rows) {
+  return `
+    <div class="thesis-forecast-card">
+      <h4>${safe(title)}</h4>
+      <strong class="${String(status).includes("disabled") ? "score-mid" : "score-good"}">${safe(status)}</strong>
+      <div class="thesis-ops-list">
+        ${rows.map(([label, value]) => `<div><span>${safe(label)}</span><em>${safe(value)}</em></div>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderRecentRuns(runs) {
+  if (!runs.length) return `<p class="thesis-muted">No thesis runs recorded yet.</p>`;
+  return `
+    <div class="thesis-run-table">
+      ${runs.map(run => `
+        <div class="thesis-run-row">
+          <strong class="${run.status === "completed" ? "score-good" : run.status === "failed" ? "score-bad" : "score-mid"}">${safe(run.status)}</strong>
+          <span>${safe((run.tickers || []).join(", ") || "-")}</span>
+          <em>${safe(run.started_at ? new Date(run.started_at).toLocaleString() : "-")}</em>
+          <small>${(run.completed || []).length} ok / ${(run.failed || []).length} failed</small>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function triggerThesisEvaluation() {
+  const btn = document.getElementById("btn-thesis-evaluate");
+  if (btn) btn.disabled = true;
+  setThesisStatus("Starting forecast outcome evaluation...");
+  try {
+    const res = await authFetch(`${API}/v1/evaluate`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not start evaluation");
+    setThesisStatus(data.message || "Evaluation job started.");
+    await loadThesisOperations(true);
+  } catch (err) {
+    setThesisStatus(err.message || "Could not start evaluation.", true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function generateThesis() {
   const ticker = thesisTicker();
   if (!ticker) {
@@ -2707,6 +2809,8 @@ function renderQualityAndBacktest(thesis, quality, backtest) {
 document.getElementById("btn-thesis-generate")?.addEventListener("click", generateThesis);
 document.getElementById("btn-thesis-refresh")?.addEventListener("click", () => loadLatestThesis());
 document.getElementById("btn-thesis-health")?.addEventListener("click", () => loadThesisHealth(true));
+document.getElementById("btn-thesis-ops")?.addEventListener("click", () => loadThesisOperations(true));
+document.getElementById("btn-thesis-evaluate")?.addEventListener("click", triggerThesisEvaluation);
 document.getElementById("thesis-ticker")?.addEventListener("keydown", e => {
   if (e.key === "Enter") loadLatestThesis();
 });

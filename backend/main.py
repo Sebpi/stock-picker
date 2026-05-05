@@ -144,6 +144,8 @@ PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192"
 THESIS_AUTO_RUN_ENABLED = os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 THESIS_AUTO_RUN_INTERVAL_MINUTES = max(15, int(os.getenv("THESIS_AUTO_RUN_INTERVAL_MINUTES", "1440")))
 THESIS_AUTO_RUN_MAX_TICKERS = max(1, int(os.getenv("THESIS_AUTO_RUN_MAX_TICKERS", "8")))
+EVALUATION_AUTO_RUN_ENABLED = os.getenv("EVALUATION_AUTO_RUN_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+EVALUATION_AUTO_RUN_INTERVAL_MINUTES = max(60, int(os.getenv("EVALUATION_AUTO_RUN_INTERVAL_MINUTES", "1440")))
 
 def load_users() -> dict:
     if USERS_FILE.exists():
@@ -496,7 +498,16 @@ thesis_scheduler_status = {
     "runs_started": 0,
     "last_error": None,
 }
+evaluation_scheduler_status = {
+    "enabled": EVALUATION_AUTO_RUN_ENABLED,
+    "last_run": None,
+    "active": False,
+    "runs_started": 0,
+    "last_evaluated_count": None,
+    "last_error": None,
+}
 _auto_thesis_running = False
+_auto_evaluation_running = False
 
 # yfinance info cache — 5 minute TTL to avoid redundant network calls
 _info_cache: dict[str, tuple[dict, datetime]] = {}
@@ -1724,6 +1735,42 @@ async def auto_thesis():
 
 
 # ── Auth & trade request models ───────────────────────────────────────────────
+async def run_evaluation_job(source: str = "manual") -> int:
+    """Evaluate matured forecast outcomes and update operational status."""
+    global _auto_evaluation_running
+    if _auto_evaluation_running:
+        logger.info("[Evaluation] Skipped %s evaluation; previous job still active.", source)
+        return 0
+
+    _auto_evaluation_running = True
+    evaluation_scheduler_status["active"] = True
+    evaluation_scheduler_status["runs_started"] += 1
+    evaluation_scheduler_status["last_run"] = datetime.now(timezone.utc).isoformat()
+    evaluation_scheduler_status["last_error"] = None
+    try:
+        import evaluation
+
+        loop = asyncio.get_event_loop()
+        count = await loop.run_in_executor(None, evaluation.evaluate_pending_outcomes)
+        evaluation_scheduler_status["last_evaluated_count"] = count
+        logger.info("[Evaluation] %s job evaluated %d outcomes", source, count)
+        return count
+    except Exception as exc:
+        evaluation_scheduler_status["last_error"] = str(exc)
+        logger.exception("[Evaluation] %s job failed: %s", source, exc)
+        raise
+    finally:
+        evaluation_scheduler_status["active"] = False
+        _auto_evaluation_running = False
+
+
+async def auto_evaluate():
+    """Run forecast-outcome evaluation on a production schedule."""
+    if not EVALUATION_AUTO_RUN_ENABLED:
+        return
+    await run_evaluation_job("scheduler")
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -1783,11 +1830,22 @@ async def startup():
             max_instances=1,
             coalesce=True,
         )
+    if EVALUATION_AUTO_RUN_ENABLED:
+        scheduler.add_job(
+            auto_evaluate,
+            "interval",
+            minutes=EVALUATION_AUTO_RUN_INTERVAL_MINUTES,
+            id="forecast_evaluation",
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
     if THESIS_AUTO_RUN_ENABLED:
         print(f"[Thesis] Multi-agent thesis scheduled every {THESIS_AUTO_RUN_INTERVAL_MINUTES} minutes.")
+    if EVALUATION_AUTO_RUN_ENABLED:
+        print(f"[Evaluation] Forecast evaluation scheduled every {EVALUATION_AUTO_RUN_INTERVAL_MINUTES} minutes.")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -5508,6 +5566,14 @@ async def v1_create_run(
     return {"run_id": run_id, "status": "running", "tickers": tickers}
 
 
+@app.get("/v1/runs")
+def v1_list_runs(limit: int = 20, current_user: str = Depends(get_current_user)):
+    """Return recent thesis generation runs."""
+    import db as _db
+
+    return {"runs": _db.list_thesis_runs(limit)}
+
+
 @app.get("/v1/runs/{run_id}")
 def v1_get_run(run_id: str, current_user: str = Depends(get_current_user)):
     """Poll the status of a thesis generation run."""
@@ -5548,6 +5614,18 @@ def v1_agents_health(current_user: str = Depends(get_current_user)):
     return observability.agent_health_report()
 
 
+@app.get("/v1/operations/status")
+def v1_operations_status(current_user: str = Depends(get_current_user)):
+    """Return a production operations snapshot for the multi-agent pipeline."""
+    import observability
+
+    return observability.operations_status(
+        thesis_scheduler=thesis_scheduler_status,
+        evaluation_scheduler=evaluation_scheduler_status,
+        recent_run_limit=10,
+    )
+
+
 @app.get("/v1/thesis/{ticker}/quality")
 def v1_thesis_quality(ticker: str, current_user: str = Depends(get_current_user)):
     """Return quality flag summary for the latest thesis of a ticker."""
@@ -5569,20 +5647,33 @@ def v1_backtest(ticker: str, current_user: str = Depends(get_current_user)):
     }
 
 
+@app.get("/v1/evaluate/status")
+def v1_evaluate_status(
+    ticker: str | None = None,
+    current_user: str = Depends(get_current_user),
+):
+    """Return forecast outcome evaluation status."""
+    import db as _db
+
+    symbol = _validate_ticker(ticker) if ticker else None
+    return {
+        "scheduler": evaluation_scheduler_status,
+        "outcomes": _db.get_forecast_outcome_status(symbol),
+    }
+
+
 @app.post("/v1/evaluate")
 async def v1_evaluate(
     background_tasks: BackgroundTasks,
+    sync: bool = False,
     current_user: str = Depends(get_current_user),
 ):
     """Trigger evaluation of matured forecast outcomes."""
-    import evaluation
+    if sync:
+        n = await run_evaluation_job("manual_sync")
+        return {"ok": True, "evaluated": n, "scheduler": evaluation_scheduler_status}
 
-    async def _eval():
-        loop = asyncio.get_event_loop()
-        n = await loop.run_in_executor(None, evaluation.evaluate_pending_outcomes)
-        logger.info("[v1/evaluate] evaluated %d outcomes", n)
-
-    background_tasks.add_task(_eval)
+    background_tasks.add_task(run_evaluation_job, "manual")
     return {"ok": True, "message": "Evaluation job started in background"}
 
 
