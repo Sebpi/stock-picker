@@ -1329,6 +1329,7 @@ let predictionsRenderedCache = null;
 const PREDICTIONS_RENDER_VERSION = 2;
 let _predSortCol = null;
 let _predSortDir = 1; // 1 = asc, -1 = desc
+let _predPeriodFilter = "all";
 
 function _predSortValue(p, col) {
   if (col === "score") return p.score != null ? p.score : (p.predicted_pct != null ? Math.max(0, Math.min(100, Math.round(50 + p.predicted_pct * 14))) : -Infinity);
@@ -1339,6 +1340,26 @@ function _predSortValue(p, col) {
   const v = p[col];
   if (v == null) return _predSortDir === 1 ? Infinity : -Infinity;
   return typeof v === "string" ? v.toLowerCase() : Number(v);
+}
+
+function _applyPredPeriodFilter(preds) {
+  if (_predPeriodFilter === "all") return preds;
+  const today = new Date();
+  const todayIso = today.toISOString().slice(0, 10);
+  const startOfWeek = new Date(today);
+  startOfWeek.setHours(0, 0, 0, 0);
+  const dow = startOfWeek.getDay();
+  startOfWeek.setDate(startOfWeek.getDate() + (dow === 0 ? -6 : 1 - dow));
+  const weekIso = startOfWeek.toISOString().slice(0, 10);
+  const monthIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
+  return preds.filter(p => {
+    const d = String(p.date || "");
+    if (_predPeriodFilter === "today")  return d === todayIso;
+    if (_predPeriodFilter === "week")   return d >= weekIso && d <= todayIso;
+    if (_predPeriodFilter === "month")  return d >= monthIso && d <= todayIso;
+    if (_predPeriodFilter === "ytd")    return d < monthIso;
+    return true;
+  });
 }
 
 function _applyPredSort(preds) {
@@ -1360,22 +1381,20 @@ function _updatePredSortHeaders() {
   });
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  document.querySelectorAll("#pred-thead-row th[data-sort]").forEach(th => {
-    th.style.cursor = "pointer";
-    th.title = `Sort by ${th.textContent.trim()}`;
-    th.addEventListener("click", () => {
-      const col = th.dataset.sort;
-      if (_predSortCol === col) {
-        _predSortDir *= -1;
-      } else {
-        _predSortCol = col;
-        _predSortDir = -1; // default: highest first
-      }
-      if (predictionsSnapshotCache) {
-        loadPredictions(false);
-      }
-    });
+document.querySelectorAll("#pred-thead-row th[data-sort]").forEach(th => {
+  th.style.cursor = "pointer";
+  th.title = `Sort by ${th.textContent.trim()}`;
+  th.addEventListener("click", () => {
+    const col = th.dataset.sort;
+    if (_predSortCol === col) {
+      _predSortDir *= -1;
+    } else {
+      _predSortCol = col;
+      _predSortDir = -1; // default: highest first
+    }
+    if (predictionsSnapshotCache) {
+      loadPredictions(false);
+    }
   });
 });
 
@@ -1627,7 +1646,7 @@ function renderPredictionsTable(preds) {
   const body = document.getElementById("pred-body");
   predictionReasoningMap = {};
   _updatePredSortHeaders();
-  const sorted = _applyPredSort(preds);
+  const sorted = _applyPredSort(_predSortCol ? _applyPredPeriodFilter(preds) : preds);
 
   const today = new Date();
   const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
@@ -1793,12 +1812,15 @@ function renderPredictionsTable(preds) {
 
   Array.from(body.querySelectorAll("tr"))
     .filter(row => !row.classList.contains("pred-group-row"))
-    .forEach((row, index) => {
-      const p = preds[index];
-      if (!p) return;
-      const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
+    .forEach(row => {
       const cell = row.lastElementChild;
       if (!cell) return;
+      // Derive rowKey from the ticker and date cells (cols 1 and 0)
+      const cells = row.querySelectorAll("td");
+      if (cells.length < 2) return;
+      const date = cells[0]?.textContent?.trim() || "unknown";
+      const ticker = cells[1]?.textContent?.trim() || "unknown";
+      const rowKey = `${date}__${ticker}`;
       cell.className = "pred-reasoning-col";
       cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`;
     });
@@ -1829,7 +1851,14 @@ document.querySelectorAll(".pred-period-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".pred-period-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
-    applyPredictionPeriodFilter(btn.dataset.period);
+    _predPeriodFilter = btn.dataset.period || "all";
+    if (_predSortCol) {
+      // Sort is active — re-render with combined filter+sort
+      if (predictionsSnapshotCache) loadPredictions(false);
+    } else {
+      // No sort — use the fast DOM-hide approach on existing group rows
+      applyPredictionPeriodFilter(_predPeriodFilter);
+    }
   });
 });
 
