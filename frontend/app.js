@@ -1173,45 +1173,24 @@ async function openDetail(ticker) {
     document.getElementById("detail-desc").textContent = d.description || "";
 
     // Chart
+    destroyChart();
     const labels = d.history.map(h => h.date);
     const prices = d.history.map(h => h.close);
 
-    const ctx = document.getElementById("price-chart").getContext("2d");
-    priceChart = new Chart(ctx, {
-      type: "line",
-      data: {
-        labels,
-        datasets: [{
-          label: d.ticker,
-          data: prices,
-          borderColor: "#4f8ef7",
-          backgroundColor: "rgba(79,142,247,0.08)",
-          borderWidth: 2,
-          pointRadius: 0,
-          fill: true,
-          tension: 0.3,
-        }]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: {
-            ticks: {
-              color: "#7b82a0",
-              maxTicksLimit: 6,
-              maxRotation: 0,
-            },
-            grid: { color: "#2e3350" },
-          },
-          y: {
-            ticks: { color: "#7b82a0", callback: v => "$" + v },
-            grid: { color: "#2e3350" },
-          }
-        }
-      }
+    priceChart = new ApexCharts(document.getElementById("price-chart"), {
+      chart: { type: "area", height: 220, background: "transparent", toolbar: { show: false }, animations: { enabled: true, speed: 400 } },
+      theme: { mode: "dark" },
+      series: [{ name: d.ticker, data: prices }],
+      xaxis: { categories: labels, labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false } },
+      yaxis: { labels: { formatter: v => "$" + v.toFixed(2), style: { colors: "#94a3b8" } } },
+      stroke: { curve: "smooth", width: 2 },
+      fill: { type: "gradient", gradient: { shadeIntensity: 1, opacityFrom: 0.4, opacityTo: 0.0 } },
+      colors: ["#22c55e"],
+      grid: { borderColor: "#334155", strokeDashArray: 4 },
+      tooltip: { theme: "dark", x: { format: "dd MMM yy" } },
+      dataLabels: { enabled: false },
     });
+    priceChart.render();
 
     const wlBtn = document.getElementById("detail-watchlist-btn");
     const inWatchlist = watchlist.some(s => s.ticker === ticker.toUpperCase());
@@ -2118,7 +2097,7 @@ function setSimChartSize(size = "default") {
     btn.classList.toggle("active", key === size);
   });
 
-  if (simChart) simChart.resize();
+  // ApexCharts handles its own resizing
 }
 
 document.getElementById("sim-size-compact")?.addEventListener("click", () => setSimChartSize("compact"));
@@ -2186,46 +2165,27 @@ document.getElementById("btn-simulate")?.addEventListener("click", async () => {
 
     if (simChart) { simChart.destroy(); simChart = null; }
     setSimChartSize("default");
-    const simCanvas = document.getElementById("sim-chart");
-    if (!simCanvas) { status.textContent = "Chart canvas not found — please open the Backtest tab and try again."; return; }
-    const ctx = simCanvas.getContext("2d");
-    simChart = new Chart(ctx, {
-      type: "line",
-      data: {
-        labels: projDays,
-        datasets: [
-          { label: "Optimistic (90th)", data: p90Path, borderColor: "rgba(34,197,94,0.7)", backgroundColor: "rgba(34,197,94,0.05)", borderWidth: 1.5, pointRadius: 0, fill: false },
-          { label: "Sample median", data: p50Path, borderColor: "rgba(79,142,247,0.9)", backgroundColor: "rgba(79,142,247,0.08)", borderWidth: 2, pointRadius: 0, fill: false },
-          { label: "Pessimistic (10th)", data: p10Path, borderColor: "rgba(239,68,68,0.7)", backgroundColor: "rgba(239,68,68,0.05)", borderWidth: 1.5, pointRadius: 0, fill: false },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { labels: { color: "#e8eaf0" } },
-          tooltip: {
-            callbacks: { label: ctx => "£" + Math.round(ctx.raw).toLocaleString("en-GB") },
-          },
-          annotation: {
-            annotations: {
-              target: {
-                type: "line", yMin: s.target, yMax: s.target,
-                borderColor: "rgba(250,204,21,0.8)", borderWidth: 1.5, borderDash: [6, 4],
-                label: { content: `Target £${s.target.toLocaleString("en-GB")}`, enabled: true, color: "#fbbf24", backgroundColor: "transparent" },
-              },
-            },
-          },
-        },
-        scales: {
-          x: { ticks: { color: "#7b82a0", maxTicksLimit: 12 }, grid: { color: "#2e3350" } },
-          y: {
-            ticks: { color: "#7b82a0", callback: v => "£" + Math.round(v / 1000) + "k" },
-            grid: { color: "#2e3350" },
-          },
-        },
-      },
+    const simEl = document.getElementById("sim-chart");
+    if (!simEl) { status.textContent = "Chart element not found — please open the Backtest tab and try again."; return; }
+    simChart = new ApexCharts(simEl, {
+      chart: { type: "line", height: 400, background: "transparent", toolbar: { show: true }, animations: { enabled: false } },
+      theme: { mode: "dark" },
+      series: [
+        { name: "Optimistic (90th)", data: p90Path },
+        { name: "Median (50th)", data: p50Path },
+        { name: "Cautious (10th)", data: p10Path },
+      ],
+      xaxis: { categories: projDays, labels: { show: false } },
+      yaxis: { labels: { formatter: v => "£" + Math.round(v).toLocaleString(), style: { colors: "#94a3b8" } } },
+      stroke: { curve: "smooth", width: [2, 2.5, 2] },
+      colors: ["#22c55e", "#3b82f6", "#ef4444"],
+      fill: { opacity: 1 },
+      grid: { borderColor: "#334155", strokeDashArray: 4 },
+      tooltip: { theme: "dark", y: { formatter: v => "£" + Math.round(v).toLocaleString() } },
+      dataLabels: { enabled: false },
+      legend: { labels: { colors: "#94a3b8" } },
     });
+    simChart.render();
 
     results.classList.remove("hidden");
   } catch (err) {
@@ -2947,12 +2907,32 @@ async function loadLatestThesis(tickerOverride = "") {
     const quality = await qualityRes.json().catch(() => ({}));
     const backtest = await backtestRes.json().catch(() => ({}));
     renderThesis(thesis, quality, backtest);
+    renderThesisScoreChart(thesis);
     setThesisStatus(`Latest thesis loaded for ${ticker}.`);
     populateThesisHistory(ticker);
   } catch (err) {
     document.getElementById("thesis-output").innerHTML = `<div class="thesis-empty">${safe(err.message || "No thesis available yet.")}</div>`;
     setThesisStatus(err.message || "No thesis available yet.", true);
   }
+}
+
+function renderThesisScoreChart(thesis) {
+  const el = document.getElementById("thesis-score-chart");
+  if (!el || !thesis) return;
+  el.style.display = "block";
+  if (window._thesisScoreChart) { window._thesisScoreChart.destroy(); }
+  const agents = (thesis.agent_signals || []).filter(s => s.score != null);
+  if (!agents.length) return;
+  window._thesisScoreChart = new ApexCharts(el, {
+    chart: { type: "radialBar", height: 300, background: "transparent" },
+    theme: { mode: "dark" },
+    series: agents.map(a => Math.round(a.score)),
+    labels: agents.map(a => (a.signal_type || a.agent_id || "").replace(/_/g, " ").replace("agent.", "")),
+    plotOptions: { radialBar: { dataLabels: { name: { fontSize: "11px" }, value: { fontSize: "13px" } }, hollow: { size: "20%" } } },
+    colors: ["#3b82f6","#22c55e","#f59e0b","#8b5cf6","#ef4444","#06b6d4","#f97316","#84cc16"],
+    legend: { show: true, position: "bottom", labels: { colors: "#94a3b8" } },
+  });
+  window._thesisScoreChart.render();
 }
 
 function renderThesis(thesis, quality = {}, backtest = {}) {

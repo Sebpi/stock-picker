@@ -1,17 +1,20 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>StockLens - AI-Powered Stock Analysis</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
-  <link rel="stylesheet" href="/static/style.css?v=6" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class', theme: { extend: {} } }</script>
+  <link rel="stylesheet" href="/static/style.css?v=8" />
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
 <!-- Login overlay -->
 <div id="login-overlay">
-  <div id="login-box">
+  <div id="login-box" class="card bg-base-200 shadow-2xl w-80">
     <div class="logo-container">
       <img src="/static/logo.svg" alt="Stock Picker Logo" class="app-logo">
     </div>
@@ -45,30 +48,30 @@
   </div>
 </div>
 
-<body>
-  <header>
+<body data-theme="dark">
+  <header class="navbar bg-base-300 shadow-md px-4 gap-2">
     <div class="logo-container">
       <img src="/static/logo.svg" alt="Stock Picker Logo" class="app-logo">
     </div>
     <nav>
-      <button class="tab-btn active" data-tab="screener">Screener</button>
-      <button class="tab-btn" data-tab="watchlist">Watchlist</button>
-      <button class="tab-btn" data-tab="ai">AI Advisor</button>
-      <button class="tab-btn" data-tab="predictions">Predictions</button>
-      <button class="tab-btn" data-tab="thesis">Thesis</button>
-      <button class="tab-btn" data-tab="backtest">Backtest</button>
-      <button class="tab-btn" data-tab="recommendations">Recommendations</button>
-      <button class="tab-btn" data-tab="alerts">Alerts</button>
-      <button class="tab-btn" data-tab="portfolio">Portfolio</button>
-      <button class="tab-btn" data-tab="paper">Paper P&amp;L</button>
-      <button class="tab-btn" data-tab="sentiment">Sentiment</button>
+      <button class="tab-btn btn btn-ghost btn-sm btn-active" data-tab="screener">Screener</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="watchlist">Watchlist</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="ai">AI Advisor</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="predictions">Predictions</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="thesis">Thesis</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="backtest">Backtest</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="recommendations">Recommendations</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="alerts">Alerts</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="portfolio">Portfolio</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="paper">Paper P&amp;L</button>
+      <button class="tab-btn btn btn-ghost btn-sm" data-tab="sentiment">Sentiment</button>
     </nav>
-    <button id="btn-logout" class="btn-logout" title="Sign out">⏻ Logout</button>
+    <button id="btn-logout" class="btn btn-ghost btn-sm btn-logout" title="Sign out">⏻ Logout</button>
   </header>
 
   <!-- Loading overlay -->
   <div id="loader-overlay">
-    <div class="loader-box">
+    <div class="loader-box card bg-base-300">
       <div class="candles">
         <div class="candle" style="--h:55%;--color:#22c55e;--delay:0s"><div class="wick"></div><div class="body"></div></div>
         <div class="candle" style="--h:75%;--color:#ef4444;--delay:0.15s"><div class="wick"></div><div class="body"></div></div>
@@ -88,7 +91,7 @@
       <div class="filters">
         <div class="filter-group">
           <label>Index</label>
-          <select id="filter-index">
+          <select id="filter-index" class="select select-bordered select-sm">
             <option value="">All</option>
             <option value="sp500">S&amp;P 500</option>
             <option value="nasdaq100">NASDAQ 100</option>
@@ -97,7 +100,7 @@
         </div>
         <div class="filter-group">
           <label>Sector</label>
-          <select id="filter-sector">
+          <select id="filter-sector" class="select select-bordered select-sm">
             <option value="">All Sectors</option>
             <option>Technology</option>
             <option>Healthcare</option>
@@ -168,7 +171,7 @@
             <input type="number" id="filter-rev-growth" placeholder="e.g. 10" step="1" />
           </div>
         </div>
-        <button id="btn-screen" class="btn-primary">Run Screen</button>
+        <button id="btn-screen" class="btn btn-primary btn-sm">Run Screen</button>
       </div>
 
       <div class="screener-search-wrap">
@@ -177,8 +180,8 @@
 
       <div id="screen-status" class="status-msg"></div>
 
-      <div class="table-wrap">
-        <table id="screen-table">
+      <div class="table-wrap overflow-x-auto rounded-xl">
+        <table id="screen-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr>
               <th>Ticker</th>
@@ -204,11 +207,11 @@
     <section id="tab-watchlist" class="tab">
       <div class="tab-header">
         <h2>My Watchlist</h2>
-        <button id="btn-refresh-watchlist" class="btn-secondary">↻ Refresh</button>
+        <button id="btn-refresh-watchlist" class="btn btn-ghost btn-sm">↻ Refresh</button>
       </div>
       <div id="watchlist-status" class="status-msg"></div>
-      <div class="table-wrap">
-        <table id="watchlist-table">
+      <div class="table-wrap overflow-x-auto rounded-xl">
+        <table id="watchlist-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr>
               <th>Ticker</th>
@@ -229,13 +232,13 @@
       <div class="tab-header">
         <h2>Sentiment Scanner</h2>
         <div class="sentiment-actions">
-          <button id="btn-sentiment-list" class="btn-secondary">List Watchlist</button>
-          <button id="btn-sentiment-scan" class="btn-primary">Scan Watchlist</button>
+          <button id="btn-sentiment-list" class="btn btn-ghost btn-sm">List Watchlist</button>
+          <button id="btn-sentiment-scan" class="btn btn-primary btn-sm">Scan Watchlist</button>
         </div>
       </div>
       <div class="sentiment-input-row">
         <input id="sentiment-ticker" type="text" placeholder="Ticker (e.g. IONQ)" />
-        <button id="btn-sentiment-ticker" class="btn-secondary">Scan Ticker</button>
+        <button id="btn-sentiment-ticker" class="btn btn-ghost btn-sm">Scan Ticker</button>
       </div>
       <div id="sentiment-status" class="status-msg"></div>
       <div id="sentiment-result" class="sentiment-result"><pre id="sentiment-output"></pre></div>
@@ -251,7 +254,7 @@
           <h3>Stock Research</h3>
           <p class="ai-subtitle">Enter one or more stock tickers for live financial and technical analysis only.</p>
           <input type="text" id="research-query" placeholder="e.g. NVDA or NVDA AMD TSM" />
-          <button id="btn-research" class="btn-primary">Research Stock</button>
+          <button id="btn-research" class="btn btn-primary btn-sm">Research Stock</button>
           <div id="research-status" class="status-msg"></div>
           <div id="research-loader" class="research-loader hidden">
             <div class="spinner"></div>
@@ -266,7 +269,7 @@
           <h3>General Investment Questions</h3>
           <p class="ai-subtitle">Describe what you're looking for and Claude will suggest stocks with analysis.</p>
           <textarea id="ai-query" rows="4" placeholder="e.g. I'm looking for dividend-paying tech stocks with stable earnings and moderate growth..."></textarea>
-          <button id="btn-ask" class="btn-primary">Ask Claude</button>
+          <button id="btn-ask" class="btn btn-primary btn-sm">Ask Claude</button>
           <div id="ai-status" class="status-msg"></div>
           <div id="ai-response" class="ai-response"></div>
         </div>
@@ -282,9 +285,9 @@
           <p class="pred-subtitle">Claude analyses macro trends, news (Yahoo Finance, MarketWatch) and stock fundamentals to predict next-day moves. Learns from past accuracy.</p>
         </div>
         <div class="pred-actions">
-          <button id="btn-generate" class="btn-primary">Generate Today's Predictions</button>
-          <button id="btn-refresh-preds" class="btn-secondary">↻ Refresh Actuals</button>
-          <button id="btn-backfill-factors" class="btn-secondary" title="Retry factor score fetch for today's predictions with missing factors">⟳ Backfill Factors</button>
+          <button id="btn-generate" class="btn btn-primary btn-sm">Generate Today's Predictions</button>
+          <button id="btn-refresh-preds" class="btn btn-ghost btn-sm">↻ Refresh Actuals</button>
+          <button id="btn-backfill-factors" class="btn btn-ghost btn-sm" title="Retry factor score fetch for today's predictions with missing factors">⟳ Backfill Factors</button>
         </div>
       </div>
 
@@ -330,8 +333,8 @@
         </div>
       </details>
 
-      <div class="table-wrap">
-        <table id="pred-table">
+      <div class="table-wrap overflow-x-auto rounded-xl">
+        <table id="pred-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr id="pred-thead-row">
               <th data-sort="date">Date</th>
@@ -380,22 +383,22 @@
           <p class="pred-subtitle">Structured 3/6/12 month thesis built from fundamentals, valuation, growth revisions, macro, sentiment, technical, industry and portfolio-risk agents.</p>
         </div>
         <div class="pred-actions">
-          <button id="btn-thesis-ops" class="btn-secondary">Operations</button>
-          <button id="btn-thesis-evaluate" class="btn-secondary">Evaluate Outcomes</button>
-          <button id="btn-thesis-health" class="btn-secondary">Agent Health</button>
-          <button id="btn-thesis-refresh" class="btn-secondary">Refresh Latest</button>
+          <button id="btn-thesis-ops" class="btn btn-ghost btn-sm">Operations</button>
+          <button id="btn-thesis-evaluate" class="btn btn-ghost btn-sm">Evaluate Outcomes</button>
+          <button id="btn-thesis-health" class="btn btn-ghost btn-sm">Agent Health</button>
+          <button id="btn-thesis-refresh" class="btn btn-ghost btn-sm">Refresh Latest</button>
         </div>
       </div>
 
       <div class="thesis-controls">
         <input id="thesis-ticker" type="text" placeholder="Ticker (e.g. MSFT)" autocomplete="off" />
         <label class="thesis-check"><input id="thesis-run-fresh" type="checkbox" /> Run fresh agents</label>
-        <button id="btn-thesis-generate" class="btn-primary">Generate Thesis</button>
+        <button id="btn-thesis-generate" class="btn btn-primary btn-sm">Generate Thesis</button>
       </div>
 
       <div class="thesis-controls" style="margin-top:6px">
         <input id="thesis-compare-input" type="text" placeholder="Compare: MSFT,AAPL,NVDA" autocomplete="off" style="flex:1" />
-        <button id="btn-thesis-compare" class="btn-primary" style="white-space:nowrap">Compare</button>
+        <button id="btn-thesis-compare" class="btn btn-primary btn-sm" style="white-space:nowrap">Compare</button>
       </div>
       <div id="thesis-compare-output"></div>
 
@@ -403,6 +406,7 @@
 
       <div id="thesis-ops" class="thesis-health hidden"></div>
       <div id="thesis-health" class="thesis-health hidden"></div>
+      <div id="thesis-score-chart" style="display:none"></div>
       <div id="thesis-output" class="thesis-output">
         <div class="thesis-empty">Enter a ticker or open Agent Health to inspect the multi-agent pipeline.</div>
       </div>
@@ -416,7 +420,7 @@
           <p class="pred-subtitle">Replays the sentiment scoring model against 4 weeks of historical data to measure directional accuracy. Uses VIX, S&P momentum, beta, and fundamentals (news excluded — historical headlines unavailable).</p>
         </div>
         <div class="pred-actions">
-          <button id="btn-backtest" class="btn-primary">▶ Run Backtest</button>
+          <button id="btn-backtest" class="btn btn-primary btn-sm">▶ Run Backtest</button>
         </div>
       </div>
       <!-- Interpretation guide -->
@@ -464,8 +468,8 @@
       <div id="backtest-status" class="status-msg"></div>
       <div id="backtest-summary" class="backtest-summary hidden"></div>
       <div id="backtest-by-ticker" class="backtest-by-ticker hidden"></div>
-      <div id="backtest-table-wrap" class="table-wrap hidden">
-        <table id="backtest-table">
+      <div id="backtest-table-wrap" class="table-wrap overflow-x-auto rounded-xl hidden">
+        <table id="backtest-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr>
               <th>Date</th><th>Ticker</th><th>VIX</th><th>S&P 5d</th>
@@ -484,7 +488,7 @@
             <h3>P&L Simulator</h3>
             <p class="pred-subtitle">Replays every buy signal through the position sizing model using actual returns, then runs 1,000 Monte Carlo simulations to project 12 months forward.</p>
           </div>
-          <button id="btn-simulate" class="btn-primary">▶ Run Simulator</button>
+          <button id="btn-simulate" class="btn btn-primary btn-sm">▶ Run Simulator</button>
         </div>
         <div id="sim-status" class="status-msg"></div>
         <div id="sim-results" class="hidden">
@@ -510,7 +514,7 @@
             <button id="sim-size-large" class="btn-secondary sim-size-btn">Large</button>
           </div>
           <div id="sim-chart-wrap" class="sim-chart-wrap sim-chart-wrap-default">
-            <canvas id="sim-chart"></canvas>
+            <div id="sim-chart"></div>
           </div>
           <p class="sim-disclaimer">Monte Carlo uses observed win rate, avg win/loss magnitude, and avg trades/day from the 4-week backtest. Past performance does not guarantee future results.</p>
         </div>
@@ -525,7 +529,7 @@
           <p class="pred-subtitle">Buy/sell signals sized from your £100,000 float. Target: £200,000 in 12 months.</p>
         </div>
         <div class="pred-actions">
-          <button id="btn-load-recs" class="btn-primary">↻ Refresh</button>
+          <button id="btn-load-recs" class="btn btn-primary btn-sm">↻ Refresh</button>
         </div>
       </div>
 
@@ -558,8 +562,8 @@
       <!-- SELL recommendations -->
       <div id="rec-sells-wrap" class="hidden">
         <h3 class="rec-section-title rec-section-sell">⚠ Sell Signals</h3>
-        <div class="table-wrap">
-          <table>
+        <div class="table-wrap overflow-x-auto rounded-xl">
+          <table class="table table-zebra table-xs w-full">
             <thead>
               <tr>
                 <th>Ticker</th><th>Name</th><th>Trigger</th><th>Qty</th>
@@ -575,8 +579,8 @@
       <!-- BUY recommendations -->
       <div id="rec-buys-wrap" class="hidden">
         <h3 class="rec-section-title rec-section-buy">↑ Buy Signals</h3>
-        <div class="table-wrap">
-          <table>
+        <div class="table-wrap overflow-x-auto rounded-xl">
+          <table class="table table-zebra table-xs w-full">
             <thead>
               <tr>
                 <th>Rank</th><th>Ticker</th><th>Name</th><th>Confidence</th>
@@ -600,10 +604,10 @@
           <p class="alerts-subtitle">Alerts highlight stronger recommendation-driven BUY opportunities first, then owned-stock SELL signals. The focus is on higher-conviction, longer-horizon setups rather than daily swings.</p>
         </div>
         <div class="pred-actions">
-          <button id="btn-test-alert" class="btn-secondary">Send Preview Email</button>
-          <button id="btn-test-whatsapp" class="btn-secondary">Send Test WhatsApp</button>
-          <button id="btn-refresh-alerts" class="btn-secondary">↻ Refresh</button>
-          <button id="btn-clear-alerts" class="btn-secondary" style="color:var(--red);border-color:var(--red)">Clear History</button>
+          <button id="btn-test-alert" class="btn btn-ghost btn-sm">Send Preview Email</button>
+          <button id="btn-test-whatsapp" class="btn btn-ghost btn-sm">Send Test WhatsApp</button>
+          <button id="btn-refresh-alerts" class="btn btn-ghost btn-sm">↻ Refresh</button>
+          <button id="btn-clear-alerts" class="btn btn-error btn-sm">Clear History</button>
         </div>
       </div>
 
@@ -700,13 +704,13 @@
         </div>
         <div class="alert-settings-footer">
           <span id="alert-settings-msg" class="alert-settings-msg"></span>
-          <button id="btn-save-alert-settings" class="btn-secondary">Save Settings</button>
+          <button id="btn-save-alert-settings" class="btn btn-ghost btn-sm">Save Settings</button>
         </div>
       </div>
 
       <!-- Alert history table -->
-      <div class="table-wrap">
-        <table id="alerts-table">
+      <div class="table-wrap overflow-x-auto rounded-xl">
+        <table id="alerts-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr>
               <th>Date / Time</th>
@@ -764,12 +768,12 @@
           <p class="portfolio-subtitle">Track your purchased stocks, cost basis, and profit/loss.</p>
         </div>
         <div class="pred-actions">
-          <a id="btn-portfolio-template" href="/api/portfolio/template" download class="btn-secondary">↓ CSV Template</a>
-          <button id="btn-import-portfolio" class="btn-secondary">⇪ Import CSV</button>
+          <a id="btn-portfolio-template" href="/api/portfolio/template" download class="btn btn-ghost btn-sm">↓ CSV Template</a>
+          <button id="btn-import-portfolio" class="btn btn-ghost btn-sm">⇪ Import CSV</button>
           <input id="import-file-input" type="file" accept=".csv" style="display:none" />
-          <button id="btn-import-pdf" class="btn-secondary">⇪ Import Saxo PDF</button>
+          <button id="btn-import-pdf" class="btn btn-ghost btn-sm">⇪ Import Saxo PDF</button>
           <input id="import-pdf-input" type="file" accept=".pdf" style="display:none" />
-          <button id="btn-refresh-portfolio" class="btn-secondary">↻ Refresh</button>
+          <button id="btn-refresh-portfolio" class="btn btn-ghost btn-sm">↻ Refresh</button>
         </div>
       </div>
 
@@ -794,8 +798,8 @@
       <div id="portfolio-status" class="status-msg"></div>
 
       <!-- Positions table -->
-      <div class="table-wrap">
-        <table id="portfolio-table">
+      <div class="table-wrap overflow-x-auto rounded-xl">
+        <table id="portfolio-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr>
               <th>Ticker</th>
@@ -823,8 +827,8 @@
           <p id="paper-subtitle" class="paper-subtitle">Simulated trading from your configured start capital. Trades are added from Recommendations.</p>
         </div>
         <div class="pred-actions">
-          <button id="btn-refresh-paper" class="btn-secondary">↻ Refresh</button>
-          <button id="btn-reset-paper" class="btn-danger">✕ Reset</button>
+          <button id="btn-refresh-paper" class="btn btn-ghost btn-sm">↻ Refresh</button>
+          <button id="btn-reset-paper" class="btn btn-error btn-sm">✕ Reset</button>
         </div>
       </div>
 
@@ -864,8 +868,8 @@
 
       <!-- Open Positions -->
       <h3 class="paper-section-title" id="paper-positions-heading" style="display:none">Open Positions</h3>
-      <div class="table-wrap" id="paper-positions-wrap" style="display:none">
-        <table id="paper-positions-table">
+      <div class="table-wrap overflow-x-auto rounded-xl" id="paper-positions-wrap" style="display:none">
+        <table id="paper-positions-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr>
               <th>Ticker</th><th>Name</th><th>Shares</th><th>Avg Cost</th>
@@ -879,8 +883,8 @@
 
       <!-- Trade History -->
       <h3 class="paper-section-title" id="paper-history-heading" style="display:none">Trade History</h3>
-      <div class="table-wrap" id="paper-history-wrap" style="display:none">
-        <table id="paper-history-table">
+      <div class="table-wrap overflow-x-auto rounded-xl" id="paper-history-wrap" style="display:none">
+        <table id="paper-history-table" class="table table-zebra table-xs w-full">
           <thead>
             <tr>
               <th>Date</th><th>Type</th><th>Ticker</th><th>Shares</th><th>Price</th><th>Value</th><th>P&amp;L</th>
@@ -894,7 +898,7 @@
     </section>
 
   <!-- PDF Import Preview Modal -->
-  <div id="pdf-import-overlay" class="overlay hidden">
+  <div id="pdf-import-overlay" class="overlay hidden modal modal-open">
     <div class="modal-box" style="max-width:700px;width:95%">
       <h3 style="margin-bottom:0.5rem">Saxo PDF Import — Preview</h3>
       <p id="pdf-import-summary" style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem"></p>
@@ -906,15 +910,15 @@
       </div>
       <div id="pdf-import-errors" style="margin-top:0.75rem;font-size:0.82rem;color:var(--red)"></div>
       <div class="modal-btns" style="margin-top:1.25rem">
-        <button id="btn-pdf-confirm" class="btn-login-submit">Confirm Import</button>
-        <button id="btn-pdf-cancel" class="btn-secondary">Cancel</button>
+        <button id="btn-pdf-confirm" class="btn btn-primary btn-sm">Confirm Import</button>
+        <button id="btn-pdf-cancel" class="btn btn-ghost btn-sm">Cancel</button>
       </div>
     </div>
   </div>
 
   <!-- Stock Detail Panel -->
-  <div id="detail-overlay" class="overlay hidden">
-    <div class="detail-panel">
+  <div id="detail-overlay" class="overlay hidden modal modal-open">
+    <div class="detail-panel modal-box max-w-4xl">
       <button id="detail-close" class="close-btn">✕</button>
       <div id="detail-header">
         <div>
@@ -944,17 +948,17 @@
       </div>
 
       <div class="chart-container">
-        <canvas id="price-chart"></canvas>
+        <div id="price-chart"></div>
       </div>
 
       <p id="detail-desc" class="detail-desc"></p>
 
-      <button id="detail-watchlist-btn" class="btn-primary full-width"></button>
+      <button id="detail-watchlist-btn" class="btn btn-primary btn-sm full-width"></button>
     </div>
   </div>
 
   <!-- Change Password Modal -->
-  <div id="change-pw-modal" class="modal-overlay" style="display:none">
+  <div id="change-pw-modal" class="modal-overlay modal modal-open" style="display:none">
     <div class="modal-box">
       <h3>Change Password</h3>
       <div id="change-pw-error" class="login-error" style="display:none"></div>
@@ -966,13 +970,13 @@
       <label>Confirm New Password</label>
       <input id="cp-confirm" type="password" placeholder="Confirm new password" />
       <div class="modal-btns">
-        <button id="btn-cp-save" class="btn-login-submit">Update Password</button>
-        <button id="btn-cp-cancel" class="btn-secondary">Cancel</button>
+        <button id="btn-cp-save" class="btn btn-primary btn-sm">Update Password</button>
+        <button id="btn-cp-cancel" class="btn btn-ghost btn-sm">Cancel</button>
       </div>
     </div>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
 
   <!-- Footer -->
   <footer class="app-footer">
