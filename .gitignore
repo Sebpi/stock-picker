@@ -9,11 +9,16 @@ backend/audit.log
 backend/*.log
 backend/stockpicker.db*
 backend/test-results/
+backend/.tmp_*
+backend/paper_portfolio.json
+backend/sentiment_agent_state.json
+backend/alert_cooldown_state.json
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 .gstack/
-backend/.tmp_*
 node_modules/
 test-results/
 test-results-run/

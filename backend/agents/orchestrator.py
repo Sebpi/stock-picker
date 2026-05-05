@@ -250,6 +250,7 @@ class OrchestratorAgent:
         )
 
         # ---- Persist ----
+        prev = db.get_latest_thesis(ticker)  # fetch before store so we get the old one
         db.store_thesis(thesis)
         duration = _time.monotonic() - t0
         logger.info("[orchestrator] %s: thesis stored id=%s composite=%.1f dur=%.1fs",
@@ -258,6 +259,19 @@ class OrchestratorAgent:
                                  {"ticker": ticker, "status": "ok"})
         observability.log_metric("thesis_composite_score", composite, {"ticker": ticker})
         observability.log_metric("thesis_agents_usable", float(n_available), {"ticker": ticker})
+
+        try:
+            import thesis_alerts
+            thesis_alerts.check_and_alert(
+                ticker=ticker,
+                new_score=composite,
+                new_risk=risk.value,
+                prev_score=prev.composite_score if prev else None,
+                prev_risk=prev.risk_rating.value if prev else None,
+            )
+        except Exception as exc:
+            logger.debug("[orchestrator] thesis_alerts error: %s", exc)
+
         return thesis
 
     # ------------------------------------------------------------------

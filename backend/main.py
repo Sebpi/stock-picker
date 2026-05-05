@@ -153,35 +153,33 @@ def load_users() -> dict:
     return {}
 
 def _atomic_write(path: Path, data: str) -> None:
-    """Write data to a temp file then atomically replace the target."""
-    last_error = None
-    for attempt in range(4):
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp_")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-            os.replace(tmp, path)
-            return
-        except PermissionError as exc:
-            last_error = exc
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            time_mod.sleep(0.15 * (attempt + 1))
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+    """Write data atomically: write to system temp dir, then move into place.
 
-    if last_error is not None:
+    Using the system temp dir (instead of path.parent) avoids Windows
+    PermissionError/antivirus locking on the destination dir that left
+    orphaned .tmp_* files when os.replace failed after the fd was closed.
+    shutil.move falls back to copy+delete when src and dst are on different
+    drives, so this is safe even if TEMP is on a different volume.
+    """
+    import shutil
+    fd, tmp = tempfile.mkstemp(prefix="sp_atomic_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        for attempt in range(4):
+            try:
+                shutil.move(tmp, str(path))
+                return
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time_mod.sleep(0.15 * (attempt + 1))
+    except Exception:
         try:
-            path.write_text(data, encoding="utf-8")
-            return
-        except Exception:
-            raise last_error
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 def save_users(users: dict):
     _atomic_write(USERS_FILE, json.dumps(users, indent=2))
@@ -5611,6 +5609,25 @@ def v1_thesis_history(request: Request, ticker: str, limit: int = 10, current_us
     return {"ticker": symbol, "theses": _db.get_thesis_history(symbol, limit)}
 
 
+@app.get("/v1/thesis/{ticker}/export.pdf")
+@limiter.limit("10/minute")
+def v1_thesis_pdf(request: Request, ticker: str, current_user: str = Depends(get_current_user)):
+    """Render the latest InvestmentThesis as a downloadable PDF."""
+    import db as _db
+    import thesis_pdf as _pdf
+    from fastapi.responses import Response
+    symbol = _validate_ticker(ticker)
+    thesis = _db.get_latest_thesis(symbol)
+    if not thesis:
+        raise HTTPException(status_code=404, detail=f"No thesis found for {symbol}")
+    pdf_bytes = _pdf.build_pdf(thesis)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=thesis_{symbol}.pdf"},
+    )
+
+
 @app.get("/v1/thesis/id/{thesis_id}")
 @limiter.limit("30/minute")
 def v1_thesis_by_id(request: Request, thesis_id: str, current_user: str = Depends(get_current_user)):
@@ -5620,6 +5637,31 @@ def v1_thesis_by_id(request: Request, thesis_id: str, current_user: str = Depend
     if not thesis:
         raise HTTPException(status_code=404, detail="Thesis not found")
     return thesis.model_dump(mode="json")
+
+
+@app.get("/v1/thesis/compare")
+@limiter.limit("10/minute")
+def v1_thesis_compare(request: Request, tickers: str, current_user: str = Depends(get_current_user)):
+    """Compare latest theses for a comma-separated list of tickers (max 10)."""
+    import db as _db
+    symbols = [_validate_ticker(t.strip()) for t in tickers.split(",") if t.strip()][:10]
+    results = []
+    for sym in symbols:
+        thesis = _db.get_latest_thesis(sym)
+        if thesis:
+            results.append({
+                "ticker": sym,
+                "composite_score": thesis.composite_score,
+                "risk_rating": thesis.risk_rating.value if hasattr(thesis.risk_rating, "value") else thesis.risk_rating,
+                "evidence_quality": thesis.evidence_quality.value if hasattr(thesis.evidence_quality, "value") else thesis.evidence_quality,
+                "current_price": thesis.current_price,
+                "generated_at": thesis.generated_at.isoformat() if thesis.generated_at else None,
+                "forecast_3m": thesis.forecast.get("3m", {}).model_dump() if thesis.forecast and thesis.forecast.get("3m") else None,
+                "forecast_12m": thesis.forecast.get("12m", {}).model_dump() if thesis.forecast and thesis.forecast.get("12m") else None,
+            })
+        else:
+            results.append({"ticker": sym, "error": "No thesis found"})
+    return {"tickers": symbols, "comparison": results}
 
 
 @app.get("/v1/agents/health")

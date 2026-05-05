@@ -186,14 +186,21 @@ class MacroLiquidityAgent(BaseAgent):
             # ^IRX is the discount rate (annualised). Approximate 2yr equivalent.
             yield_curve = round(ten_year - two_year, 3)
 
-        # ---- FRED optional enrichment ----
+        # ---- FRED optional enrichment (replaces yfinance proxies when available) ----
         fred_data: dict[str, Any] = {}
         fred_key = os.getenv("FRED_API_KEY")
         if fred_key:
-            try:
-                fred_data = self._fetch_fred(fred_key)
-            except Exception as exc:
-                logger.debug("FRED fetch failed: %s", exc)
+            fred_data = self._timed_fetch(
+                lambda: self._fetch_fred(fred_key), "FRED/macro", timeout=12.0
+            ) or {}
+
+        # Prefer FRED yield data over yfinance proxies
+        if fred_data.get("ten_year_fred"):
+            ten_year = fred_data["ten_year_fred"]
+        if fred_data.get("two_year_fred"):
+            two_year = fred_data["two_year_fred"]
+        if ten_year is not None and two_year is not None:
+            yield_curve = round(ten_year - two_year, 3)
 
         fed_rate = fred_data.get("FEDFUNDS") or two_year
         inflation_yoy = fred_data.get("CPIAUCSL_YOY")
@@ -220,6 +227,8 @@ class MacroLiquidityAgent(BaseAgent):
         flags: list[QualityFlag] = []
         if ten_year is None and vix is None:
             flags.append(QualityFlag.MISSING_FIELD)
+        if fred_data.get("_stale"):
+            flags.append(QualityFlag.STALE_SOURCE)
 
         # ---- Direction ----
         if regime in (MacroRegime.RISK_ON.value, MacroRegime.LIQUIDITY_SUPPORTIVE.value):
@@ -279,35 +288,54 @@ class MacroLiquidityAgent(BaseAgent):
 
     @staticmethod
     def _fetch_fred(api_key: str) -> dict[str, Any]:
-        """Fetch key FRED series. Returns dict of series_id -> latest value."""
+        """Fetch key FRED series. Returns dict with values and a staleness flag."""
         import httpx
+        from datetime import datetime, timedelta, timezone
         BASE = "https://api.stlouisfed.org/fred/series/observations"
+        # series_id -> (result_key, n_obs_needed)
         series = {
-            "FEDFUNDS": "FEDFUNDS",
-            "CPIAUCSL": "CPIAUCSL",
-            "UNRATE": "UNRATE",
+            "DGS10":    ("ten_year_fred",  2),   # 10Y Treasury constant maturity
+            "DGS2":     ("two_year_fred",  2),   # 2Y Treasury constant maturity
+            "FEDFUNDS": ("FEDFUNDS",       2),
+            "CPIAUCSL": ("CPIAUCSL",      13),   # 13 for YoY
+            "UNRATE":   ("UNRATE",         2),
         }
         result: dict[str, Any] = {}
-        for name, sid in series.items():
+        stale = False
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
+
+        for sid, (key, limit) in series.items():
             try:
                 r = httpx.get(BASE, params={
                     "series_id": sid,
                     "api_key": api_key,
                     "file_type": "json",
                     "sort_order": "desc",
-                    "limit": 13,  # enough for YoY calc
+                    "limit": limit,
                 }, timeout=8)
                 obs = r.json().get("observations", [])
-                if obs:
-                    val = obs[0].get("value", ".")
-                    if val != ".":
-                        result[name] = float(val)
-                    # CPI YoY
-                    if sid == "CPIAUCSL" and len(obs) >= 13:
-                        curr = float(obs[0]["value"]) if obs[0]["value"] != "." else None
-                        prev = float(obs[12]["value"]) if obs[12]["value"] != "." else None
-                        if curr and prev and prev != 0:
-                            result["CPIAUCSL_YOY"] = round((curr - prev) / prev * 100, 2)
-            except Exception:
-                pass
+                if not obs:
+                    continue
+                val_str = obs[0].get("value", ".")
+                date_str = obs[0].get("date", "")
+                if val_str != ".":
+                    result[key] = float(val_str)
+                # Staleness: if the latest obs date is > 72h old flag it
+                if date_str:
+                    try:
+                        obs_dt = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+                        if obs_dt < cutoff:
+                            stale = True
+                    except Exception:
+                        pass
+                # CPI YoY
+                if sid == "CPIAUCSL" and len(obs) >= 13:
+                    curr = float(obs[0]["value"]) if obs[0]["value"] != "." else None
+                    prev = float(obs[12]["value"]) if obs[12]["value"] != "." else None
+                    if curr and prev and prev != 0:
+                        result["CPIAUCSL_YOY"] = round((curr - prev) / prev * 100, 2)
+            except Exception as exc:
+                logger.debug("FRED series %s failed: %s", sid, exc)
+
+        result["_stale"] = stale
         return result

@@ -2786,6 +2786,13 @@ function renderThesis(thesis, quality = {}, backtest = {}) {
     ${renderDecisionLog(thesis.decision_log)}
 
     ${renderThesisHistory(thesis.ticker)}
+
+    <div class="thesis-section" style="text-align:right;padding-top:4px">
+      <a href="/v1/thesis/${encodeURIComponent(thesis.ticker)}/export.pdf"
+         target="_blank"
+         class="btn btn-ghost"
+         style="text-decoration:none;font-size:12px">⬇ Export PDF</a>
+    </div>
   `;
 }
 
@@ -2969,11 +2976,48 @@ async function populateThesisHistory(ticker) {
   });
 }
 
+async function runThesisCompare() {
+  const raw = (document.getElementById("thesis-compare-input")?.value || "").trim();
+  const out = document.getElementById("thesis-compare-output");
+  if (!raw || !out) return;
+  out.innerHTML = `<p style="color:var(--muted);font-size:12px">Loading comparison…</p>`;
+  try {
+    const res = await authFetch(`${API}/v1/thesis/compare?tickers=${encodeURIComponent(raw)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Compare failed");
+    const rows = data.comparison.map(r => {
+      if (r.error) return `<tr><td>${safe(r.ticker)}</td><td colspan="5" style="color:var(--muted)">${safe(r.error)}</td></tr>`;
+      const sc = Number(r.composite_score || 0);
+      const cls = sc >= 65 ? "score-high" : sc >= 45 ? "score-mid" : "score-low";
+      const f3 = r.forecast_3m;
+      const f12 = r.forecast_12m;
+      const ret3 = f3 ? `${f3.base_return_pct >= 0 ? "+" : ""}${Number(f3.base_return_pct).toFixed(1)}%` : "-";
+      const ret12 = f12 ? `${f12.base_return_pct >= 0 ? "+" : ""}${Number(f12.base_return_pct).toFixed(1)}%` : "-";
+      return `<tr>
+        <td><strong>${safe(r.ticker)}</strong></td>
+        <td class="${cls}">${sc.toFixed(1)}</td>
+        <td>${safe(r.risk_rating || "-")}</td>
+        <td>${fmtUsd(r.current_price)}</td>
+        <td style="color:${f3 && f3.base_return_pct >= 0 ? "var(--green)" : "var(--red)"}">${ret3}</td>
+        <td style="color:${f12 && f12.base_return_pct >= 0 ? "var(--green)" : "var(--red)"}">${ret12}</td>
+      </tr>`;
+    }).join("");
+    out.innerHTML = `
+      <table class="thesis-metrics-table" style="margin-top:8px;width:100%">
+        <thead><tr><th>Ticker</th><th>Score</th><th>Risk</th><th>Price</th><th>3m Base</th><th>12m Base</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (err) {
+    out.innerHTML = `<p style="color:var(--red);font-size:12px">${safe(err.message)}</p>`;
+  }
+}
+
 document.getElementById("btn-thesis-generate")?.addEventListener("click", generateThesis);
 document.getElementById("btn-thesis-refresh")?.addEventListener("click", () => loadLatestThesis());
 document.getElementById("btn-thesis-health")?.addEventListener("click", () => loadThesisHealth(true));
 document.getElementById("btn-thesis-ops")?.addEventListener("click", () => loadThesisOperations(true));
 document.getElementById("btn-thesis-evaluate")?.addEventListener("click", triggerThesisEvaluation);
+document.getElementById("btn-thesis-compare")?.addEventListener("click", runThesisCompare);
 document.getElementById("thesis-ticker")?.addEventListener("keydown", e => {
   if (e.key === "Enter") loadLatestThesis();
 });
