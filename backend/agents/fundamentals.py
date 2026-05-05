@@ -129,7 +129,7 @@ class FundamentalsAgent(BaseAgent):
 
     def _run(self, ticker: str, run_id: str, as_of: datetime):
         t = yf.Ticker(ticker)
-        info = t.info or {}
+        info = self._timed_fetch(lambda: t.info, f"{ticker}/info") or {}
 
         db.upsert_ticker(ticker, info)
 
@@ -164,31 +164,30 @@ class FundamentalsAgent(BaseAgent):
         prev_gross_margin: float | None = None
         share_change: float | None = None
         period_label = ""
-        try:
-            fin = t.financials  # annual, columns are dates newest first
-            if fin is not None and not fin.empty and fin.shape[1] >= 2:
+        fin = self._timed_fetch(lambda: t.financials, f"{ticker}/financials")
+        if fin is not None and not fin.empty and fin.shape[1] >= 2:
+            try:
                 rev0 = fin.loc["Total Revenue", fin.columns[0]] if "Total Revenue" in fin.index else None
                 rev1 = fin.loc["Total Revenue", fin.columns[1]] if "Total Revenue" in fin.index else None
                 gp0 = fin.loc["Gross Profit", fin.columns[0]] if "Gross Profit" in fin.index else None
                 gp1 = fin.loc["Gross Profit", fin.columns[1]] if "Gross Profit" in fin.index else None
-                # Override rev_growth with exact YoY if available
                 if rev0 and rev1 and rev1 != 0:
                     rev_growth = (rev0 - rev1) / abs(rev1)
                 if gp0 and gp1 and rev0 and rev1 and rev0 != 0 and rev1 != 0:
                     prev_gross_margin = gp1 / rev1
                 period_label = str(fin.columns[0].date()) if hasattr(fin.columns[0], 'date') else str(fin.columns[0])[:10]
-        except Exception as exc:
-            logger.debug("[%s] Could not fetch financials DataFrame: %s", ticker, exc)
+            except Exception as exc:
+                logger.debug("[%s] Could not parse financials DataFrame: %s", ticker, exc)
 
-        try:
-            shares_hist = t.shares_outstanding_history
-            if shares_hist is not None and not shares_hist.empty and len(shares_hist) >= 2:
+        shares_hist = self._timed_fetch(lambda: t.shares_outstanding_history, f"{ticker}/shares_history")
+        if shares_hist is not None and not shares_hist.empty and len(shares_hist) >= 2:
+            try:
                 s_new = shares_hist.iloc[-1]
-                s_old = shares_hist.iloc[-min(4, len(shares_hist) - 1)]  # ~1yr back
+                s_old = shares_hist.iloc[-min(4, len(shares_hist) - 1)]
                 if s_old and s_old != 0:
                     share_change = (s_new - s_old) / abs(s_old)
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.debug("[%s] Could not compute share change: %s", ticker, exc)
 
         # ---- Score ----
         score = (

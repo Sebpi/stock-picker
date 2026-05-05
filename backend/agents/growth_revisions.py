@@ -90,7 +90,7 @@ class GrowthRevisionsAgent(BaseAgent):
 
     def _run(self, ticker: str, run_id: str, as_of: datetime):
         t = yf.Ticker(ticker)
-        info = t.info or {}
+        info = self._timed_fetch(lambda: t.info, f"{ticker}/info") or {}
 
         # ---- Analyst consensus ----
         target_mean = self._safe_get(info, "targetMeanPrice")
@@ -106,27 +106,27 @@ class GrowthRevisionsAgent(BaseAgent):
         # ---- Forward growth estimates ----
         rev_growth_next_fy: float | None = None
         eps_growth_next_fy: float | None = None
-        try:
-            rev_est = t.revenue_estimate
-            if rev_est is not None and not rev_est.empty and "+1y" in rev_est.index:
+        rev_est = self._timed_fetch(lambda: t.revenue_estimate, f"{ticker}/revenue_estimate")
+        if rev_est is not None and not rev_est.empty and "+1y" in rev_est.index:
+            try:
                 growth_col = [c for c in rev_est.columns if "growth" in str(c).lower()]
                 if growth_col:
                     val = rev_est.loc["+1y", growth_col[0]]
                     if val and val == val:
                         rev_growth_next_fy = float(val)
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.debug("[%s] revenue_estimate parse error: %s", ticker, exc)
 
-        try:
-            eps_est = t.earnings_estimate
-            if eps_est is not None and not eps_est.empty and "+1y" in eps_est.index:
+        eps_est = self._timed_fetch(lambda: t.earnings_estimate, f"{ticker}/earnings_estimate")
+        if eps_est is not None and not eps_est.empty and "+1y" in eps_est.index:
+            try:
                 growth_col = [c for c in eps_est.columns if "growth" in str(c).lower()]
                 if growth_col:
                     val = eps_est.loc["+1y", growth_col[0]]
                     if val and val == val:
                         eps_growth_next_fy = float(val)
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.debug("[%s] earnings_estimate parse error: %s", ticker, exc)
 
         # Fall back to info fields
         if rev_growth_next_fy is None:
@@ -139,11 +139,9 @@ class GrowthRevisionsAgent(BaseAgent):
         revenue_revision_30d: float | None = None
         revision_breadth: float | None = None
 
-        try:
-            rev_hist = t.eps_revisions
-            if rev_hist is not None and not rev_hist.empty:
-                # eps_revisions has rows like "0q", "+1q", "+1y", "+2y"
-                # columns: upLast7days, upLast30days, downLast30days, downLast90days
+        rev_hist = self._timed_fetch(lambda: t.eps_revisions, f"{ticker}/eps_revisions")
+        if rev_hist is not None and not rev_hist.empty:
+            try:
                 row_key = "+1y" if "+1y" in rev_hist.index else (rev_hist.index[0] if not rev_hist.empty else None)
                 if row_key:
                     up_30 = self._safe_get(dict(rev_hist.loc[row_key]), "upLast30days")
@@ -152,8 +150,8 @@ class GrowthRevisionsAgent(BaseAgent):
                         total = up_30 + dn_30
                         if total > 0:
                             revision_breadth = (up_30 - dn_30) / total
-        except Exception as exc:
-            logger.debug("[%s] eps_revisions fetch failed: %s", ticker, exc)
+            except Exception as exc:
+                logger.debug("[%s] eps_revisions parse error: %s", ticker, exc)
 
         # Snapshot today's consensus for future 30d revision calc
         today_eps = eps_growth_next_fy
@@ -173,23 +171,22 @@ class GrowthRevisionsAgent(BaseAgent):
 
         # ---- Guidance delta ----
         guidance_delta: float | None = None
-        try:
-            earnings_hist = t.earnings_history
-            if earnings_hist is not None and not earnings_hist.empty:
-                # Estimate guidance from EPS surprise pattern
+        earnings_hist = self._timed_fetch(lambda: t.earnings_history, f"{ticker}/earnings_history")
+        if earnings_hist is not None and not earnings_hist.empty:
+            try:
                 surp_col = [c for c in earnings_hist.columns if "surprise" in str(c).lower()]
                 if surp_col:
                     surprises = earnings_hist[surp_col[0]].dropna().tolist()
                     if surprises:
                         guidance_delta = float(surprises[-1]) if surprises[-1] == surprises[-1] else None
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.debug("[%s] earnings_history parse error: %s", ticker, exc)
 
         # ---- Catalyst calendar ----
         catalysts: list[dict[str, Any]] = []
-        try:
-            cal = t.earnings_dates
-            if cal is not None and not cal.empty:
+        cal = self._timed_fetch(lambda: t.earnings_dates, f"{ticker}/earnings_dates")
+        if cal is not None and not cal.empty:
+            try:
                 next_earnings = cal[cal.index > datetime.now(timezone.utc)].head(1)
                 if not next_earnings.empty:
                     earn_date = next_earnings.index[0]
@@ -199,8 +196,8 @@ class GrowthRevisionsAgent(BaseAgent):
                         "date": date_str,
                         "materiality": "high",
                     })
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.debug("[%s] earnings_dates parse error: %s", ticker, exc)
 
         # User-defined catalysts file (optional override per ticker)
         try:

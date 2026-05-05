@@ -63,8 +63,8 @@ def _fetch_yf_price(ticker_sym: str) -> float | None:
         v = getattr(info, "last_price", None)
         if v and v == v:  # not NaN
             return float(v)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("_fetch_yf_price %s failed: %s", ticker_sym, exc)
     return None
 
 
@@ -77,8 +77,8 @@ def _fetch_yf_pct_change(ticker_sym: str, period: str = "5d") -> float | None:
         last = float(hist["Close"].iloc[-1])
         if first > 0:
             return (last - first) / first
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("_fetch_yf_pct_change %s failed: %s", ticker_sym, exc)
     return None
 
 
@@ -174,11 +174,11 @@ class MacroLiquidityAgent(BaseAgent):
         sector = ticker_info.get("sector", "")
 
         # ---- Fetch macro proxies via yfinance ----
-        ten_year = _fetch_yf_price("^TNX")       # 10-year yield (%)
-        two_year = _fetch_yf_price("^IRX")        # 13w T-bill ~= short rate
-        vix = _fetch_yf_price("^VIX")
-        sp500_5d = _fetch_yf_pct_change("^GSPC", "5d")
-        usd_5d = _fetch_yf_pct_change("DX-Y.NYB", "5d")
+        ten_year = self._timed_fetch(lambda: _fetch_yf_price("^TNX"), "^TNX/price")
+        two_year = self._timed_fetch(lambda: _fetch_yf_price("^IRX"), "^IRX/price")
+        vix = self._timed_fetch(lambda: _fetch_yf_price("^VIX"), "^VIX/price")
+        sp500_5d = self._timed_fetch(lambda: _fetch_yf_pct_change("^GSPC", "5d"), "^GSPC/5d")
+        usd_5d = self._timed_fetch(lambda: _fetch_yf_pct_change("DX-Y.NYB", "5d"), "DXY/5d")
 
         # Yield curve 2s10s approximation
         yield_curve: float | None = None

@@ -79,7 +79,7 @@ class IndustryCompetitionAgent(BaseAgent):
 
     def _run(self, ticker: str, run_id: str, as_of: datetime):
         t = yf.Ticker(ticker)
-        info = t.info or {}
+        info = self._timed_fetch(lambda: t.info, f"{ticker}/info") or {}
 
         sector = self._safe_get(info, "sector", "")
         industry = self._safe_get(info, "industry", "")
@@ -101,16 +101,14 @@ class IndustryCompetitionAgent(BaseAgent):
         read_across_events: list[dict[str, Any]] = []
 
         for peer in peer_group[:8]:
-            try:
-                p_info = yf.Ticker(peer).info or {}
-                pg = self._safe_get(p_info, "revenueGrowth")
-                pm = self._safe_get(p_info, "grossMargins")
-                if pg is not None:
-                    peer_growths.append(pg)
-                if pm is not None:
-                    peer_margins.append(pm)
-            except Exception:
-                pass
+            p_ticker = yf.Ticker(peer)
+            p_info = self._timed_fetch(lambda pt=p_ticker: pt.info, f"{peer}/info") or {}
+            pg = self._safe_get(p_info, "revenueGrowth")
+            pm = self._safe_get(p_info, "grossMargins")
+            if pg is not None:
+                peer_growths.append(pg)
+            if pm is not None:
+                peer_margins.append(pm)
 
             # Read-across from sentiment agent signals
             peer_signal = db.get_signal_for_agent(peer, "agent.sentiment_news")

@@ -124,7 +124,7 @@ class ValuationAgent(BaseAgent):
 
     def _run(self, ticker: str, run_id: str, as_of: datetime):
         t = yf.Ticker(ticker)
-        info = t.info or {}
+        info = self._timed_fetch(lambda: t.info, f"{ticker}/info") or {}
 
         price = self._safe_get(info, "currentPrice") or self._safe_get(info, "regularMarketPrice")
         market_cap = self._safe_get(info, "marketCap")
@@ -173,13 +173,11 @@ class ValuationAgent(BaseAgent):
         if peer_group and pe_ttm is not None:
             peer_pes: list[float] = []
             for peer in peer_group[:8]:
-                try:
-                    p_info = yf.Ticker(peer).info or {}
-                    p_pe = self._safe_get(p_info, "trailingPE")
-                    if p_pe and p_pe > 0:
-                        peer_pes.append(p_pe)
-                except Exception:
-                    pass
+                p_ticker = yf.Ticker(peer)
+                p_info = self._timed_fetch(lambda pt=p_ticker: pt.info, f"{peer}/info") or {}
+                p_pe = self._safe_get(p_info, "trailingPE")
+                if p_pe and p_pe > 0:
+                    peer_pes.append(p_pe)
             if peer_pes:
                 below = sum(1 for v in peer_pes if v >= pe_ttm)
                 peer_pct = round(below / len(peer_pes) * 100, 1)

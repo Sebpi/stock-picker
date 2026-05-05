@@ -37,8 +37,8 @@ def _load_portfolio() -> list[dict[str, Any]]:
     try:
         if PORTFOLIO_FILE.exists():
             return json.loads(PORTFOLIO_FILE.read_text()) or []
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("_load_portfolio failed: %s", exc)
     return []
 
 
@@ -82,23 +82,19 @@ class PortfolioRiskAgent(BaseAgent):
         betas: dict[str, float] = {}
 
         for sym in universe[:20]:  # cap to avoid rate limits
-            try:
-                info = yf.Ticker(sym).fast_info
-                price = getattr(info, "last_price", None)
+            sym_ticker = yf.Ticker(sym)
+            fast = self._timed_fetch(lambda st=sym_ticker: st.fast_info, f"{sym}/fast_info")
+            if fast is not None:
+                price = getattr(fast, "last_price", None)
                 if price:
                     prices[sym] = float(price)
-            except Exception:
-                pass
             try:
                 full_info = db.get_ticker_info(sym) or {}
                 sectors[sym] = full_info.get("sector", "")
-            except Exception:
-                pass
-            try:
-                bi = yf.Ticker(sym).info or {}
-                betas[sym] = float(bi.get("beta") or 1.0)
-            except Exception:
-                betas[sym] = 1.0
+            except Exception as exc:
+                logger.debug("[%s] sector lookup failed: %s", sym, exc)
+            full = self._timed_fetch(lambda st=sym_ticker: st.info, f"{sym}/info") or {}
+            betas[sym] = float(full.get("beta") or 1.0)
 
         # ---- Portfolio value and weights ----
         port_value = 0.0
@@ -160,10 +156,9 @@ class PortfolioRiskAgent(BaseAgent):
         # ---- NASDAQ correlation (proxy) ----
         nasdaq_corr: float | None = None
         try:
-            import yfinance as yf2
-            ndx_hist = yf2.Ticker("^NDX").history(period="3mo")
-            tk_hist = yf2.Ticker(ticker).history(period="3mo")
-            if not ndx_hist.empty and not tk_hist.empty:
+            ndx_hist = self._timed_fetch(lambda: yf.Ticker("^NDX").history(period="3mo"), "^NDX/3mo")
+            tk_hist = self._timed_fetch(lambda: yf.Ticker(ticker).history(period="3mo"), f"{ticker}/3mo")
+            if ndx_hist is not None and tk_hist is not None and not ndx_hist.empty and not tk_hist.empty:
                 ndx_ret = ndx_hist["Close"].pct_change().dropna()
                 tk_ret = tk_hist["Close"].pct_change().dropna()
                 common_idx = ndx_ret.index.intersection(tk_ret.index)
@@ -177,8 +172,8 @@ class PortfolioRiskAgent(BaseAgent):
                     denom_tk = math.sqrt(sum((x[1] - tk_m) ** 2 for x in n_vals))
                     if denom_ndx * denom_tk > 0:
                         nasdaq_corr = round(num / (denom_ndx * denom_tk), 3)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[%s] nasdaq_corr calculation failed: %s", ticker, exc)
 
         # ---- Overlap flags ----
         overlap_flags: list[str] = []
@@ -269,6 +264,6 @@ class PortfolioRiskAgent(BaseAgent):
             wl_file = Path(__file__).parent.parent / "watchlist.json"
             if wl_file.exists():
                 return json.loads(wl_file.read_text()) or []
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("_load_watchlist failed: %s", exc)
         return []

@@ -7,8 +7,11 @@ from __future__ import annotations
 import logging
 import uuid
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, TypeVar
+
+import tenacity
 
 import db
 from schemas import (
@@ -21,6 +24,19 @@ from schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Maximum seconds to wait for any single data-fetch call (yfinance / HTTP).
+FETCH_TIMEOUT_SECS = 15
+
+_T = TypeVar("_T")
+
+_retry_transient = tenacity.retry(
+    retry=tenacity.retry_if_exception_type((ConnectionError, OSError, TimeoutError)),
+    wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
+    stop=tenacity.stop_after_attempt(3),
+    reraise=True,
+    before_sleep=tenacity.before_sleep_log(logger, logging.DEBUG),
+)
 
 
 class BaseAgent(ABC):
@@ -104,6 +120,30 @@ class BaseAgent(ABC):
             quality_flags=[QualityFlag.MISSING_FIELD],
             errors=[error_msg],
         )
+
+    @staticmethod
+    def _timed_fetch(fn: Callable[[], _T], label: str = "",
+                     timeout: float = FETCH_TIMEOUT_SECS) -> _T | None:
+        """
+        Run *fn* in a thread with a hard timeout.  Returns None on timeout or
+        any exception, logging at DEBUG so the agent can set quality flags.
+        Retries on transient network errors via tenacity.
+        """
+        @_retry_transient
+        def _with_retry() -> _T:
+            return fn()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_with_retry)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                logger.debug("_timed_fetch timeout after %.0fs: %s", timeout, label)
+                future.cancel()
+                return None
+            except Exception as exc:
+                logger.debug("_timed_fetch error [%s]: %s", label, exc)
+                return None
 
     @staticmethod
     def _safe_get(info: dict[str, Any], key: str,

@@ -189,8 +189,9 @@ class TechnicalRiskAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _run(self, ticker: str, run_id: str, as_of: datetime):
-        hist = yf.Ticker(ticker).history(period="1y", interval="1d")
-        if hist.empty or len(hist) < 20:
+        t = yf.Ticker(ticker)
+        hist = self._timed_fetch(lambda: t.history(period="1y", interval="1d"), f"{ticker}/history")
+        if hist is None or hist.empty or len(hist) < 20:
             return self._emit(
                 ticker=ticker, run_id=run_id, as_of=as_of,
                 score=50.0,
