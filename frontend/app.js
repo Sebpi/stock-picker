@@ -1648,20 +1648,6 @@ function renderPredictionsTable(preds) {
     else groupedPreds.ytd.push(p);
   });
 
-  // When a sort is active, flatten all rows (no date groups) so ordering is visible
-  if (_predSortCol) {
-    body.innerHTML = sorted.map(renderPredictionRow).join("");
-    const flatRows = Array.from(body.querySelectorAll("tr"));
-    flatRows.forEach((row, i) => {
-      const p = sorted[i];
-      if (!p) return;
-      const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
-      const cell = row.lastElementChild;
-      if (cell) { cell.className = "pred-reasoning-col"; cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`; }
-    });
-    return body.innerHTML;
-  }
-
   const renderPredictionRow = p => {
     const basePrice = Number(p.price_at_prediction);
     const hasBasePrice = Number.isFinite(basePrice) && basePrice > 0;
@@ -1769,6 +1755,19 @@ function renderPredictionsTable(preds) {
       </tr>
     `;
   };
+
+  // When a sort is active, flatten all rows (no date groups) so ordering is visible
+  if (_predSortCol) {
+    body.innerHTML = sorted.map(renderPredictionRow).join("");
+    Array.from(body.querySelectorAll("tr")).forEach((row, i) => {
+      const p = sorted[i];
+      if (!p) return;
+      const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
+      const cell = row.lastElementChild;
+      if (cell) { cell.className = "pred-reasoning-col"; cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`; }
+    });
+    return body.innerHTML;
+  }
 
   const sections = [
     ["today", "Today"],
