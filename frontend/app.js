@@ -1327,6 +1327,57 @@ document.getElementById("btn-ask").addEventListener("click", async () => {
 let predictionsSnapshotCache = null;
 let predictionsRenderedCache = null;
 const PREDICTIONS_RENDER_VERSION = 2;
+let _predSortCol = null;
+let _predSortDir = 1; // 1 = asc, -1 = desc
+
+function _predSortValue(p, col) {
+  if (col === "score") return p.score != null ? p.score : (p.predicted_pct != null ? Math.max(0, Math.min(100, Math.round(50 + p.predicted_pct * 14))) : -Infinity);
+  if (col === "confidence") {
+    const order = { high: 3, medium: 2, low: 1, pending: 0 };
+    return order[p.confidence] ?? -1;
+  }
+  const v = p[col];
+  if (v == null) return _predSortDir === 1 ? Infinity : -Infinity;
+  return typeof v === "string" ? v.toLowerCase() : Number(v);
+}
+
+function _applyPredSort(preds) {
+  if (!_predSortCol) return preds;
+  return [...preds].sort((a, b) => {
+    const av = _predSortValue(a, _predSortCol);
+    const bv = _predSortValue(b, _predSortCol);
+    if (av < bv) return -_predSortDir;
+    if (av > bv) return _predSortDir;
+    return 0;
+  });
+}
+
+function _updatePredSortHeaders() {
+  document.querySelectorAll("#pred-thead-row th[data-sort]").forEach(th => {
+    const col = th.dataset.sort;
+    th.classList.toggle("sort-active", col === _predSortCol);
+    th.dataset.sortDir = col === _predSortCol ? (_predSortDir === 1 ? "asc" : "desc") : "";
+  });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll("#pred-thead-row th[data-sort]").forEach(th => {
+    th.style.cursor = "pointer";
+    th.title = `Sort by ${th.textContent.trim()}`;
+    th.addEventListener("click", () => {
+      const col = th.dataset.sort;
+      if (_predSortCol === col) {
+        _predSortDir *= -1;
+      } else {
+        _predSortCol = col;
+        _predSortDir = -1; // default: highest first
+      }
+      if (predictionsSnapshotCache) {
+        renderPredictionsTable(predictionsSnapshotCache);
+      }
+    });
+  });
+});
 
 function invalidatePredictionsSnapshotCache() {
   predictionsSnapshotCache = null;
@@ -1571,6 +1622,8 @@ document.getElementById("pred-reasoning-overlay").addEventListener("click", e =>
 function renderPredictionsTable(preds) {
   const body = document.getElementById("pred-body");
   predictionReasoningMap = {};
+  _updatePredSortHeaders();
+  const sorted = _applyPredSort(preds);
 
   const today = new Date();
   const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
@@ -1590,6 +1643,20 @@ function renderPredictionsTable(preds) {
     else if (predictionDate >= monthIso) groupedPreds.month.push(p);
     else groupedPreds.ytd.push(p);
   });
+
+  // When a sort is active, flatten all rows (no date groups) so ordering is visible
+  if (_predSortCol) {
+    body.innerHTML = sorted.map(renderPredictionRow).join("");
+    const flatRows = Array.from(body.querySelectorAll("tr"));
+    flatRows.forEach((row, i) => {
+      const p = sorted[i];
+      if (!p) return;
+      const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
+      const cell = row.lastElementChild;
+      if (cell) { cell.className = "pred-reasoning-col"; cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`; }
+    });
+    return body.innerHTML;
+  }
 
   const renderPredictionRow = p => {
     const basePrice = Number(p.price_at_prediction);

@@ -2522,3 +2522,10 @@ body.login-active { overflow: hidden; }
      f o n t - w e i g h t :   4 0 0 ; 
  }  
  
+
+/* ── Predictions table sortable headers ── */
+#pred-thead-row th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+#pred-thead-row th[data-sort]:hover { background: rgba(59,130,246,0.15); }
+#pred-thead-row th.sort-active { color: #3b82f6; }
+#pred-thead-row th[data-sort-dir='asc']::after  { content: ' ▲'; font-size: 0.7em; opacity: 0.8; }
+#pred-thead-row th[data-sort-dir='desc']::after { content: ' ▼'; font-size: 0.7em; opacity: 0.8; }
