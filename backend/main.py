@@ -3761,10 +3761,34 @@ async def _backfill_factor_scores(tickers: list[str], pred_date: str):
         await asyncio.sleep(1.5)  # gentle pacing between tickers
 
 
+_predictions_job: dict = {"running": False, "started_at": None, "finished_at": None, "error": None, "count": None}
+
+async def _generate_predictions_bg():
+    _predictions_job["running"] = True
+    _predictions_job["started_at"] = datetime.now(timezone.utc).isoformat()
+    _predictions_job["error"] = None
+    _predictions_job["count"] = None
+    try:
+        result = await _generate_predictions_impl()
+        _predictions_job["count"] = len(result.get("predictions", [])) if isinstance(result, dict) else None
+    except Exception as exc:
+        _predictions_job["error"] = str(exc)
+        logger.exception("[Predictions] Background generate failed: %s", exc)
+    finally:
+        _predictions_job["running"] = False
+        _predictions_job["finished_at"] = datetime.now(timezone.utc).isoformat()
+
 @app.post("/api/predictions/generate")
 @limiter.limit("8/hour")
-async def generate_predictions(request: Request):
-    return await _generate_predictions_impl()
+async def generate_predictions(request: Request, background_tasks: BackgroundTasks):
+    if _predictions_job["running"]:
+        return {"status": "already_running", "started_at": _predictions_job["started_at"]}
+    background_tasks.add_task(_generate_predictions_bg)
+    return {"status": "started"}
+
+@app.get("/api/predictions/generate/status")
+async def generate_predictions_status():
+    return _predictions_job
 
 
 @app.post("/api/predictions/backfill-factors")

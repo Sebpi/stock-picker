@@ -1933,37 +1933,50 @@ document.getElementById("btn-generate").addEventListener("click", async () => {
   const status = document.getElementById("pred-status");
 
   btn.disabled = true;
-  status.textContent = "Generating predictions from market data and fundamentals…";
+  status.textContent = "Starting prediction job…";
   showLoader("Consulting the oracle…");
 
   try {
-    const res = await authFetch(`${API}/api/predictions/generate`, { method: "POST" });
-    const rawText = await res.text();
-    let data = {};
-    try {
-      data = rawText ? JSON.parse(rawText) : {};
-    } catch {
-      throw new Error(rawText || `Predictions request failed (${res.status})`);
-    }
+    const res = await authFetch(`${API}/api/predictions/generate`, { method: "POST" }, { timeout: 15000 });
+    const data = await res.json();
 
     if (!res.ok) {
-      status.textContent = "Error: " + (data.detail || data.error || "Predictions request failed.");
+      status.textContent = "Error: " + (data.detail || data.error || "Request failed.");
       return;
     }
 
-    if (data.detail) {
-      status.textContent = "Error: " + data.detail;
-      return;
-    }
-
-    if (data.message) {
-      status.textContent = data.message;
+    if (data.status === "already_running") {
+      status.textContent = "Prediction job already running — polling for completion…";
     } else {
-      status.textContent = `Generated ${data.predictions.length} prediction(s) for today.`;
+      status.textContent = "Job started — this takes 1–2 minutes, please wait…";
     }
 
-    invalidatePredictionsSnapshotCache();
-    loadPredictions(true);
+    // Poll until done
+    let elapsed = 0;
+    while (elapsed < 300000) {
+      await new Promise(r => setTimeout(r, 5000));
+      elapsed += 5000;
+      try {
+        const pollRes = await authFetch(`${API}/api/predictions/generate/status`, {}, { timeout: 10000 });
+        const job = await pollRes.json();
+        if (!job.running) {
+          if (job.error) {
+            status.textContent = "Error: " + job.error;
+          } else {
+            status.textContent = job.count != null
+              ? `Generated ${job.count} prediction(s) for today.`
+              : "Predictions generated successfully.";
+            invalidatePredictionsSnapshotCache();
+            loadPredictions(true);
+          }
+          return;
+        }
+        status.textContent = `Generating… (${Math.round(elapsed / 1000)}s elapsed)`;
+      } catch {
+        // transient poll error — keep trying
+      }
+    }
+    status.textContent = "Timed out waiting — refresh the Predictions tab manually.";
   } catch (err) {
     status.textContent = "Error: " + describeRequestError(err, "Please refresh or try again.");
   } finally {
