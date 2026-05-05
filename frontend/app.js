@@ -1373,7 +1373,7 @@ document.addEventListener("DOMContentLoaded", () => {
         _predSortDir = -1; // default: highest first
       }
       if (predictionsSnapshotCache) {
-        renderPredictionsTable(predictionsSnapshotCache);
+        loadPredictions(false);
       }
     });
   });
@@ -1390,7 +1390,8 @@ async function loadPredictions(forceRefresh = false) {
   const empty = document.getElementById("pred-empty");
   const bar = document.getElementById("accuracy-bar");
 
-  if (!forceRefresh && predictionsRenderedCache && predictionsRenderedCache.version === PREDICTIONS_RENDER_VERSION) {
+  // Skip render cache entirely when a sort is active so clicks always re-render
+  if (!_predSortCol && !forceRefresh && predictionsRenderedCache && predictionsRenderedCache.version === PREDICTIONS_RENDER_VERSION) {
     status.textContent = "";
     body.innerHTML = predictionsRenderedCache.bodyHtml;
     empty.classList.toggle("visible", !!predictionsRenderedCache.emptyVisible);
@@ -1418,14 +1419,17 @@ async function loadPredictions(forceRefresh = false) {
     }
     empty.classList.remove("visible");
     const bodyHtml = renderPredictionsTable(predictionsSnapshotCache);
-    const barState = renderAccuracyBar(predictionsSnapshotCache);
-    predictionsRenderedCache = {
-      version: PREDICTIONS_RENDER_VERSION,
-      bodyHtml,
-      emptyVisible: false,
-      barHidden: !!barState?.hidden,
-      barHtml: bar.innerHTML,
-    };
+    // Only cache the rendered output when no sort is active
+    if (!_predSortCol) {
+      const barState = renderAccuracyBar(predictionsSnapshotCache);
+      predictionsRenderedCache = {
+        version: PREDICTIONS_RENDER_VERSION,
+        bodyHtml,
+        emptyVisible: false,
+        barHidden: !!barState?.hidden,
+        barHtml: bar.innerHTML,
+      };
+    }
     return;
   }
 
