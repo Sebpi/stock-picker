@@ -85,8 +85,33 @@ limiter = Limiter(key_func=get_remote_address)
 # ── Account lockout ────────────────────────────────────────────────────────────
 _MAX_ATTEMPTS   = 5
 _LOCKOUT_MINS   = 15
+_LOCKOUT_STATE_FILE = Path(__file__).parent / "lockout_state.json"
 _failed_logins: dict[str, list] = {}   # username -> list of attempt datetimes
 _lockout_until: dict[str, datetime] = {}
+
+def _load_lockout_state() -> None:
+    if not _LOCKOUT_STATE_FILE.exists():
+        return
+    try:
+        data = json.loads(_LOCKOUT_STATE_FILE.read_text())
+        now = datetime.now(timezone.utc)
+        for username, iso in data.items():
+            try:
+                until = datetime.fromisoformat(iso)
+                if until > now:
+                    _lockout_until[username] = until
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("Could not load lockout state: %s", exc)
+
+def _save_lockout_state() -> None:
+    try:
+        now = datetime.now(timezone.utc)
+        active = {u: v.isoformat() for u, v in _lockout_until.items() if v > now}
+        _LOCKOUT_STATE_FILE.write_text(json.dumps(active))
+    except Exception as exc:
+        logger.warning("Could not save lockout state: %s", exc)
 
 def _check_lockout(username: str) -> None:
     """Raise 429 if account is locked out."""
@@ -104,10 +129,12 @@ def _record_failed_login(username: str) -> None:
     if len(window) >= _MAX_ATTEMPTS:
         _lockout_until[username] = now + timedelta(minutes=_LOCKOUT_MINS)
         logger.warning("LOCKOUT username=%s after %d failed attempts", username, len(window))
+        _save_lockout_state()
 
 def _clear_failed_logins(username: str) -> None:
     _failed_logins.pop(username, None)
     _lockout_until.pop(username, None)
+    _save_lockout_state()
 
 # ── Auth setup ─────────────────────────────────────────────────────────────────
 _SECRET_KEY = os.getenv("SECRET_KEY")
@@ -149,7 +176,10 @@ EVALUATION_AUTO_RUN_INTERVAL_MINUTES = max(60, int(os.getenv("EVALUATION_AUTO_RU
 
 def load_users() -> dict:
     if USERS_FILE.exists():
-        return json.loads(USERS_FILE.read_text())
+        try:
+            return json.loads(USERS_FILE.read_text())
+        except Exception as exc:
+            logger.error("Corrupt users file, returning empty: %s", exc)
     return {}
 
 def _atomic_write(path: Path, data: str) -> None:
@@ -292,9 +322,33 @@ async def auth_middleware(request: Request, call_next):
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 @app.get("/api/health", include_in_schema=False)
-def health_check():
+async def health_check():
+    checks: dict[str, str] = {}
+
+    # SQLite
+    try:
+        import db as _db
+        with _db.get_conn() as conn:
+            conn.execute("SELECT 1")
+        checks["sqlite"] = "ok"
+    except Exception as exc:
+        checks["sqlite"] = f"error: {exc}"
+
+    # yfinance spot check
+    try:
+        import yfinance as yf
+        info = yf.Ticker("AAPL").fast_info
+        checks["yfinance"] = "ok" if info else "no data"
+    except Exception as exc:
+        checks["yfinance"] = f"error: {exc}"
+
+    # Anthropic key present
+    checks["anthropic_key"] = "configured" if os.getenv("ANTHROPIC_API_KEY") else "missing"
+
+    overall = "ok" if all(v in {"ok", "configured"} for v in checks.values()) else "degraded"
     return {
-        "status": "ok",
+        "status": overall,
+        "checks": checks,
         "frontend_ready": (FRONTEND_DIR / "index.html").exists(),
         "scheduler_running": bool(getattr(scheduler, "running", False)),
     }
@@ -327,7 +381,10 @@ PAPER_INITIAL_FLOAT = 200_000.0
 
 def load_paper_portfolio() -> list[dict]:
     if PAPER_PORTFOLIO_FILE.exists():
-        return json.loads(PAPER_PORTFOLIO_FILE.read_text())
+        try:
+            return json.loads(PAPER_PORTFOLIO_FILE.read_text())
+        except Exception as exc:
+            logger.error("Corrupt paper portfolio file: %s", exc)
     return []
 
 def save_paper_portfolio(transactions: list[dict]):
@@ -347,7 +404,10 @@ def load_settings() -> dict:
         "alert_sell_max_score": 42,
     }
     if SETTINGS_FILE.exists():
-        return {**defaults, **json.loads(SETTINGS_FILE.read_text())}
+        try:
+            return {**defaults, **json.loads(SETTINGS_FILE.read_text())}
+        except Exception as exc:
+            logger.error("Corrupt settings file, using defaults: %s", exc)
     return defaults
 
 def save_settings(s: dict):
@@ -504,6 +564,25 @@ evaluation_scheduler_status = {
     "last_evaluated_count": None,
     "last_error": None,
 }
+_bg_consecutive_failures: dict[str, int] = {"thesis": 0, "evaluation": 0}
+_BG_ALERT_THRESHOLD = 3
+
+def _maybe_alert_bg_failure(job: str, error: str) -> None:
+    """Fire a WhatsApp alert after _BG_ALERT_THRESHOLD consecutive failures."""
+    _bg_consecutive_failures[job] = _bg_consecutive_failures.get(job, 0) + 1
+    count = _bg_consecutive_failures[job]
+    if count >= _BG_ALERT_THRESHOLD:
+        try:
+            from sentiment_agent import send_whatsapp
+            send_whatsapp(
+                f"[StockLens] Scheduled {job} job has failed {count} times in a row.\nLast error: {error}"
+            )
+            logger.warning("[BG] Alert fired: %s job failed %d consecutive times", job, count)
+        except Exception as exc:
+            logger.error("[BG] Could not send failure alert: %s", exc)
+
+def _reset_bg_failures(job: str) -> None:
+    _bg_consecutive_failures[job] = 0
 _auto_thesis_running = False
 _auto_evaluation_running = False
 
@@ -549,7 +628,10 @@ async def get_info_with_timeout(ticker: str, timeout_sec: float = SEARCH_INFO_TI
 
 def load_watchlist() -> list[str]:
     if WATCHLIST_FILE.exists():
-        return json.loads(WATCHLIST_FILE.read_text())
+        try:
+            return json.loads(WATCHLIST_FILE.read_text())
+        except Exception as exc:
+            logger.error("Corrupt watchlist file, returning empty: %s", exc)
     return []
 
 def save_watchlist(tickers: list[str]):
@@ -726,7 +808,10 @@ def run_sentiment_scanner(ticker: Optional[str] = None, watchlist_only: bool = F
 
 def load_predictions() -> list[dict]:
     if PREDICTIONS_FILE.exists():
-        return json.loads(PREDICTIONS_FILE.read_text())
+        try:
+            return json.loads(PREDICTIONS_FILE.read_text())
+        except Exception as exc:
+            logger.error("Corrupt predictions file, returning empty: %s", exc)
     return []
 
 _predictions_cache: dict[str, object] = {
@@ -1081,7 +1166,10 @@ _RISK_TTL = 1800  # 30 minutes
 
 def load_alerts() -> list[dict]:
     if ALERTS_FILE.exists():
-        return json.loads(ALERTS_FILE.read_text())
+        try:
+            return json.loads(ALERTS_FILE.read_text())
+        except Exception as exc:
+            logger.error("Corrupt alerts file, returning empty: %s", exc)
     return []
 
 def save_alerts(alerts: list[dict]):
@@ -1095,7 +1183,10 @@ def append_alert(entry: dict):
 
 def load_portfolio() -> list[dict]:
     if PORTFOLIO_FILE.exists():
-        return json.loads(PORTFOLIO_FILE.read_text())
+        try:
+            return json.loads(PORTFOLIO_FILE.read_text())
+        except Exception as exc:
+            logger.error("Corrupt portfolio file, returning empty: %s", exc)
     return []
 
 def save_portfolio(transactions: list[dict]):
@@ -1775,8 +1866,13 @@ async def auto_thesis():
             final_status = "failed"
         _db.update_thesis_run(run_id, status=final_status, completed=completed, failed=failed)
         logger.info("[Thesis] Auto-thesis %s: completed=%s failed=%s", final_status, completed, failed)
+        if final_status == "failed":
+            _maybe_alert_bg_failure("thesis", f"all {len(failed)} tickers failed")
+        else:
+            _reset_bg_failures("thesis")
     except Exception as exc:
         thesis_scheduler_status["last_error"] = str(exc)
+        _maybe_alert_bg_failure("thesis", str(exc))
         try:
             import db as _db
             _db.update_thesis_run(run_id, status="failed", completed=[], failed=tickers)
@@ -1808,9 +1904,12 @@ async def run_evaluation_job(source: str = "manual") -> int:
         count = await loop.run_in_executor(None, evaluation.evaluate_pending_outcomes)
         evaluation_scheduler_status["last_evaluated_count"] = count
         logger.info("[Evaluation] %s job evaluated %d outcomes", source, count)
+        _reset_bg_failures("evaluation")
         return count
     except Exception as exc:
         evaluation_scheduler_status["last_error"] = str(exc)
+        if source == "scheduler":
+            _maybe_alert_bg_failure("evaluation", str(exc))
         logger.exception("[Evaluation] %s job failed: %s", source, exc)
         raise
     finally:
@@ -1843,6 +1942,7 @@ class ResetPasswordRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    _load_lockout_state()
     # Refresh index constituent lists from Wikipedia
     global SP500_TICKERS, NASDAQ100_TICKERS, UNIVERSE
     loop = asyncio.get_event_loop()
@@ -2007,7 +2107,8 @@ async def me(current_user: str = Depends(get_current_user)):
 
 @app.get("/api/search")
 async def search_stocks(q: str = ""):
-    q = q.strip().lower()
+    q = q.strip()[:50]
+    q = re.sub(r"[^a-zA-Z0-9\-\. ]", "", q).lower()
     if not q or len(q) < 1:
         return []
     q_upper = q.upper()
@@ -2117,6 +2218,8 @@ async def screen_stocks(
     min_rev_growth: Optional[float] = None,
     max_rev_growth: Optional[float] = None,
 ):
+    if q:
+        q = re.sub(r"[^a-zA-Z0-9\-\. ]", "", q.strip()[:50]).lower()
     index_map = {
         "sp500": SP500_TICKERS,
         "nasdaq100": NASDAQ100_TICKERS,

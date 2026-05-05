@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent / "stockpicker.db"
 
 
+def _safe_json_loads(text: str, default: Any) -> Any:
+    """json.loads with a safe fallback — logs on corruption instead of raising."""
+    try:
+        return json.loads(text)
+    except Exception as exc:
+        logger.warning("JSON decode error (returning default): %s", exc)
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Connection management
 # ---------------------------------------------------------------------------
@@ -540,13 +549,13 @@ def get_thesis_run(run_id: str) -> dict[str, Any] | None:
     return {
         "run_id": data["run_id"],
         "status": data["status"],
-        "tickers": json.loads(data["tickers_json"] or "[]"),
+        "tickers": _safe_json_loads(data["tickers_json"] or "[]", []),
         "run_fresh": bool(data["run_fresh"]),
         "requested_by": data.get("requested_by"),
         "started_at": data["started_at"],
         "completed_at": data.get("completed_at"),
-        "completed": json.loads(data.get("completed_json") or "[]"),
-        "failed": json.loads(data.get("failed_json") or "[]"),
+        "completed": _safe_json_loads(data.get("completed_json") or "[]", []),
+        "failed": _safe_json_loads(data.get("failed_json") or "[]", []),
     }
 
 
@@ -570,13 +579,13 @@ def list_thesis_runs(limit: int = 20) -> list[dict[str, Any]]:
         runs.append({
             "run_id": data["run_id"],
             "status": data["status"],
-            "tickers": json.loads(data["tickers_json"] or "[]"),
+            "tickers": _safe_json_loads(data["tickers_json"] or "[]", []),
             "run_fresh": bool(data["run_fresh"]),
             "requested_by": data.get("requested_by"),
             "started_at": data["started_at"],
             "completed_at": data.get("completed_at"),
-            "completed": json.loads(data.get("completed_json") or "[]"),
-            "failed": json.loads(data.get("failed_json") or "[]"),
+            "completed": _safe_json_loads(data.get("completed_json") or "[]", []),
+            "failed": _safe_json_loads(data.get("failed_json") or "[]", []),
         })
     return runs
 

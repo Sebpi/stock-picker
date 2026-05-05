@@ -88,16 +88,36 @@ const getToken = () => localStorage.getItem(TOKEN_KEY);
 const setToken = t => localStorage.setItem(TOKEN_KEY, t);
 const clearToken = () => localStorage.removeItem(TOKEN_KEY);
 
-async function authFetch(url, opts = {}) {
+// Active fetch controllers — keyed by a label so callers can cancel
+const _fetchControllers = new Map();
+
+async function authFetch(url, opts = {}, { timeout = 60000, label = null } = {}) {
   const token = getToken();
-  opts.headers = { ...(opts.headers || {}), "Authorization": `Bearer ${token}` };
-  const res = await fetch(url, opts);
-  if (res.status === 401) {
-    clearToken();
-    showLogin();
-    throw new Error("Session expired. Please sign in again.");
+  // Cancel any prior in-flight request with the same label
+  if (label) {
+    _fetchControllers.get(label)?.abort();
+    _fetchControllers.delete(label);
   }
-  return res;
+  const controller = new AbortController();
+  if (label) _fetchControllers.set(label, controller);
+  const timer = setTimeout(() => controller.abort(), timeout);
+  opts.headers = { ...(opts.headers || {}), "Authorization": `Bearer ${token}` };
+  opts.signal = controller.signal;
+  try {
+    const res = await fetch(url, opts);
+    if (res.status === 401) {
+      clearToken();
+      showLogin();
+      throw new Error("Session expired. Please sign in again.");
+    }
+    return res;
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("Request timed out or was cancelled.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (label) _fetchControllers.delete(label);
+  }
 }
 
 function describeRequestError(err, fallback) {
@@ -284,6 +304,10 @@ const SIGNAL_LABELS = { buy_opportunity: "BUY Opportunity", sell_signal: "SELL S
 
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
+    // Cancel any in-flight tab-level requests from the previous tab
+    _fetchControllers.forEach((ctrl, key) => {
+      if (key.startsWith("tab:")) { ctrl.abort(); _fetchControllers.delete(key); }
+    });
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
     btn.classList.add("active");
@@ -660,7 +684,7 @@ document.getElementById("screener-search").addEventListener("keydown", async fun
         <td>${s.ev_ebitda ?? "—"}</td>
         <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}</td>
         <td>${fmtScreenerMarketCap(s.market_cap)}</td>
-        <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
+        <td><button class="btn-icon btn-add-watch" data-ticker="${safe(s.ticker)}">+ Watch</button></td>
       </tr>`).join("");
   } catch (err) {
     status.textContent = "Search failed. Please try again.";
@@ -781,7 +805,7 @@ async function runScreen() {
         <td>${s.fcf_yield != null ? s.fcf_yield + "%" : "—"}${sArrow(s.fcf_yield, m.fcf_yield, true, "FCF yield", sectorName)}</td>
         <td>${s.rev_growth != null ? s.rev_growth + "%" : "—"}${sArrow(s.rev_growth, m.rev_growth, true, "Revenue growth", sectorName)}</td>
         <td>${fmtScreenerMarketCap(s.market_cap)}</td>
-        <td><button class="btn-icon" onclick="addToWatchlist(event,'${s.ticker}')">+ Watch</button></td>
+        <td><button class="btn-icon btn-add-watch" data-ticker="${safe(s.ticker)}">+ Watch</button></td>
       </tr>
     `}).join("");
 
@@ -828,7 +852,7 @@ async function loadWatchlist() {
         <td>${s.name}</td>
         <td>${s.price != null ? "$" + s.price : "—"}</td>
         <td>${changeHtml(s.change_pct)}</td>
-        <td><button class="btn-remove" onclick="removeFromWatchlist(event,'${s.ticker}')">Remove</button></td>
+        <td><button class="btn-remove btn-remove-watch" data-ticker="${safe(s.ticker)}">Remove</button></td>
       </tr>
     `).join("");
 
@@ -1607,7 +1631,7 @@ function renderPredictionsTableLegacy(preds) {
     const cell = row.lastElementChild;
     if (!cell) return;
     cell.className = "pred-reasoning-col";
-    cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`;
+    cell.innerHTML = `<button class="btn-reasoning" data-rowkey="${rowKey.replace(/"/g, '&quot;')}">View</button>`;
   });
   return body.innerHTML;
 }
@@ -1783,7 +1807,7 @@ function renderPredictionsTable(preds) {
       if (!p) return;
       const rowKey = `${p.date || "unknown"}__${p.ticker || "unknown"}`;
       const cell = row.lastElementChild;
-      if (cell) { cell.className = "pred-reasoning-col"; cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`; }
+      if (cell) { cell.className = "pred-reasoning-col"; cell.innerHTML = `<button class="btn-reasoning" data-rowkey="${rowKey.replace(/"/g, '&quot;')}">View</button>`; }
     });
     return body.innerHTML;
   }
@@ -1822,7 +1846,7 @@ function renderPredictionsTable(preds) {
       const ticker = cells[1]?.textContent?.trim() || "unknown";
       const rowKey = `${date}__${ticker}`;
       cell.className = "pred-reasoning-col";
-      cell.innerHTML = `<button class="btn-reasoning" onclick="openPredictionReasoning('${rowKey}')">View</button>`;
+      cell.innerHTML = `<button class="btn-reasoning" data-rowkey="${rowKey.replace(/"/g, '&quot;')}">View</button>`;
     });
 
   return body.innerHTML;
@@ -2341,8 +2365,8 @@ function renderRecommendations(data) {
         <td><strong>${fmt(s.estimated_proceeds)}</strong></td>
         <td><span class="${pnlCls}">${s.unrealised_pnl >= 0 ? "+" : ""}${fmt(s.unrealised_pnl)} (${s.unrealised_pct >= 0 ? "+" : ""}${s.unrealised_pct.toFixed(1)}%)</span></td>
         <td>${predStr}</td>
-        <td><button class="btn-reasoning" onclick="openRecReasoning('${key}')">View</button></td>
-        <td><button class="btn-paper-sell" onclick="paperTrade(this,'sell','${safe(s.ticker)}',${s.qty},${s.current_price})">− Paper Sell</button></td>
+        <td><button class="btn-reasoning" data-reckey="${key.replace(/"/g, '&quot;')}">View</button></td>
+        <td><button class="btn-paper-sell" data-action="sell" data-ticker="${safe(s.ticker)}" data-qty="${s.qty}" data-price="${s.current_price}">− Paper Sell</button></td>
       </tr>`;
     }).join("");
   } else {
@@ -2380,8 +2404,8 @@ function renderRecommendations(data) {
         <td>${fmt(b.current_price)}</td>
         <td><strong>${b.qty}</strong></td>
         <td><strong>${fmt(b.estimated_cost)}</strong></td>
-        <td><button class="btn-reasoning" onclick="openRecReasoning('${key}')">View</button></td>
-        <td><button class="btn-paper-buy" onclick="paperTrade(this,'buy','${safe(b.ticker)}',${b.qty},${b.current_price})">+ Paper Buy</button></td>
+        <td><button class="btn-reasoning" data-reckey="${key.replace(/"/g, '&quot;')}">View</button></td>
+        <td><button class="btn-paper-buy" data-action="buy" data-ticker="${safe(b.ticker)}" data-qty="${b.qty}" data-price="${b.current_price}">+ Paper Buy</button></td>
       </tr>`;
     }).join("");
   } else {
@@ -3571,5 +3595,41 @@ document.getElementById("import-file-input").addEventListener("change", async (e
     status.textContent = "Import error: " + err.message;
   } finally {
     e.target.value = "";  // reset so same file can be re-imported if needed
+  }
+});
+
+// ── Delegated event listeners (replaces inline onclick — prevents XSS) ────────
+document.body.addEventListener("click", e => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+
+  // Prediction reasoning modal
+  if (btn.dataset.rowkey !== undefined) {
+    openPredictionReasoning(btn.dataset.rowkey);
+    return;
+  }
+
+  // Recommendation reasoning modal
+  if (btn.dataset.reckey !== undefined) {
+    openRecReasoning(btn.dataset.reckey);
+    return;
+  }
+
+  // Add to watchlist
+  if (btn.classList.contains("btn-add-watch")) {
+    addToWatchlist(e, btn.dataset.ticker);
+    return;
+  }
+
+  // Remove from watchlist
+  if (btn.classList.contains("btn-remove-watch")) {
+    removeFromWatchlist(e, btn.dataset.ticker);
+    return;
+  }
+
+  // Paper trade (buy/sell)
+  if (btn.classList.contains("btn-paper-sell") || btn.classList.contains("btn-paper-buy")) {
+    paperTrade(btn, btn.dataset.action, btn.dataset.ticker, Number(btn.dataset.qty), Number(btn.dataset.price));
+    return;
   }
 });
