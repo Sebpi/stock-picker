@@ -220,27 +220,25 @@ def upsert_signal(signal: AgentSignal) -> None:
 
 def get_latest_signals(ticker: str, max_age_hours: int = 26) -> dict[str, AgentSignal]:
     """Return the most recent AgentSignal per agent for a ticker within max_age_hours."""
-    cutoff = datetime.now(timezone.utc).isoformat()
+    cutoff = datetime.now(timezone.utc).timestamp() - max_age_hours * 3600
     with get_conn() as conn:
         rows = conn.execute(
             """
             SELECT payload_json FROM agent_signal
             WHERE ticker = ?
-              AND as_of >= datetime('now', ?)
-              AND signal_id IN (
-                  SELECT signal_id FROM agent_signal s2
-                  WHERE s2.ticker = agent_signal.ticker
-                    AND s2.agent_id = agent_signal.agent_id
-                  ORDER BY as_of DESC LIMIT 1
-              )
+            ORDER BY agent_id, as_of DESC
             """,
-            (ticker, f"-{max_age_hours} hours"),
+            (ticker,),
         ).fetchall()
     signals: dict[str, AgentSignal] = {}
     for row in rows:
         try:
             data = json.loads(row["payload_json"])
             sig = AgentSignal.model_validate(data)
+            if sig.agent_id in signals:
+                continue
+            if sig.as_of.timestamp() < cutoff:
+                continue
             signals[sig.agent_id] = sig
         except Exception as exc:
             logger.warning("Failed to deserialise signal: %s", exc)

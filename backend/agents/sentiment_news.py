@@ -6,11 +6,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
-import yfinance as yf
 
 from agents import BaseAgent
 from schemas import (
@@ -74,13 +73,7 @@ class SentimentNewsAgent(BaseAgent):
     default_horizons = ["3m", "6m"]
 
     def _run(self, ticker: str, run_id: str, as_of: datetime):
-        t = yf.Ticker(ticker)
-        news_items = []
-        try:
-            raw_news = t.news or []
-            news_items = raw_news[:15]
-        except Exception:
-            pass
+        news_items = self._fetch_existing_agent_news(ticker)
 
         if not news_items:
             return self._emit(
@@ -93,6 +86,10 @@ class SentimentNewsAgent(BaseAgent):
                 quality_flags=[QualityFlag.MISSING_FIELD],
             )
 
+        claude_signal = self._try_existing_claude_analysis(ticker, run_id, as_of, news_items)
+        if claude_signal:
+            return claude_signal
+
         # ---- Process headlines ----
         seen_hashes: set[str] = set()
         events: list[dict[str, Any]] = []
@@ -101,15 +98,9 @@ class SentimentNewsAgent(BaseAgent):
         cutoff_24h = as_of - timedelta(hours=24)
 
         for item in news_items:
-            # yfinance news item is a dict or object
-            if hasattr(item, "get"):
-                title = item.get("title", "") or ""
-                pub_ts = item.get("providerPublishTime") or item.get("publishedAt")
-                link = item.get("link", "") or item.get("url", "")
-            else:
-                title = getattr(item, "title", "") or ""
-                pub_ts = getattr(item, "providerPublishTime", None)
-                link = getattr(item, "link", "") or getattr(item, "url", "")
+            title = item.get("title", "") or ""
+            pub_ts = item.get("providerPublishTime") or item.get("publishedAt") or item.get("published_at")
+            link = item.get("link", "") or item.get("url", "")
 
             if not title:
                 continue
@@ -125,7 +116,10 @@ class SentimentNewsAgent(BaseAgent):
             published_dt: datetime | None = None
             if pub_ts:
                 try:
-                    published_dt = datetime.fromtimestamp(int(pub_ts), tz=timezone.utc)
+                    if isinstance(pub_ts, (int, float)) or str(pub_ts).isdigit():
+                        published_dt = datetime.fromtimestamp(int(pub_ts), tz=timezone.utc)
+                    else:
+                        published_dt = datetime.fromisoformat(str(pub_ts).replace("Z", "+00:00"))
                 except Exception:
                     pass
 
@@ -234,6 +228,191 @@ class SentimentNewsAgent(BaseAgent):
             payload=payload,
             evidence=evidence,
             quality_flags=flags,
+        )
+
+    # ------------------------------------------------------------------
+    # Existing sentiment-agent integration
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fetch_existing_agent_news(ticker: str) -> list[dict[str, Any]]:
+        """Use the established sentiment agent's yfinance parser when available."""
+        try:
+            from sentiment_agent import fetch_ticker_news
+            return fetch_ticker_news(ticker)
+        except Exception as exc:
+            logger.debug("Existing sentiment news fetch failed for %s: %s", ticker, exc)
+            try:
+                import yfinance as yf
+                raw_news = yf.Ticker(ticker).news or []
+                items: list[dict[str, Any]] = []
+                for item in raw_news[:15]:
+                    if not hasattr(item, "get"):
+                        continue
+                    content = item.get("content") or {}
+                    title = content.get("title") if content else item.get("title")
+                    url = (
+                        (content.get("clickThroughUrl") or {}).get("url")
+                        if content else item.get("link")
+                    ) or (
+                        (content.get("canonicalUrl") or {}).get("url")
+                        if content else item.get("url", "")
+                    )
+                    published = content.get("pubDate") if content else item.get("providerPublishTime")
+                    if title:
+                        items.append({
+                            "ticker": ticker,
+                            "title": title,
+                            "publisher": item.get("publisher", ""),
+                            "published_at": published,
+                            "url": url or "",
+                        })
+                return items
+            except Exception:
+                return []
+
+    def _try_existing_claude_analysis(
+        self,
+        ticker: str,
+        run_id: str,
+        as_of: datetime,
+        news_items: list[dict[str, Any]],
+    ):
+        """Canonicalise the established Claude sentiment analyzer into AgentSignal.
+
+        This path does not send alerts or mutate the sentiment agent state; it only
+        reuses its prompt and analysis rubric. If Claude is unavailable, callers fall
+        back to the deterministic keyword scorer below.
+        """
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            return None
+        try:
+            from sentiment_agent import (
+                analyse_with_claude,
+                build_analysis_prompt,
+                get_price_data,
+                load_portfolio_tickers,
+                load_watchlist_tickers,
+            )
+            portfolio_tickers = load_portfolio_tickers()
+            watchlist_tickers = load_watchlist_tickers()
+            prices = get_price_data([ticker])
+            prompt = build_analysis_prompt(news_items, prices, portfolio_tickers, watchlist_tickers)
+            analysis = analyse_with_claude(prompt)
+        except Exception as exc:
+            logger.debug("Existing Claude sentiment analysis failed for %s: %s", ticker, exc)
+            return None
+
+        if not analysis:
+            return None
+
+        severity = str(analysis.get("severity") or "none").lower()
+        expected_move = analysis.get("expected_move_pct")
+        try:
+            expected_move_abs = abs(float(expected_move or 0.0))
+        except (TypeError, ValueError):
+            expected_move_abs = 0.0
+
+        score = 50.0
+        direction_raw = analysis.get("direction")
+        if direction_raw == "up":
+            score += min(35.0, expected_move_abs * 4)
+            direction = Direction.POSITIVE
+        elif direction_raw == "down":
+            score -= min(35.0, expected_move_abs * 4)
+            direction = Direction.NEGATIVE
+        elif analysis.get("disruption_detected"):
+            score -= 10.0
+            direction = Direction.MIXED
+        else:
+            direction = Direction.NEUTRAL
+
+        if severity == "critical":
+            materiality = Materiality.CRITICAL
+            confidence = Confidence.HIGH
+        elif severity == "high":
+            materiality = Materiality.HIGH
+            confidence = Confidence.HIGH if analysis.get("alert_worthy") else Confidence.MEDIUM
+        elif severity == "medium":
+            materiality = Materiality.MEDIUM
+            confidence = Confidence.MEDIUM
+        else:
+            materiality = Materiality.LOW
+            confidence = Confidence.MEDIUM
+
+        top_headlines = analysis.get("top_headlines") or []
+        events = []
+        for item in top_headlines[:10]:
+            if isinstance(item, dict):
+                title = item.get("title", "")
+                url = item.get("url", "")
+            else:
+                title = str(item)
+                url = ""
+            if not title:
+                continue
+            events.append({
+                "event_id": _headline_hash(title),
+                "event_type": self._classify_event(title),
+                "headline_cluster": [title],
+                "sentiment": "positive" if direction_raw == "up" else ("negative" if direction_raw == "down" else "neutral"),
+                "materiality_score": 1.0 if severity == "critical" else (0.75 if severity == "high" else 0.4),
+                "novelty_score": 1.0,
+                "requires_alert": bool(analysis.get("alert_worthy")),
+                "published_at": None,
+                "url": url,
+            })
+
+        if not events:
+            for item in news_items[:5]:
+                title = item.get("title", "")
+                if title:
+                    events.append({
+                        "event_id": _headline_hash(title),
+                        "event_type": self._classify_event(title),
+                        "headline_cluster": [title],
+                        "sentiment": "neutral",
+                        "materiality_score": 0.1,
+                        "novelty_score": 1.0,
+                        "requires_alert": False,
+                        "published_at": item.get("published_at"),
+                        "url": item.get("url", ""),
+                    })
+
+        payload = NewsSentimentPayload(
+            events=events,
+            sentiment_score_24h=round((score - 50) / 50, 3),
+            sentiment_score_7d=round((score - 50) / 50, 3),
+            narrative_shift="deteriorating" if direction == Direction.NEGATIVE else ("improving" if direction == Direction.POSITIVE else "none"),
+        ).model_dump()
+
+        evidence = [
+            Evidence(
+                source_type="financial_press",
+                source_name="StockPicker Claude sentiment agent",
+                url_or_ref=f"sentiment_agent://{ticker}",
+                credibility_weight=0.67,
+                freshness_score=1.0,
+                extracted_facts=[
+                    f"Severity: {severity}",
+                    f"Alert worthy: {bool(analysis.get('alert_worthy'))}",
+                    f"Expected move: {expected_move}",
+                    f"Summary: {analysis.get('summary', '')}",
+                ],
+            )
+        ]
+
+        return self._emit(
+            ticker=ticker,
+            run_id=run_id,
+            as_of=as_of,
+            score=round(max(0.0, min(100.0, score)), 2),
+            confidence=confidence,
+            direction=direction,
+            materiality=materiality,
+            payload=payload,
+            evidence=evidence,
+            quality_flags=[QualityFlag.LLM_UNVERIFIED],
         )
 
     @staticmethod

@@ -141,6 +141,9 @@ RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HI
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
 PREDICTIONS_UNIVERSE_FILL_LIMIT = max(0, int(os.getenv("PREDICTIONS_UNIVERSE_FILL_LIMIT", "6")))
 PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192")))
+THESIS_AUTO_RUN_ENABLED = os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+THESIS_AUTO_RUN_INTERVAL_MINUTES = max(15, int(os.getenv("THESIS_AUTO_RUN_INTERVAL_MINUTES", "1440")))
+THESIS_AUTO_RUN_MAX_TICKERS = max(1, int(os.getenv("THESIS_AUTO_RUN_MAX_TICKERS", "8")))
 
 def load_users() -> dict:
     if USERS_FILE.exists():
@@ -486,6 +489,14 @@ alert_cooldown: dict[str, datetime] = {} # alert key -> last alert time
 alert_price_cache: dict[str, float] = {}  # "ACTION:ticker" -> price at last sent alert
 monitor_status = {"last_check": None, "active": False, "checks_run": 0}
 recommendation_alert_snapshot: dict[str, object] = {"generated_at": None, "data": None}
+thesis_scheduler_status = {
+    "enabled": THESIS_AUTO_RUN_ENABLED,
+    "last_run": None,
+    "active": False,
+    "runs_started": 0,
+    "last_error": None,
+}
+_auto_thesis_running = False
 
 # yfinance info cache — 5 minute TTL to avoid redundant network calls
 _info_cache: dict[str, tuple[dict, datetime]] = {}
@@ -1651,6 +1662,67 @@ async def auto_predict():
         print(f"[Predictions] Auto-refresh failed: {e}")
 
 
+async def auto_thesis():
+    """Run the multi-agent thesis pipeline for the watchlist on a schedule."""
+    global _auto_thesis_running
+    if not THESIS_AUTO_RUN_ENABLED:
+        return
+    if _auto_thesis_running:
+        logger.info("[Thesis] Auto-thesis skipped; previous run still active.")
+        return
+
+    tickers = [_validate_ticker(t) for t in load_watchlist()[:THESIS_AUTO_RUN_MAX_TICKERS]]
+    if not tickers:
+        thesis_scheduler_status["last_error"] = "watchlist_empty"
+        return
+
+    _auto_thesis_running = True
+    thesis_scheduler_status["active"] = True
+    thesis_scheduler_status["runs_started"] += 1
+    thesis_scheduler_status["last_error"] = None
+    thesis_scheduler_status["last_run"] = datetime.now(timezone.utc).isoformat()
+    run_id = str(uuid.uuid4())
+
+    try:
+        import db as _db
+
+        _db.init_db()
+        _db.create_thesis_run(run_id, tickers, run_fresh=True, requested_by="scheduler")
+        _db.update_thesis_run(run_id, status="running")
+
+        orch = _get_orchestrator()
+        completed: list[str] = []
+        failed: list[str] = []
+        loop = asyncio.get_event_loop()
+        for ticker in tickers:
+            try:
+                await loop.run_in_executor(None, lambda t=ticker: orch.run_thesis(t, run_fresh=True))
+                completed.append(ticker)
+            except Exception as exc:
+                failed.append(ticker)
+                logger.error("[Thesis] Auto-thesis failed for %s: %s", ticker, exc)
+            _db.update_thesis_run(run_id, status="running", completed=completed, failed=failed)
+
+        final_status = "completed"
+        if failed and completed:
+            final_status = "partial"
+        elif failed and not completed:
+            final_status = "failed"
+        _db.update_thesis_run(run_id, status=final_status, completed=completed, failed=failed)
+        logger.info("[Thesis] Auto-thesis %s: completed=%s failed=%s", final_status, completed, failed)
+    except Exception as exc:
+        thesis_scheduler_status["last_error"] = str(exc)
+        try:
+            import db as _db
+            _db.update_thesis_run(run_id, status="failed", completed=[], failed=tickers)
+        except Exception:
+            pass
+        logger.exception("[Thesis] Auto-thesis run failed: %s", exc)
+    finally:
+        _auto_thesis_running = False
+        thesis_scheduler_status["active"] = False
+
+
 # ── Auth & trade request models ───────────────────────────────────────────────
 class LoginRequest(BaseModel):
     username: str
@@ -1702,9 +1774,20 @@ async def startup():
 
     scheduler.add_job(monitor_stocks, "interval", minutes=5,  id="monitor")
     scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
+    if THESIS_AUTO_RUN_ENABLED:
+        scheduler.add_job(
+            auto_thesis,
+            "interval",
+            minutes=THESIS_AUTO_RUN_INTERVAL_MINUTES,
+            id="multiagent_thesis",
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
+    if THESIS_AUTO_RUN_ENABLED:
+        print(f"[Thesis] Multi-agent thesis scheduled every {THESIS_AUTO_RUN_INTERVAL_MINUTES} minutes.")
 
 @app.on_event("shutdown")
 async def shutdown():
