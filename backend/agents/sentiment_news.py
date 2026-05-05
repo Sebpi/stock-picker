@@ -244,7 +244,8 @@ class SentimentNewsAgent(BaseAgent):
             logger.debug("Existing sentiment news fetch failed for %s: %s", ticker, exc)
             try:
                 import yfinance as yf
-                raw_news = yf.Ticker(ticker).news or []
+                t = yf.Ticker(ticker)
+                raw_news = SentimentNewsAgent._timed_fetch(lambda: t.news, f"{ticker}/news") or []
                 items: list[dict[str, Any]] = []
                 for item in raw_news[:15]:
                     if not hasattr(item, "get"):
