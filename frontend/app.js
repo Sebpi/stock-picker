@@ -1953,6 +1953,28 @@ document.getElementById("btn-refresh-preds").addEventListener("click", () => {
   loadPredictions(true);
 });
 
+document.getElementById("btn-backfill-factors")?.addEventListener("click", async () => {
+  const btn = document.getElementById("btn-backfill-factors");
+  const status = document.getElementById("pred-status");
+  btn.disabled = true;
+  btn.textContent = "Backfilling…";
+  status.textContent = "Retrying factor score fetches in background — refresh in ~30s…";
+  try {
+    const res = await authFetch(`${API}/api/predictions/backfill-factors`, { method: "POST" });
+    const data = await res.json();
+    if (data.tickers?.length === 0) {
+      status.textContent = "All factor scores already present for today.";
+    } else {
+      status.textContent = `Backfill running for: ${(data.tickers || []).join(", ")}. Refresh in ~30s.`;
+    }
+  } catch (err) {
+    status.textContent = "Backfill request failed: " + (err.message || "unknown error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "⟳ Backfill Factors";
+  }
+});
+
 // ── Backtest ───────────────────────────────────────────────────
 
 document.getElementById("btn-backtest").addEventListener("click", async () => {

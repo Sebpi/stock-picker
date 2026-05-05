@@ -3222,7 +3222,7 @@ async def _generate_predictions_impl():
         headlines = []
 
     async def _fetch_pred_ticker(ticker: str) -> dict | None:
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 def _blocking():
                     t = yf.Ticker(ticker)
@@ -3230,7 +3230,9 @@ async def _generate_predictions_impl():
                     hist = t.history(period="60d")   # extended for RSI, SMA50, drawdown
                     news = t.news[:3] if hasattr(t, "news") else []
                     return info, hist, news
-                info, hist, news = await asyncio.to_thread(_blocking)
+                info, hist, news = await asyncio.wait_for(
+                    asyncio.to_thread(_blocking), timeout=20.0
+                )
                 if not isinstance(info, dict):
                     info = {}
                 recent_chg = 0.0
@@ -3604,13 +3606,65 @@ Rules:
         new_preds.append(entry)
 
     save_predictions(predictions)
+
+    # Schedule background backfill for any entries that came back with no factor_scores
+    missing = [e["ticker"] for e in new_preds if not e.get("factor_scores")]
+    if missing:
+        asyncio.ensure_future(_backfill_factor_scores(missing, today))
+
     return {"predictions": new_preds}
+
+
+async def _backfill_factor_scores(tickers: list[str], pred_date: str):
+    """Sequentially retry factor score fetches for tickers that timed out during generation."""
+    await asyncio.sleep(5)
+    logger.info("Factor score backfill starting for %d tickers: %s", len(tickers), tickers)
+    for ticker in tickers:
+        try:
+            def _blocking(t=ticker):
+                yft = yf.Ticker(t)
+                return yft.info, yft.history(period="60d")
+            info, hist = await asyncio.wait_for(asyncio.to_thread(_blocking), timeout=25.0)
+            if not isinstance(info, dict) or not info:
+                continue
+            factors  = compute_factor_scores(info, hist)
+            vol      = compute_volatility(hist)
+            drawdown = compute_max_drawdown(hist)
+            dcf      = compute_dcf_valuation(info)
+            preds = load_predictions()
+            updated = False
+            for p in preds:
+                if p.get("ticker") == ticker and p.get("date") == pred_date and not p.get("factor_scores"):
+                    p["factor_scores"]      = factors
+                    p["annualised_vol_pct"] = vol
+                    p["max_drawdown_pct"]   = drawdown
+                    p["dcf"]                = dcf
+                    updated = True
+            if updated:
+                save_predictions(preds)
+                logger.info("Factor score backfill complete for %s", ticker)
+        except Exception as exc:
+            logger.warning("Factor score backfill failed for %s: %s", ticker, exc)
+        await asyncio.sleep(1.5)  # gentle pacing between tickers
 
 
 @app.post("/api/predictions/generate")
 @limiter.limit("8/hour")
 async def generate_predictions(request: Request):
     return await _generate_predictions_impl()
+
+
+@app.post("/api/predictions/backfill-factors")
+@limiter.limit("4/hour")
+async def backfill_factors(request: Request, current_user: str = Depends(get_current_user)):
+    """Trigger a background backfill of factor scores for today's predictions that are missing them."""
+    preds = load_predictions()
+    today = date.today().isoformat()
+    missing = list({p["ticker"] for p in preds if p.get("date") == today and not p.get("factor_scores")})
+    if not missing:
+        return {"status": "ok", "message": "No missing factor scores for today.", "tickers": []}
+    asyncio.ensure_future(_backfill_factor_scores(missing, today))
+    return {"status": "ok", "message": f"Backfill started for {len(missing)} tickers.", "tickers": missing}
 
 
 @app.get("/api/predictions/backtest")
