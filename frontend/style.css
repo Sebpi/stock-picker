@@ -8,8 +8,8 @@
   --red:   #ef4444;
   --accent: #38bdf8;
   --accent-hover: #0ea5e9;
-  --text-muted: #6b80a8;
-  --text: #b3c5ef;
+  --text-muted: #7e99c8;
+  --text: #dce6f5;
   --bg: #0f1729;
   --surface: #1b2537;
   --surface2: #212c3f;
@@ -23,13 +23,13 @@
 
 html { -webkit-text-size-adjust: 100%; background: #0f1729; }
 
-body { background: #0f1729; color: #b3c5ef; }
-
 body {
+  background: #0f1729;
+  color: #dce6f5;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   min-height: 100vh;
   min-height: 100dvh;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
   font-weight: 400;
   line-height: 1.6;
   overflow-x: hidden;
@@ -376,13 +376,13 @@ textarea:focus { border-color: #38bdf8; }
   -webkit-overflow-scrolling: touch;
 }
 
-table { width: 100%; border-collapse: collapse; font-family: 'Inter', sans-serif; font-size: 0.9rem; font-weight: 500; }
-thead tr { background: #212c3f; }
-th { padding: 0.75rem 1rem; text-align: left; color: var(--text-muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #212c3f; position: sticky; top: 0; z-index: 10; background: #212c3f; }
-tbody tr { border-bottom: 1px solid #212c3f; transition: background 0.1s; cursor: pointer; }
+table { width: 100%; border-collapse: collapse; font-family: 'Inter', sans-serif; font-size: 0.88rem; font-weight: 400; color: #dce6f5; }
+thead tr { background: #1a2844; }
+th { padding: 0.75rem 1rem; text-align: left; color: #8fb3e8; font-weight: 600; font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #2a3a5c; position: sticky; top: 0; z-index: 10; background: #1a2844; }
+tbody tr { border-bottom: 1px solid #1e2d47; transition: background 0.1s; cursor: pointer; }
 tbody tr:last-child { border-bottom: none; }
-tbody tr:hover { background: #212c3f; }
-td { padding: 0.75rem 1rem; }
+tbody tr:hover { background: #1e3055; }
+td { padding: 0.65rem 1rem; color: #dce6f5; }
 
 .change-pos { color: var(--green); }
 .change-neg { color: var(--red); }
