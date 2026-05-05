@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>StockLens - AI-Powered Stock Analysis</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
@@ -55,6 +55,7 @@
       <button class="tab-btn" data-tab="watchlist">Watchlist</button>
       <button class="tab-btn" data-tab="ai">AI Advisor</button>
       <button class="tab-btn" data-tab="predictions">Predictions</button>
+      <button class="tab-btn" data-tab="thesis">Thesis</button>
       <button class="tab-btn" data-tab="backtest">Backtest</button>
       <button class="tab-btn" data-tab="recommendations">Recommendations</button>
       <button class="tab-btn" data-tab="alerts">Alerts</button>
@@ -369,6 +370,33 @@
         <div id="pred-reasoning-body" class="pred-reasoning-body"></div>
       </div>
     </div>
+
+    <!-- Multi-Agent Thesis Tab -->
+    <section id="tab-thesis" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>Multi-Agent Thesis</h2>
+          <p class="pred-subtitle">Structured 3/6/12 month thesis built from fundamentals, valuation, growth revisions, macro, sentiment, technical, industry and portfolio-risk agents.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-thesis-health" class="btn-secondary">Agent Health</button>
+          <button id="btn-thesis-refresh" class="btn-secondary">Refresh Latest</button>
+        </div>
+      </div>
+
+      <div class="thesis-controls">
+        <input id="thesis-ticker" type="text" placeholder="Ticker (e.g. MSFT)" autocomplete="off" />
+        <label class="thesis-check"><input id="thesis-run-fresh" type="checkbox" /> Run fresh agents</label>
+        <button id="btn-thesis-generate" class="btn-primary">Generate Thesis</button>
+      </div>
+
+      <div id="thesis-status" class="status-msg"></div>
+
+      <div id="thesis-health" class="thesis-health hidden"></div>
+      <div id="thesis-output" class="thesis-output">
+        <div class="thesis-empty">Enter a ticker or open Agent Health to inspect the multi-agent pipeline.</div>
+      </div>
+    </section>
 
     <!-- Backtest Tab -->
     <section id="tab-backtest" class="tab">
@@ -934,7 +962,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 
   <!-- Footer -->
   <footer class="app-footer">

@@ -272,6 +272,7 @@ let recReasoningMap = {};
 const TAB_LOADERS = {
   watchlist: () => loadWatchlist(),
   predictions: () => loadPredictions(),
+  thesis: () => loadThesisHealth(false),
   recommendations: () => loadRecommendations(),
   alerts: () => loadAlerts(),
   portfolio: () => loadPortfolio(),
@@ -320,6 +321,27 @@ function changeHtml(pct) {
 }
 
 // ── Screener ──────────────────────────────────────────────────
+function fmtPctValue(value, digits = 1) {
+  if (value == null || Number.isNaN(Number(value))) return "-";
+  const n = Number(value);
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(digits)}%`;
+}
+
+function scoreClass(score) {
+  const n = Number(score || 0);
+  if (n >= 65) return "score-good";
+  if (n <= 40) return "score-bad";
+  return "score-mid";
+}
+
+function qualityClass(value) {
+  const v = String(value || "").toLowerCase();
+  if (["strong", "low", "medium_low"].includes(v)) return "score-good";
+  if (["weak", "insufficient", "high", "medium_high"].includes(v)) return "score-bad";
+  return "score-mid";
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -2410,6 +2432,284 @@ document.getElementById("btn-reset-paper").addEventListener("click", async () =>
 });
 
 // ── Alerts ────────────────────────────────────────────────────
+
+// Multi-Agent Thesis
+
+let thesisCurrentTicker = "";
+let thesisPollTimer = null;
+
+function thesisTicker() {
+  return document.getElementById("thesis-ticker").value.trim().toUpperCase();
+}
+
+function setThesisStatus(message, isError = false) {
+  const status = document.getElementById("thesis-status");
+  if (!status) return;
+  status.textContent = message || "";
+  status.classList.toggle("error", !!isError);
+}
+
+async function loadThesisHealth(showPanel = true) {
+  const panel = document.getElementById("thesis-health");
+  if (!panel) return;
+  try {
+    const res = await authFetch(`${API}/v1/agents/health`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not load agent health");
+    renderThesisHealth(data);
+    if (showPanel) panel.classList.remove("hidden");
+  } catch (err) {
+    panel.classList.remove("hidden");
+    panel.innerHTML = `<div class="thesis-empty">Agent health unavailable: ${safe(err.message)}</div>`;
+  }
+}
+
+function renderThesisHealth(data) {
+  const panel = document.getElementById("thesis-health");
+  const agents = Object.values(data.agents || {});
+  const summary = data.summary || {};
+  panel.innerHTML = `
+    <div class="thesis-health-head">
+      <div>
+        <h3>Agent Health</h3>
+        <p>${summary.healthy || 0} healthy | ${summary.stale || 0} stale | ${summary.never_run || 0} never run</p>
+      </div>
+      <span class="thesis-generated">Updated ${safe(new Date(data.generated_at).toLocaleString())}</span>
+    </div>
+    <div class="thesis-agent-grid">
+      ${agents.map(a => `
+        <div class="thesis-agent-card ${a.stale ? "is-stale" : ""}">
+          <div class="thesis-agent-top">
+            <strong>${safe(a.agent_id)}</strong>
+            <span class="thesis-pill ${a.stale ? "score-bad" : "score-good"}">${a.stale ? "stale" : "fresh"}</span>
+          </div>
+          <div class="thesis-agent-meta">
+            <span>Status: ${safe(a.last_status || "unknown")}</span>
+            <span>Success: ${a.success_rate == null ? "-" : `${Math.round(a.success_rate * 100)}%`}</span>
+            <span>Avg: ${a.avg_duration_secs == null ? "-" : `${Number(a.avg_duration_secs).toFixed(1)}s`}</span>
+            <span>Last: ${a.last_run ? safe(new Date(a.last_run).toLocaleString()) : "never"}</span>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function generateThesis() {
+  const ticker = thesisTicker();
+  if (!ticker) {
+    setThesisStatus("Enter a ticker first.", true);
+    return;
+  }
+  thesisCurrentTicker = ticker;
+  const runFresh = document.getElementById("thesis-run-fresh").checked;
+  const btn = document.getElementById("btn-thesis-generate");
+  btn.disabled = true;
+  setThesisStatus(`Starting thesis run for ${ticker}...`);
+  document.getElementById("thesis-output").innerHTML = `<div class="thesis-empty">Running agents for ${safe(ticker)}...</div>`;
+  try {
+    const res = await authFetch(`${API}/v1/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tickers: [ticker], run_fresh: runFresh }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not start thesis run");
+    pollThesisRun(data.run_id, ticker);
+  } catch (err) {
+    setThesisStatus(err.message || "Could not start thesis run.", true);
+    btn.disabled = false;
+  }
+}
+
+function pollThesisRun(runId, ticker) {
+  clearInterval(thesisPollTimer);
+  const btn = document.getElementById("btn-thesis-generate");
+  let attempts = 0;
+  thesisPollTimer = setInterval(async () => {
+    attempts += 1;
+    try {
+      const res = await authFetch(`${API}/v1/runs/${runId}`);
+      const run = await res.json();
+      if (!res.ok) throw new Error(run.detail || "Could not poll run");
+      setThesisStatus(`Run ${run.status}: ${run.completed?.length || 0} completed, ${run.failed?.length || 0} failed.`);
+      if (["completed", "partial", "failed"].includes(run.status) || attempts > 180) {
+        clearInterval(thesisPollTimer);
+        btn.disabled = false;
+        if (run.status === "failed") {
+          setThesisStatus("Thesis run failed. Check agent health for details.", true);
+          await loadThesisHealth(true);
+        } else {
+          await loadLatestThesis(ticker);
+          await loadThesisHealth(false);
+        }
+      }
+    } catch (err) {
+      clearInterval(thesisPollTimer);
+      btn.disabled = false;
+      setThesisStatus(err.message || "Run polling failed.", true);
+    }
+  }, 2000);
+}
+
+async function loadLatestThesis(tickerOverride = "") {
+  const ticker = (tickerOverride || thesisTicker()).toUpperCase();
+  if (!ticker) {
+    setThesisStatus("Enter a ticker first.", true);
+    return;
+  }
+  thesisCurrentTicker = ticker;
+  document.getElementById("thesis-ticker").value = ticker;
+  setThesisStatus(`Loading latest thesis for ${ticker}...`);
+  try {
+    const [thesisRes, qualityRes, backtestRes] = await Promise.all([
+      authFetch(`${API}/v1/thesis/${encodeURIComponent(ticker)}/latest`),
+      authFetch(`${API}/v1/thesis/${encodeURIComponent(ticker)}/quality`),
+      authFetch(`${API}/v1/backtest/${encodeURIComponent(ticker)}`),
+    ]);
+    const thesis = await thesisRes.json();
+    if (!thesisRes.ok) throw new Error(thesis.detail || `No thesis found for ${ticker}`);
+    const quality = await qualityRes.json().catch(() => ({}));
+    const backtest = await backtestRes.json().catch(() => ({}));
+    renderThesis(thesis, quality, backtest);
+    setThesisStatus(`Latest thesis loaded for ${ticker}.`);
+  } catch (err) {
+    document.getElementById("thesis-output").innerHTML = `<div class="thesis-empty">${safe(err.message || "No thesis available yet.")}</div>`;
+    setThesisStatus(err.message || "No thesis available yet.", true);
+  }
+}
+
+function renderThesis(thesis, quality = {}, backtest = {}) {
+  const forecast = thesis.forecast || {};
+  const agentScores = thesis.agent_scores || {};
+  const weighted = thesis.weighted_scores || {};
+  const narrative = thesis.narrative || {};
+  const generated = thesis.generated_at ? new Date(thesis.generated_at).toLocaleString() : "-";
+  const score = Number(thesis.composite_score || 0);
+
+  document.getElementById("thesis-output").innerHTML = `
+    <div class="thesis-summary">
+      <div class="thesis-score ${scoreClass(score)}">
+        <span>Composite</span>
+        <strong>${score.toFixed(1)}</strong>
+      </div>
+      <div class="thesis-meta-grid">
+        <div><span>Risk</span><strong class="${qualityClass(thesis.risk_rating)}">${safe(thesis.risk_rating || "-")}</strong></div>
+        <div><span>Evidence</span><strong class="${qualityClass(thesis.evidence_quality)}">${safe(thesis.evidence_quality || "-")}</strong></div>
+        <div><span>Price</span><strong>${fmtUsd(thesis.current_price)}</strong></div>
+        <div><span>Generated</span><strong>${safe(generated)}</strong></div>
+      </div>
+    </div>
+
+    <div class="thesis-section">
+      <h3>Forecasts</h3>
+      <div class="thesis-forecast-grid">
+        ${["3m", "6m", "12m"].map(h => renderForecastCard(h, forecast[h], weighted[h])).join("")}
+      </div>
+    </div>
+
+    <div class="thesis-two-col">
+      <div class="thesis-section">
+        <h3>Drivers</h3>
+        ${renderThesisList(thesis.drivers, "No drivers recorded.")}
+      </div>
+      <div class="thesis-section">
+        <h3>Risks</h3>
+        ${renderThesisList(thesis.risks, "No risks recorded.")}
+      </div>
+    </div>
+
+    <div class="thesis-section">
+      <h3>Bull / Base / Bear Narrative</h3>
+      <div class="thesis-narrative-grid">
+        ${["bull", "base", "bear"].map(k => `
+          <div class="thesis-narrative-card thesis-${k}">
+            <span>${safe(k)}</span>
+            <p>${safe(narrative[k] || "No narrative available.")}</p>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="thesis-two-col">
+      <div class="thesis-section">
+        <h3>Agent Scores</h3>
+        ${renderAgentScores(agentScores)}
+      </div>
+      <div class="thesis-section">
+        <h3>Quality And Backtest</h3>
+        ${renderQualityAndBacktest(thesis, quality, backtest)}
+      </div>
+    </div>
+  `;
+}
+
+function renderForecastCard(horizon, forecast, weightedScore) {
+  if (!forecast) return `<div class="thesis-forecast-card"><h4>${safe(horizon)}</h4><p>No forecast.</p></div>`;
+  const conf = forecast.confidence == null ? "-" : `${Math.round(Number(forecast.confidence) * 100)}%`;
+  return `
+    <div class="thesis-forecast-card">
+      <h4>${safe(horizon.toUpperCase())}</h4>
+      <div class="thesis-return-row"><span>Base</span><strong class="${Number(forecast.base_return_pct) >= 0 ? "change-pos" : "change-neg"}">${fmtPctValue(forecast.base_return_pct)}</strong></div>
+      <div class="thesis-return-row"><span>Bull</span><strong class="change-pos">${fmtPctValue(forecast.bull_return_pct)}</strong></div>
+      <div class="thesis-return-row"><span>Bear</span><strong class="change-neg">${fmtPctValue(forecast.bear_return_pct)}</strong></div>
+      <div class="thesis-card-foot">Confidence ${conf} | score ${weightedScore == null ? "-" : Number(weightedScore).toFixed(1)}</div>
+    </div>
+  `;
+}
+
+function renderThesisList(items, emptyText) {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!list.length) return `<p class="thesis-muted">${safe(emptyText)}</p>`;
+  return `<ul class="thesis-list">${list.map(item => `<li>${safe(item)}</li>`).join("")}</ul>`;
+}
+
+function renderAgentScores(scores) {
+  const entries = Object.entries(scores || {}).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return `<p class="thesis-muted">No agent scores recorded.</p>`;
+  return `<div class="thesis-agent-score-list">
+    ${entries.map(([agent, score]) => `
+      <div class="thesis-agent-score-row">
+        <span>${safe(agent.replace("agent.", ""))}</span>
+        <div class="thesis-score-bar"><i style="width:${Math.max(0, Math.min(100, Number(score || 0)))}%"></i></div>
+        <strong class="${scoreClass(score)}">${Number(score || 0).toFixed(1)}</strong>
+      </div>
+    `).join("")}
+  </div>`;
+}
+
+function renderQualityAndBacktest(thesis, quality, backtest) {
+  const flags = [
+    ...(Array.isArray(thesis.quality_flags) ? thesis.quality_flags : []),
+    ...Object.keys(quality.thesis_flags || {}),
+  ];
+  const summary = backtest.summary || {};
+  const calibration = backtest.calibration || {};
+  const backtestRows = Object.entries(summary);
+  const calRows = Object.entries(calibration);
+  return `
+    <div class="thesis-quality-flags">
+      ${(flags.length ? [...new Set(flags)] : ["NO_FLAGS"]).map(f => `<span class="thesis-pill ${f === "NO_FLAGS" ? "score-good" : "score-mid"}">${safe(f)}</span>`).join("")}
+    </div>
+    <div class="thesis-backtest-mini">
+      <h4>Forecast Outcomes</h4>
+      ${backtestRows.length ? backtestRows.map(([h, row]) => `
+        <div class="thesis-mini-row"><span>${safe(h)}</span><strong>${Math.round((row.directional_hit_rate || 0) * 100)}%</strong><em>MAE ${Number(row.mean_absolute_error || 0).toFixed(1)}</em></div>
+      `).join("") : `<p class="thesis-muted">No matured thesis forecasts yet.</p>`}
+      <h4>Calibration</h4>
+      ${calRows.length ? calRows.map(([key, row]) => `
+        <div class="thesis-mini-row"><span>${safe(key)}</span><strong>${Math.round((row.hit_rate || 0) * 100)}%</strong><em>${row.total || 0} sample${row.total === 1 ? "" : "s"}</em></div>
+      `).join("") : `<p class="thesis-muted">Calibration starts once forecasts mature.</p>`}
+    </div>
+  `;
+}
+
+document.getElementById("btn-thesis-generate")?.addEventListener("click", generateThesis);
+document.getElementById("btn-thesis-refresh")?.addEventListener("click", () => loadLatestThesis());
+document.getElementById("btn-thesis-health")?.addEventListener("click", () => loadThesisHealth(true));
+document.getElementById("thesis-ticker")?.addEventListener("keydown", e => {
+  if (e.key === "Enter") loadLatestThesis();
+});
 
 async function loadAlerts() {
   const status = document.getElementById("alerts-status");
