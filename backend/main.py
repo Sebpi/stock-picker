@@ -141,6 +141,7 @@ _SECRET_KEY = os.getenv("SECRET_KEY")
 if not _SECRET_KEY:
     logger.warning("SECRET_KEY is not set; using an ephemeral key. Sessions will be invalidated on restart.")
     _SECRET_KEY = secrets.token_hex(32)
+_SERVICE_KEY = (os.getenv("STOCK_PICKER_SERVICE_KEY") or os.getenv("INTERNAL_SERVICE_KEY") or "").strip()
 _ALGORITHM  = "HS256"
 _TOKEN_HOURS = 24
 
@@ -222,6 +223,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(h
     exc = HTTPException(status_code=401, detail="Not authenticated")
     if not credentials:
         raise exc
+    if _SERVICE_KEY and secrets.compare_digest(credentials.credentials, _SERVICE_KEY):
+        return "service:pick-shovels"
     try:
         payload = jwt.decode(credentials.credentials, _SECRET_KEY, algorithms=[_ALGORITHM])
         username: str = payload.get("sub", "")

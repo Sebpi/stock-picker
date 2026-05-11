@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import sys
 import unittest
 import uuid
@@ -15,6 +16,7 @@ if str(BACKEND) not in sys.path:
 import db
 import evaluation
 from fastapi.testclient import TestClient
+from fastapi.security import HTTPAuthorizationCredentials
 from schemas import (
     AgentSignal,
     Confidence,
@@ -147,6 +149,18 @@ class MultiAgentPhase1Tests(unittest.TestCase):
         finally:
             main._get_orchestrator = original_get_orchestrator
             main.app.dependency_overrides.clear()
+
+    def test_service_key_can_authenticate_v1_integration_calls(self):
+        import main
+
+        old_service_key = main._SERVICE_KEY
+        main._SERVICE_KEY = "svc-test-key"
+        try:
+            creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="svc-test-key")
+            user = asyncio.run(main.get_current_user(creds))
+            self.assertEqual(user, "service:pick-shovels")
+        finally:
+            main._SERVICE_KEY = old_service_key
 
 
 if __name__ == "__main__":
