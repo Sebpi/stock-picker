@@ -679,33 +679,102 @@
     const [status, setStatus] = useState("");
 
     async function scan(scope) {
-      setBusy(true); setStatus(scope === "ticker" ? `Scanning ${ticker}...` : scope === "list" ? "Loading watchlist..." : "Scanning watchlist...");
+      setBusy(true);
+      setStatus(scope === "ticker" ? `Scanning ${ticker}...` : scope === "list" ? "Loading watchlist..." : "Scanning watchlist...");
       try {
         const url = scope === "ticker" ? `/api/sentiment?ticker=${encodeURIComponent(ticker)}`
                   : scope === "list"   ? `/api/sentiment?watchlist=true`
                   :                       `/api/sentiment`;
         const d = await api(url);
-        setData(d); setStatus("Done.");
+        setData({ scope, payload: d });
+        if (scope === "list") setStatus(`Loaded ${(d.watchlist || []).length} watchlist ticker${(d.watchlist || []).length === 1 ? "" : "s"}.`);
+        else if (scope === "scan") setStatus(`Scanned ${(d.results || []).length} ticker${(d.results || []).length === 1 ? "" : "s"}.`);
+        else setStatus("Done.");
       } catch (err) { setStatus("Error: " + err.message); } finally { setBusy(false); }
     }
 
-    function pickItems(d) {
-      if (!d) return [];
-      if (Array.isArray(d)) return d;
-      if (Array.isArray(d.results)) return d.results;
-      if (Array.isArray(d.items)) return d.items;
-      if (Array.isArray(d.watchlist)) return d.watchlist;
-      if (d.ticker || d.symbol) return [d];
-      return [];
-    }
-    const items = pickItems(data);
-
-    function toneFor(score) {
+    function sentimentTone(label, score) {
+      const l = String(label || "").toLowerCase();
+      if (l.includes("bull")) return "text-pulse-green";
+      if (l.includes("bear")) return "text-pulse-red";
+      if (l === "neutral") return "text-pulse-amber";
       const n = Number(score);
       if (!Number.isFinite(n)) return "text-pulse-muted";
-      if (n >= 0.2) return "text-pulse-green";
-      if (n <= -0.2) return "text-pulse-red";
+      if (n > 0) return "text-pulse-green";
+      if (n < 0) return "text-pulse-red";
       return "text-pulse-amber";
+    }
+
+    function sentimentBadge(label) {
+      const l = String(label || "").toLowerCase();
+      if (l.includes("bull")) return "border-pulse-green/30 bg-pulse-green/10 text-pulse-green";
+      if (l.includes("bear")) return "border-pulse-red/30 bg-pulse-red/10 text-pulse-red";
+      if (l === "neutral") return "border-pulse-amber/30 bg-pulse-amber/10 text-pulse-amber";
+      return "border-pulse-line text-pulse-muted";
+    }
+
+    function recoTone(rec) {
+      const r = String(rec || "").toLowerCase();
+      if (r.includes("strong_buy") || r === "buy") return "text-pulse-green";
+      if (r.includes("strong_sell") || r === "sell") return "text-pulse-red";
+      return "text-pulse-muted";
+    }
+
+    function renderResultCard(item, i) {
+      return h(Card, { key: i, className: "p-4" },
+        h("div", { className: "flex items-start justify-between gap-3" },
+          h("div", { className: "min-w-0" },
+            h("div", { className: "font-mono text-lg text-pulse-cyan" }, item.ticker || item.symbol || "—"),
+            h("div", { className: "truncate text-sm text-pulse-muted" }, item.name || "")
+          ),
+          h("div", { className: "text-right" },
+            h("div", { className: "font-mono text-base" }, item.price != null ? "$" + Number(item.price).toFixed(2) : "—"),
+            item.change_pct != null ? h("div", { className: cx("font-mono text-xs", deltaTone(item.change_pct)) }, fmtPct(item.change_pct, 2)) : null
+          )
+        ),
+        h("div", { className: "mt-3 flex flex-wrap items-center gap-2" },
+          item.sentiment ? h(Pill, { className: sentimentBadge(item.sentiment) }, String(item.sentiment).toUpperCase()) : null,
+          item.sentiment_score != null ? h("span", { className: cx("font-mono text-xs", sentimentTone(item.sentiment, item.sentiment_score)) }, "score ", item.sentiment_score >= 0 ? "+" : "", item.sentiment_score) : null,
+          item.recommendation ? h("span", { className: cx("font-mono text-xs uppercase", recoTone(item.recommendation)) }, String(item.recommendation).replace("_", " ")) : null,
+          item.target_mean_price != null ? h("span", { className: "font-mono text-xs text-pulse-muted" }, "target $", Number(item.target_mean_price).toFixed(2)) : null
+        ),
+        item.summary ? h("p", { className: "mt-3 text-sm text-pulse-muted" }, item.summary) : null,
+        Array.isArray(item.headlines) && item.headlines.length ? h("div", { className: "mt-3" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.18em] text-pulse-dim" }, "Recent headlines"),
+          h("ul", { className: "mt-2 grid gap-1 text-sm text-pulse-muted" }, item.headlines.slice(0, 5).map((line, j) =>
+            h("li", { key: j, className: "list-disc pl-5" }, typeof line === "string" ? line : (line.title || line.headline || JSON.stringify(line)))
+          ))
+        ) : item.headline_count === 0 ? h("p", { className: "mt-3 text-xs text-pulse-dim" }, "No recent headlines.") : null,
+        item.error ? h("p", { className: "mt-3 text-sm text-pulse-red" }, item.error) : null
+      );
+    }
+
+    function renderBody() {
+      if (!data) return h(Empty, null, busy ? "Loading..." : "Run a scan to see sentiment.");
+      const { scope, payload } = data;
+
+      // Plain string list (list-watchlist mode) — payload.watchlist is array of tickers
+      if (scope === "list" && Array.isArray(payload.watchlist)) {
+        if (payload.watchlist.length === 0) return h(Empty, null, "Your watchlist is empty. Add tickers in the Watchlist tab.");
+        return h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, `${payload.watchlist.length} watchlist ticker${payload.watchlist.length === 1 ? "" : "s"} — click to scan`),
+          h("div", { className: "flex flex-wrap gap-2" }, payload.watchlist.map(t => h("button", {
+            key: t,
+            onClick: () => { setTicker(t); scan("ticker"); },
+            className: "rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2 font-mono text-sm text-pulse-cyan hover:border-pulse-cyan/60"
+          }, t)))
+        );
+      }
+
+      // Single ticker scan — payload is the result object itself
+      if (scope === "ticker" && payload.ticker) {
+        return h("div", { className: "grid gap-3 md:grid-cols-2" }, renderResultCard(payload, 0));
+      }
+
+      // Watchlist scan — payload.results is array of result objects
+      const items = Array.isArray(payload.results) ? payload.results : (Array.isArray(payload) ? payload : []);
+      if (items.length === 0) return h(Empty, null, payload.detail || "No sentiment results.");
+      return h("div", { className: "grid gap-3 md:grid-cols-2" }, items.map(renderResultCard));
     }
 
     return h("div", null,
@@ -719,27 +788,7 @@
         ),
         h(Status, { message: status, className: "mt-3" })
       ),
-      items.length === 0 ? h(Empty, null, busy ? "Loading..." : "Run a scan to see sentiment.") :
-      h("div", { className: "grid gap-3 md:grid-cols-2" },
-        items.map((item, i) => h(Card, { key: i, className: "p-4" },
-          h("div", { className: "flex items-start justify-between gap-3" },
-            h("div", null,
-              h("div", { className: "font-mono text-lg text-pulse-cyan" }, item.ticker || item.symbol || "—"),
-              h("div", { className: "text-sm text-pulse-muted" }, item.name || "")
-            ),
-            h("div", { className: "text-right" },
-              h("div", { className: cx("font-mono text-xl", toneFor(item.score ?? item.sentiment_score)) }, (item.score ?? item.sentiment_score) == null ? "—" : Number(item.score ?? item.sentiment_score).toFixed(2)),
-              h("div", { className: "text-[10px] uppercase tracking-wide text-pulse-dim" }, "Sentiment")
-            )
-          ),
-          item.summary ? h("p", { className: "mt-3 text-sm text-pulse-muted" }, item.summary) : null,
-          Array.isArray(item.headlines) && item.headlines.length ? h("div", { className: "mt-3" },
-            h("div", { className: "font-mono text-[10px] uppercase tracking-[0.18em] text-pulse-dim" }, "Headlines"),
-            h("ul", { className: "mt-2 grid gap-2 text-sm text-pulse-muted" }, item.headlines.slice(0, 6).map((line, j) => h("li", { key: j, className: "list-disc pl-5" }, typeof line === "string" ? line : (line.title || line.headline || JSON.stringify(line)))))
-          ) : null,
-          item.error ? h("p", { className: "mt-3 text-sm text-pulse-red" }, item.error) : null
-        ))
-      )
+      renderBody()
     );
   }
 
