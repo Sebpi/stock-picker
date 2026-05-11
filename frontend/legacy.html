@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StockLens - AI-Powered Stock Analysis</title>
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
+  <link rel="stylesheet" href="/static/legacy-style.css?v=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+</head>
+<!-- Login overlay -->
+<div id="login-overlay">
+  <div id="login-box">
+    <div class="logo-container">
+      <img src="/static/logo.svg" alt="Stock Picker Logo" class="app-logo">
+    </div>
+    <div id="login-form-wrap">
+      <p class="login-subtitle">Sign in to your account</p>
+      <div id="login-error" class="login-error" style="display:none"></div>
+      <label>Username</label>
+      <input id="login-username" type="text" placeholder="admin" autocomplete="username" />
+      <label>Password</label>
+      <input id="login-password" type="password" placeholder="••••••••" autocomplete="current-password" />
+      <button id="btn-login" class="btn-login-submit">Sign In</button>
+      <a href="#" id="link-forgot" class="login-link">Forgot password?</a>
+    </div>
+    <div id="forgot-form-wrap" style="display:none">
+      <p class="login-subtitle">Reset your password</p>
+      <div id="forgot-msg" class="login-info" style="display:none"></div>
+      <label>Username</label>
+      <input id="forgot-username" type="text" placeholder="admin" />
+      <button id="btn-forgot" class="btn-login-submit">Send Reset Link</button>
+      <a href="#" id="link-back-login" class="login-link">Back to sign in</a>
+    </div>
+    <div id="reset-form-wrap" style="display:none">
+      <p class="login-subtitle">Set a new password</p>
+      <div id="reset-error" class="login-error" style="display:none"></div>
+      <label>New Password</label>
+      <input id="reset-password" type="password" placeholder="New password" />
+      <label>Confirm Password</label>
+      <input id="reset-confirm" type="password" placeholder="Confirm password" />
+      <button id="btn-reset" class="btn-login-submit">Set Password</button>
+    </div>
+  </div>
+</div>
+
+<body>
+  <header>
+    <div class="logo-container">
+      <img src="/static/logo.svg" alt="Stock Picker Logo" class="app-logo">
+    </div>
+    <nav>
+      <button class="tab-btn active" data-tab="screener">Screener</button>
+      <button class="tab-btn" data-tab="watchlist">Watchlist</button>
+      <button class="tab-btn" data-tab="ai">AI Advisor</button>
+      <button class="tab-btn" data-tab="predictions">Predictions</button>
+      <button class="tab-btn" data-tab="thesis">Thesis</button>
+      <button class="tab-btn" data-tab="backtest">Backtest</button>
+      <button class="tab-btn" data-tab="recommendations">Recommendations</button>
+      <button class="tab-btn" data-tab="alerts">Alerts</button>
+      <button class="tab-btn" data-tab="portfolio">Portfolio</button>
+      <button class="tab-btn" data-tab="paper">Paper P&amp;L</button>
+      <button class="tab-btn" data-tab="sentiment">Sentiment</button>
+    </nav>
+    <button id="btn-logout" class="btn-logout" title="Sign out">⏻ Logout</button>
+  </header>
+
+  <!-- Loading overlay -->
+  <div id="loader-overlay">
+    <div class="loader-box">
+      <div class="candles">
+        <div class="candle" style="--h:55%;--color:#22c55e;--delay:0s"><div class="wick"></div><div class="body"></div></div>
+        <div class="candle" style="--h:75%;--color:#ef4444;--delay:0.15s"><div class="wick"></div><div class="body"></div></div>
+        <div class="candle" style="--h:40%;--color:#22c55e;--delay:0.3s"><div class="wick"></div><div class="body"></div></div>
+        <div class="candle" style="--h:90%;--color:#22c55e;--delay:0.45s"><div class="wick"></div><div class="body"></div></div>
+        <div class="candle" style="--h:60%;--color:#ef4444;--delay:0.6s"><div class="wick"></div><div class="body"></div></div>
+        <div class="candle" style="--h:45%;--color:#ef4444;--delay:0.75s"><div class="wick"></div><div class="body"></div></div>
+        <div class="candle" style="--h:80%;--color:#22c55e;--delay:0.9s"><div class="wick"></div><div class="body"></div></div>
+      </div>
+      <p class="loader-msg" id="loader-msg">Crunching the numbers…</p>
+    </div>
+  </div>
+
+  <main>
+    <!-- Screener Tab -->
+    <section id="tab-screener" class="tab active">
+      <div class="filters">
+        <div class="filter-group">
+          <label>Index</label>
+          <select id="filter-index">
+            <option value="">All</option>
+            <option value="sp500">S&amp;P 500</option>
+            <option value="nasdaq100">NASDAQ 100</option>
+            <option value="ftse250">FTSE 250</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Sector</label>
+          <select id="filter-sector">
+            <option value="">All Sectors</option>
+            <option>Technology</option>
+            <option>Healthcare</option>
+            <option>Financial Services</option>
+            <option>Consumer Cyclical</option>
+            <option>Consumer Defensive</option>
+            <option>Energy</option>
+            <option>Industrials</option>
+            <option>Communication Services</option>
+            <option>Basic Materials</option>
+            <option>Utilities</option>
+            <option>Real Estate</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>P/E <span class="tip" data-tip="Price-to-Earnings Ratio&#10;&#10;Share price ÷ earnings per share. Tells you how much investors pay for £1 of profit.&#10;&#10;✅ Good: &lt;15 = cheap, 15–25 = fair value&#10;⚠️ Caution: &gt;30 = expensive, may be priced for perfection&#10;&#10;Note: negative P/E means the company is losing money.">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="pe" data-op="max" title="Click to toggle ≤ / ≥">≤</button>
+            <input type="number" id="filter-pe" placeholder="e.g. 25" step="any" />
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>PEG <span class="tip" data-tip="Price/Earnings-to-Growth Ratio&#10;&#10;P/E ÷ expected earnings growth rate. Adjusts P/E for how fast the company is growing — a cheaper way to spot value in growth stocks.&#10;&#10;✅ Good: &lt;1.0 = undervalued relative to growth&#10;✅ Fair: 1.0–2.0 = reasonably priced&#10;⚠️ Caution: &gt;2.0 = paying a lot for growth">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="peg" data-op="max" title="Click to toggle ≤ / ≥">≤</button>
+            <input type="number" id="filter-peg" placeholder="e.g. 1.5" step="0.1" />
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>P/B <span class="tip" data-tip="Price-to-Book Ratio&#10;&#10;Share price ÷ net assets per share (what the company owns minus what it owes). Shows if you are paying more than the company's accounting value.&#10;&#10;✅ Good: &lt;1.5 = trading near or below asset value&#10;✅ Fair: 1.5–3.0 = moderate premium&#10;⚠️ Caution: &gt;5 = very expensive vs. assets (common in asset-light tech)">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="pb" data-op="max" title="Click to toggle ≤ / ≥">≤</button>
+            <input type="number" id="filter-pb" placeholder="e.g. 3" step="0.1" />
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>EV/EBITDA <span class="tip" data-tip="Enterprise Value ÷ Earnings Before Interest, Tax, Depreciation &amp; Amortisation&#10;&#10;Compares the total cost to buy the whole business against its operating profit. More comprehensive than P/E as it accounts for debt and is not distorted by accounting choices.&#10;&#10;✅ Good: &lt;10 = potentially undervalued&#10;✅ Fair: 10–15 = reasonable&#10;⚠️ Caution: &gt;20 = expensive on this measure">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="ev" data-op="max" title="Click to toggle ≤ / ≥">≤</button>
+            <input type="number" id="filter-ev" placeholder="e.g. 15" step="any" />
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>FCF Yield % <span class="tip" data-tip="Free Cash Flow Yield&#10;&#10;Free cash flow ÷ market cap × 100. Shows how much real cash the company generates relative to its price — often seen as harder to fake than reported earnings.&#10;&#10;✅ Good: &gt;5% = strong cash generation&#10;✅ Decent: 2–5%&#10;⚠️ Caution: &lt;2% or negative = limited or no free cash">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="fcf" data-op="min" title="Click to toggle ≥ / ≤">≥</button>
+            <input type="number" id="filter-fcf" placeholder="e.g. 4" step="0.5" />
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>Market Cap ($B) <span class="tip" data-tip="Market Capitalisation&#10;&#10;Total market value of all shares outstanding. Indicates the size of the company.&#10;&#10;🏢 Mega-cap: &gt;$200B (e.g. Apple, Microsoft)&#10;🏢 Large-cap: $10B–$200B&#10;📈 Mid-cap: $2B–$10B (higher growth potential, more risk)&#10;📉 Small-cap: &lt;$2B (higher risk, higher reward)">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="cap" data-op="min" title="Click to toggle ≥ / ≤">≥</button>
+            <input type="number" id="filter-cap" placeholder="e.g. 10" step="any" />
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>Avg Volume (M) <span class="tip" data-tip="Average Daily Trading Volume&#10;&#10;How many shares trade hands on an average day (in millions). Higher volume means it is easier to buy or sell without moving the price.&#10;&#10;✅ Good: &gt;1M shares/day = liquid, easy to trade&#10;⚠️ Caution: &lt;500K = thinly traded, wider bid/ask spreads">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="vol" data-op="min" title="Click to toggle ≥ / ≤">≥</button>
+            <input type="number" id="filter-vol" placeholder="e.g. 1" step="any" />
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>Revenue Growth % <span class="tip" data-tip="Year-over-Year Revenue Growth&#10;&#10;How fast the company's sales are growing compared to the same period last year.&#10;&#10;✅ Good: &gt;10% = strong growth&#10;✅ Decent: 5–10%&#10;⚠️ Caution: &lt;5% = slow growth  ❌ Negative = shrinking revenue">ⓘ</span></label>
+          <div class="filter-input-row">
+            <button class="filter-op-btn" data-filter="rev-growth" data-op="min" title="Click to toggle ≥ / ≤">≥</button>
+            <input type="number" id="filter-rev-growth" placeholder="e.g. 10" step="1" />
+          </div>
+        </div>
+        <button id="btn-screen" class="btn-primary">Run Screen</button>
+      </div>
+
+      <div class="screener-search-wrap">
+        <input type="text" id="screener-search" placeholder="Search by ticker or name…" autocomplete="off" />
+      </div>
+
+      <div id="screen-status" class="status-msg"></div>
+
+      <div class="table-wrap">
+        <table id="screen-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Name</th>
+              <th>Sector</th>
+              <th>Price</th>
+              <th>P/E <span class="tip tip-left" data-tip="Price-to-Earnings&#10;Share price ÷ EPS&#10;&#10;✅ &lt;15 cheap  ✅ 15–25 fair&#10;⚠️ &gt;30 expensive">ⓘ</span></th>
+              <th>PEG <span class="tip tip-left" data-tip="P/E ÷ Growth Rate&#10;Adjusts P/E for growth speed&#10;&#10;✅ &lt;1 undervalued  ✅ 1–2 fair&#10;⚠️ &gt;2 expensive for growth">ⓘ</span></th>
+              <th>P/B <span class="tip tip-left" data-tip="Price-to-Book&#10;Share price ÷ net assets per share&#10;&#10;✅ &lt;1.5 near asset value&#10;✅ 1.5–3 moderate&#10;⚠️ &gt;5 high premium">ⓘ</span></th>
+              <th>EV/EBITDA <span class="tip tip-left" data-tip="Enterprise Value ÷ Operating Profit&#10;Total cost to buy the business vs. earnings&#10;&#10;✅ &lt;10 undervalued  ✅ 10–15 fair&#10;⚠️ &gt;20 expensive">ⓘ</span></th>
+              <th>FCF Yield <span class="tip tip-left" data-tip="Free Cash Flow ÷ Market Cap&#10;Real cash generated relative to price&#10;&#10;✅ &gt;5% strong  ✅ 2–5% decent&#10;⚠️ &lt;2% or negative = weak cash">ⓘ</span></th>
+              <th>Rev Growth <span class="tip tip-left" data-tip="Year-over-Year Revenue Growth&#10;&#10;✅ &gt;10% strong  ✅ 5–10% decent&#10;⚠️ &lt;5% slow  ❌ Negative = shrinking">ⓘ</span></th>
+              <th>Mkt Cap <span class="tip tip-left" data-tip="Total market value of all shares&#10;&#10;🏢 &gt;$200B Mega-cap&#10;🏢 $10–200B Large-cap&#10;📈 $2–10B Mid-cap&#10;📉 &lt;$2B Small-cap">ⓘ</span></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="screen-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Watchlist Tab -->
+    <section id="tab-watchlist" class="tab">
+      <div class="tab-header">
+        <h2>My Watchlist</h2>
+        <button id="btn-refresh-watchlist" class="btn-secondary">↻ Refresh</button>
+      </div>
+      <div id="watchlist-status" class="status-msg"></div>
+      <div class="table-wrap">
+        <table id="watchlist-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Name</th>
+              <th>Price</th>
+              <th>Change</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="watchlist-body"></tbody>
+        </table>
+      </div>
+      <p id="watchlist-empty" class="empty-msg">Your watchlist is empty. Add stocks from the Screener.</p>
+    </section>
+
+    <!-- Sentiment Tab -->
+    <section id="tab-sentiment" class="tab">
+      <div class="tab-header">
+        <h2>Sentiment Scanner</h2>
+        <div class="sentiment-actions">
+          <button id="btn-sentiment-list" class="btn-secondary">List Watchlist</button>
+          <button id="btn-sentiment-scan" class="btn-primary">Scan Watchlist</button>
+        </div>
+      </div>
+      <div class="sentiment-input-row">
+        <input id="sentiment-ticker" type="text" placeholder="Ticker (e.g. IONQ)" />
+        <button id="btn-sentiment-ticker" class="btn-secondary">Scan Ticker</button>
+      </div>
+      <div id="sentiment-status" class="status-msg"></div>
+      <div id="sentiment-result" class="sentiment-result"><pre id="sentiment-output"></pre></div>
+    </section>
+
+    <!-- AI Advisor Tab -->
+    <section id="tab-ai" class="tab">
+      <div class="ai-container">
+        <h2>AI Stock Advisor</h2>
+
+        <!-- Stock Research Section -->
+        <div class="research-section">
+          <h3>Stock Research</h3>
+          <p class="ai-subtitle">Enter one or more stock tickers for live financial and technical analysis only.</p>
+          <input type="text" id="research-query" placeholder="e.g. NVDA or NVDA AMD TSM" />
+          <button id="btn-research" class="btn-primary">Research Stock</button>
+          <div id="research-status" class="status-msg"></div>
+          <div id="research-loader" class="research-loader hidden">
+            <div class="spinner"></div>
+          </div>
+          <div id="research-response" class="ai-response"></div>
+        </div>
+
+        <hr class="ai-divider">
+
+        <!-- General AI Query Section -->
+        <div class="query-section">
+          <h3>General Investment Questions</h3>
+          <p class="ai-subtitle">Describe what you're looking for and Claude will suggest stocks with analysis.</p>
+          <textarea id="ai-query" rows="4" placeholder="e.g. I'm looking for dividend-paying tech stocks with stable earnings and moderate growth..."></textarea>
+          <button id="btn-ask" class="btn-primary">Ask Claude</button>
+          <div id="ai-status" class="status-msg"></div>
+          <div id="ai-response" class="ai-response"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+    <!-- Predictions Tab -->
+    <section id="tab-predictions" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>Daily Predictions</h2>
+          <p class="pred-subtitle">Claude analyses macro trends, news (Yahoo Finance, MarketWatch) and stock fundamentals to predict next-day moves. Learns from past accuracy.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-generate" class="btn-primary">Generate Today's Predictions</button>
+          <button id="btn-refresh-preds" class="btn-secondary">↻ Refresh Actuals</button>
+          <button id="btn-backfill-factors" class="btn-secondary" title="Retry factor score fetch for today's predictions with missing factors">⟳ Backfill Factors</button>
+        </div>
+      </div>
+
+      <div id="pred-status" class="status-msg"></div>
+      <div id="pred-refresh-info" class="status-msg" style="font-size:0.92rem;color:var(--text-muted);margin-top:-0.25rem"></div>
+
+      <!-- Date period filter -->
+      <div class="pred-period-filters">
+        <button class="pred-period-btn active" data-period="all">All</button>
+        <button class="pred-period-btn" data-period="today">Today</button>
+        <button class="pred-period-btn" data-period="week">This Week</button>
+        <button class="pred-period-btn" data-period="month">This Month</button>
+        <button class="pred-period-btn" data-period="ytd">YTD</button>
+      </div>
+
+      <!-- Accuracy summary -->
+      <div id="accuracy-bar" class="accuracy-bar hidden">
+        <div class="acc-item"><span class="acc-label">Directional Accuracy</span><span id="acc-pct" class="acc-value">—</span></div>
+        <div class="acc-item"><span class="acc-label">Total Predictions</span><span id="acc-total" class="acc-value">—</span></div>
+        <div class="acc-item"><span class="acc-label">Avg Predicted</span><span id="acc-avg-pred" class="acc-value">—</span></div>
+        <div class="acc-item"><span class="acc-label">Avg Actual</span><span id="acc-avg-actual" class="acc-value">—</span></div>
+      </div>
+
+      <details class="factor-guide">
+        <summary>How to read Factor Scores</summary>
+        <div class="factor-guide-body">
+          <table>
+            <thead><tr><th>Badge</th><th>Factor</th><th>What it measures</th><th>Strong signal</th></tr></thead>
+            <tbody>
+              <tr><td><span class="factor-badge factor-green">V<span class="factor-val">score</span></span></td><td>Value</td><td>P/E, P/B, EV/EBITDA, FCF yield, PEG ratio</td><td>≥ 70 = cheap vs fundamentals</td></tr>
+              <tr><td><span class="factor-badge factor-green">M<span class="factor-val">score</span></span></td><td>Momentum</td><td>RSI-14, 52-week position, price vs 50-day SMA, 5-day change</td><td>≥ 70 = bullish trend intact</td></tr>
+              <tr><td><span class="factor-badge factor-green">Q<span class="factor-val">score</span></span></td><td>Quality</td><td>ROE, gross &amp; net margin, debt/equity, current ratio</td><td>≥ 70 = strong balance sheet</td></tr>
+              <tr><td><span class="factor-badge factor-green">G<span class="factor-val">score</span></span></td><td>Growth</td><td>Revenue growth, EPS growth, fwd P/E trend, operating margin</td><td>≥ 70 = accelerating earnings</td></tr>
+              <tr><td><span class="factor-badge factor-green">⊕<span class="factor-val">score</span></span></td><td>Composite</td><td>Average of V + M + Q + G — single headline score to rank stocks against each other</td><td>≥ 70 = broad conviction across all pillars</td></tr>
+              <tr><td><span class="change-pos" style="font-size:0.8rem;font-weight:700">▲MoS%</span></td><td>Margin of Safety</td><td>DCF intrinsic value vs current price. ▲ = undervalued (model sees upside), ▼ = overvalued (priced above intrinsic value). Shown as null when earnings are negative or cash flows are distorted — the model suppresses unreliable valuations.</td><td>▲ 30%+ = meaningfully undervalued · ▼ = avoid or monitor</td></tr>
+            </tbody>
+          </table>
+          <p class="factor-guide-tip">
+            <strong>Colour key:</strong> <span style="color:#22c55e">Green ≥ 70</span> · <span style="color:#eab308">Amber 45–69</span> · <span style="color:#ef4444">Red &lt; 45</span><br>
+            <strong>Sub-scores (small text below badges):</strong> RSI — overbought &gt; 70, oversold &lt; 30 &nbsp;·&nbsp; 52w% — where price sits in its 52-week range &nbsp;·&nbsp; SMA — % above/below 50-day moving average &nbsp;·&nbsp; FCF — free cash flow yield (&gt; 8% is strong)<br>
+            <strong>How to read a stock:</strong> Start with ⊕ as a headline — ≥ 65 is a solid base. Then look at MoS: a positive margin confirms the model thinks the stock is trading below its intrinsic worth. Check which pillars are weak — high V + low Q can mean cheap-but-risky; high M alone may be momentum chasing. The strongest setups combine V ≥ 65, M ≥ 60, Q ≥ 60, and a positive MoS.
+          </p>
+        </div>
+      </details>
+
+      <div class="table-wrap">
+        <table id="pred-table">
+          <thead>
+            <tr id="pred-thead-row">
+              <th data-sort="date">Date</th>
+              <th data-sort="ticker">Ticker</th>
+              <th data-sort="name">Name</th>
+              <th data-sort="current_price">Current</th>
+              <th data-sort="score">Signal</th>
+              <th title="Value / Momentum / Quality / Growth / Composite factor scores + DCF margin of safety">Factors</th>
+              <th data-sort="predicted_3m_pct">3M</th>
+              <th data-sort="predicted_6m_pct">6M</th>
+              <th data-sort="predicted_12m_pct">12M</th>
+              <th data-sort="predicted_24m_pct">24M</th>
+              <th data-sort="predicted_36m_pct">36M</th>
+              <th data-sort="actual_pct">Actual %</th>
+              <th>Variance</th>
+              <th>Result</th>
+              <th data-sort="confidence">Confidence</th>
+              <th>Thesis</th>
+            </tr>
+          </thead>
+          <tbody id="pred-body"></tbody>
+        </table>
+      </div>
+      <p id="pred-empty" class="empty-msg">No predictions yet. Click "Generate Today's Predictions" to start.</p>
+
+    </section>
+
+    <div id="pred-reasoning-overlay" class="overlay hidden">
+      <div class="pred-reasoning-panel">
+        <button id="pred-reasoning-close" class="close-btn">âœ•</button>
+        <div class="pred-reasoning-head">
+          <div class="pred-reasoning-label">Prediction thesis</div>
+          <h3 id="pred-reasoning-title">Stock thesis</h3>
+          <p id="pred-reasoning-company" class="pred-reasoning-company"></p>
+          <div id="pred-reasoning-meta" class="pred-reasoning-meta"></div>
+        </div>
+        <div id="pred-reasoning-body" class="pred-reasoning-body"></div>
+      </div>
+    </div>
+
+    <!-- Multi-Agent Thesis Tab -->
+    <section id="tab-thesis" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>Multi-Agent Thesis</h2>
+          <p class="pred-subtitle">Structured 3/6/12 month thesis built from fundamentals, valuation, growth revisions, macro, sentiment, technical, industry and portfolio-risk agents.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-thesis-ops" class="btn-secondary">Operations</button>
+          <button id="btn-thesis-evaluate" class="btn-secondary">Evaluate Outcomes</button>
+          <button id="btn-thesis-health" class="btn-secondary">Agent Health</button>
+          <button id="btn-thesis-refresh" class="btn-secondary">Refresh Latest</button>
+        </div>
+      </div>
+
+      <div class="thesis-controls">
+        <input id="thesis-ticker" type="text" placeholder="Ticker (e.g. MSFT)" autocomplete="off" />
+        <label class="thesis-check"><input id="thesis-run-fresh" type="checkbox" /> Run fresh agents</label>
+        <button id="btn-thesis-generate" class="btn-primary">Generate Thesis</button>
+      </div>
+
+      <div class="thesis-controls" style="margin-top:6px">
+        <input id="thesis-compare-input" type="text" placeholder="Compare: MSFT,AAPL,NVDA" autocomplete="off" style="flex:1" />
+        <button id="btn-thesis-compare" class="btn-primary" style="white-space:nowrap">Compare</button>
+      </div>
+      <div id="thesis-compare-output"></div>
+
+      <div id="thesis-status" class="status-msg"></div>
+
+      <div id="thesis-ops" class="thesis-health hidden"></div>
+      <div id="thesis-health" class="thesis-health hidden"></div>
+      <div id="thesis-output" class="thesis-output">
+        <div class="thesis-empty">Enter a ticker or open Agent Health to inspect the multi-agent pipeline.</div>
+      </div>
+    </section>
+
+    <!-- Backtest Tab -->
+    <section id="tab-backtest" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>4-Week Backtest</h2>
+          <p class="pred-subtitle">Replays the sentiment scoring model against 4 weeks of historical data to measure directional accuracy. Uses VIX, S&P momentum, beta, and fundamentals (news excluded — historical headlines unavailable).</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-backtest" class="btn-primary">▶ Run Backtest</button>
+        </div>
+      </div>
+      <!-- Interpretation guide -->
+      <div class="backtest-guide">
+        <h4>How to read the results</h4>
+        <div class="guide-grid">
+          <div class="guide-card">
+            <span class="guide-icon">🎯</span>
+            <strong>Accuracy %</strong>
+            <p>How often the model predicted the correct <em>direction</em> (up or down) for the next day. 50% = coin flip. Above 60% = model has an edge for that stock.</p>
+          </div>
+          <div class="guide-card">
+            <span class="guide-icon">📏</span>
+            <strong>Variance ±%</strong>
+            <p>How far off the predicted <em>magnitude</em> was from the actual move. ±1.2% means the predicted % was on average 1.2 points away from reality. Lower is better.</p>
+          </div>
+          <div class="guide-card guide-card--warn">
+            <span class="guide-icon">🔴</span>
+            <strong>Red + Small Variance</strong>
+            <p>Dangerous combination. Model is correctly sizing the move but has the direction inverted. The stock likely behaves counter-cyclically — consider flipping its signal (e.g. defensive stocks that rise when VIX spikes).</p>
+          </div>
+          <div class="guide-card guide-card--good">
+            <span class="guide-icon">🟢</span>
+            <strong>Green + Small Variance</strong>
+            <p>Ideal. Model is getting direction right and the magnitude is close. High confidence in predictions for this stock.</p>
+          </div>
+          <div class="guide-card">
+            <span class="guide-icon">🟡</span>
+            <strong>Green + Large Variance</strong>
+            <p>Direction is right but magnitude is off. Useful for trade direction but don't rely on the predicted % size of the move.</p>
+          </div>
+          <div class="guide-card">
+            <span class="guide-icon">⚪</span>
+            <strong>50–60% Accuracy</strong>
+            <p>Marginal — close to random chance. Not enough data to trust this stock's predictions. Watch for improvement as more days accumulate.</p>
+          </div>
+        </div>
+      </div>
+      <div class="assumption-note">
+        <h4>Assumptions</h4>
+        <p>The backtest does not assume you bought every stock in the watchlist. It only replays signals that cleared the model's buy threshold and then applies the app's simplified position-sizing rules.</p>
+        <p>It is also not using your exact real trades or proving you will reach the target. It is a model replay of selected signals over recent history, meant to test whether the signal logic had an edge.</p>
+      </div>
+
+      <div id="backtest-status" class="status-msg"></div>
+      <div id="backtest-summary" class="backtest-summary hidden"></div>
+      <div id="backtest-by-ticker" class="backtest-by-ticker hidden"></div>
+      <div id="backtest-table-wrap" class="table-wrap hidden">
+        <table id="backtest-table">
+          <thead>
+            <tr>
+              <th>Date</th><th>Ticker</th><th>VIX</th><th>S&P 5d</th>
+              <th>Sentiment</th><th>Fund Adj</th><th>Predicted %</th>
+              <th>Actual %</th><th>Variance</th><th>Result</th>
+            </tr>
+          </thead>
+          <tbody id="backtest-body"></tbody>
+        </table>
+      </div>
+
+      <!-- P&L Simulator -->
+      <div class="sim-section">
+        <div class="backtest-header">
+          <div>
+            <h3>P&L Simulator</h3>
+            <p class="pred-subtitle">Replays every buy signal through the position sizing model using actual returns, then runs 1,000 Monte Carlo simulations to project 12 months forward.</p>
+          </div>
+          <button id="btn-simulate" class="btn-primary">▶ Run Simulator</button>
+        </div>
+        <div id="sim-status" class="status-msg"></div>
+        <div id="sim-results" class="hidden">
+          <!-- Key stats -->
+          <div id="sim-stats" class="backtest-summary" style="margin-bottom:1rem"></div>
+          <!-- Monte Carlo outcome cards -->
+          <div id="sim-mc-cards" class="sim-mc-cards"></div>
+          <div class="sim-explainer">
+            <h4>What this means</h4>
+            <p>Monte Carlo does not predict one exact future. It runs 1,000 possible 12-month paths using your recent win rate, average win/loss size, and trading frequency, then shows a range of outcomes.</p>
+            <p>The 10th percentile is a cautious case, the 50th percentile is the middle outcome, and the 90th percentile is a strong upside case. The target probability shows how often those 1,000 simulated paths finished above your goal.</p>
+          </div>
+          <div class="assumption-note">
+            <h4>Simulator assumptions</h4>
+            <p>The simulator assumes you keep following the model's qualifying buy signals and position-sizing rules. It does not assume you buy every recommendation, and it does not track your exact real brokerage execution.</p>
+            <p>Reaching the target here is a probability estimate under those assumptions, not a promise that a string of marginal gains will compound exactly into the target amount.</p>
+          </div>
+          <!-- Chart -->
+          <div class="sim-chart-controls">
+            <span class="sim-chart-label">Chart size</span>
+            <button id="sim-size-compact" class="btn-secondary sim-size-btn">Compact</button>
+            <button id="sim-size-default" class="btn-secondary sim-size-btn">Default</button>
+            <button id="sim-size-large" class="btn-secondary sim-size-btn">Large</button>
+          </div>
+          <div id="sim-chart-wrap" class="sim-chart-wrap sim-chart-wrap-default">
+            <canvas id="sim-chart"></canvas>
+          </div>
+          <p class="sim-disclaimer">Monte Carlo uses observed win rate, avg win/loss magnitude, and avg trades/day from the 4-week backtest. Past performance does not guarantee future results.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Recommendations Tab -->
+    <section id="tab-recommendations" class="tab">
+      <div class="pred-header">
+        <div>
+          <h2>Recommendations</h2>
+          <p class="pred-subtitle">Buy/sell signals sized from your £100,000 float. Target: £200,000 in 12 months.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-load-recs" class="btn-primary">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div id="rec-status" class="status-msg"></div>
+
+      <!-- Progress toward target -->
+      <div id="rec-progress-card" class="rec-progress-card hidden">
+        <div class="rec-progress-header">
+          <div class="rec-progress-stats">
+            <div class="rec-stat"><span class="rec-stat-label">Total Value</span><span id="rec-total-value" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Invested</span><span id="rec-invested" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Available Cash</span><span id="rec-cash" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Total P&L</span><span id="rec-pnl" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Target (12 months)</span><span id="rec-target" class="rec-stat-value">—</span></div>
+            <div class="rec-stat"><span class="rec-stat-label">Remaining</span><span id="rec-remaining" class="rec-stat-value">—</span></div>
+          </div>
+        </div>
+        <div class="rec-progress-bar-wrap">
+          <div class="rec-progress-labels">
+            <span id="rec-progress-label">0% of target</span>
+            <span id="rec-progress-date"></span>
+          </div>
+          <div class="rec-progress-track">
+            <div id="rec-progress-fill" class="rec-progress-fill" style="width:0%"></div>
+            <div class="rec-progress-target-marker" title="£200,000 target"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SELL recommendations -->
+      <div id="rec-sells-wrap" class="hidden">
+        <h3 class="rec-section-title rec-section-sell">⚠ Sell Signals</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Ticker</th><th>Name</th><th>Trigger</th><th>Qty</th>
+                <th>Current Price</th><th>Est. Proceeds</th><th>Unrealised P&L</th>
+                <th>Predicted %</th><th>Reasoning</th><th>Paper Trade</th>
+              </tr>
+            </thead>
+            <tbody id="rec-sells-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- BUY recommendations -->
+      <div id="rec-buys-wrap" class="hidden">
+        <h3 class="rec-section-title rec-section-buy">↑ Buy Signals</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Rank</th><th>Ticker</th><th>Name</th><th>Confidence</th>
+                <th>Accuracy</th><th>Predicted %</th><th>Current Price</th>
+                <th>Qty</th><th>Est. Cost</th><th>Reasoning</th><th>Paper Trade</th>
+              </tr>
+            </thead>
+            <tbody id="rec-buys-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <p id="rec-empty" class="empty-msg hidden">No recommendations available. Generate today's predictions first.</p>
+    </section>
+
+    <!-- Alerts Tab -->
+    <section id="tab-alerts" class="tab">
+      <div class="alerts-header">
+        <div>
+          <h2>Recommendation Alerts</h2>
+          <p class="alerts-subtitle">Alerts highlight stronger recommendation-driven BUY opportunities first, then owned-stock SELL signals. The focus is on higher-conviction, longer-horizon setups rather than daily swings.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-test-alert" class="btn-secondary">Send Preview Email</button>
+          <button id="btn-test-whatsapp" class="btn-secondary">Send Test WhatsApp</button>
+          <button id="btn-refresh-alerts" class="btn-secondary">↻ Refresh</button>
+          <button id="btn-clear-alerts" class="btn-secondary" style="color:var(--red);border-color:var(--red)">Clear History</button>
+        </div>
+      </div>
+
+      <!-- Monitor status bar -->
+      <div id="monitor-status-bar" class="monitor-bar">
+        <div class="mon-item">
+          <span class="mon-label">Monitor</span>
+          <span id="mon-active" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Last Check</span>
+          <span id="mon-last" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Watching</span>
+          <span id="mon-watching" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Email</span>
+          <span id="mon-email" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">SMS</span>
+          <span id="mon-sms" class="mon-value">—</span>
+        </div>
+        <div class="mon-item">
+          <span class="mon-label">Alert Focus</span>
+          <span id="mon-swing" class="mon-value">—</span>
+        </div>
+      </div>
+
+      <div id="alerts-status" class="status-msg"></div>
+
+      <!-- Alert Settings -->
+      <div class="alert-settings-card">
+        <h3 class="alert-settings-title">Alert Settings</h3>
+        <div class="alert-settings-grid">
+          <div class="alert-setting-row">
+            <label for="as-initial-float">Start Capital</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-initial-float" type="number" min="1000" step="1000" value="200000">
+              <span class="alert-setting-unit">GBP</span>
+            </div>
+            <span class="alert-setting-hint">Paper trading and recommendation sizing base amount</span>
+          </div>
+          <div class="alert-setting-row">
+            <label for="as-price-swing">Price Swing Threshold</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-price-swing" type="number" min="0.5" max="20" step="0.5" value="3">
+              <span class="alert-setting-unit">%</span>
+            </div>
+            <span class="alert-setting-hint">Min price move to resend alert</span>
+          </div>
+          <div class="alert-setting-row">
+            <label for="as-cooldown">Cooldown</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-cooldown" type="number" min="1" max="168" step="1" value="12">
+              <span class="alert-setting-unit">hrs</span>
+            </div>
+            <span class="alert-setting-hint">Between repeat alerts for same ticker</span>
+          </div>
+          <div class="alert-setting-row">
+            <label for="as-top-buys">Max BUY alerts</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-top-buys" type="number" min="1" max="10" step="1" value="3">
+              <span class="alert-setting-unit">per email</span>
+            </div>
+            <span class="alert-setting-hint">Top BUY recommendations per alert</span>
+          </div>
+          <div class="alert-setting-row">
+            <label for="as-top-sells">Max SELL alerts</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-top-sells" type="number" min="1" max="10" step="1" value="3">
+              <span class="alert-setting-unit">per email</span>
+            </div>
+            <span class="alert-setting-hint">Top SELL signals per alert</span>
+          </div>
+          <div class="alert-setting-row">
+            <label for="as-buy-score">BUY min score</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-buy-score" type="number" min="55" max="95" step="1" value="72">
+              <span class="alert-setting-unit">/ 100</span>
+            </div>
+            <span class="alert-setting-hint">Conviction score required to trigger a BUY alert</span>
+          </div>
+          <div class="alert-setting-row">
+            <label for="as-sell-score">SELL max score</label>
+            <div class="alert-setting-input-wrap">
+              <input id="as-sell-score" type="number" min="20" max="55" step="1" value="42">
+              <span class="alert-setting-unit">/ 100</span>
+            </div>
+            <span class="alert-setting-hint">Score at or below this triggers a SELL alert</span>
+          </div>
+        </div>
+        <div class="alert-settings-footer">
+          <span id="alert-settings-msg" class="alert-settings-msg"></span>
+          <button id="btn-save-alert-settings" class="btn-secondary">Save Settings</button>
+        </div>
+      </div>
+
+      <!-- Alert history table -->
+      <div class="table-wrap">
+        <table id="alerts-table">
+          <thead>
+            <tr>
+              <th>Date / Time</th>
+              <th>Message</th>
+              <th>Channels</th>
+              <th>Trigger</th>
+            </tr>
+          </thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+      </div>
+      <p id="alerts-empty" class="empty-msg">No alerts yet. Once strong BUY or owned-stock SELL signals appear, they’ll show up here and can be emailed or texted.</p>
+
+      <!-- Setup guide -->
+      <div class="setup-guide">
+        <h3>Setup Guide</h3>
+        <div class="setup-steps">
+          <div class="setup-step">
+            <span class="step-num">1</span>
+            <div>
+              <strong>Maintain your watchlist and holdings</strong>
+              <p>BUY alerts draw from the strongest recommendation candidates, while SELL alerts focus on stocks you already hold. Keep your holdings and watchlist current so the alert ranking stays relevant.</p>
+            </div>
+          </div>
+          <div class="setup-step">
+            <span class="step-num">2</span>
+            <div>
+              <strong>Configure Email (Gmail)</strong>
+              <p>In your <code>.env</code> file set <code>SMTP_USER</code>, <code>SMTP_PASS</code> (Gmail App Password), and <code>ALERT_EMAIL</code>. Get an App Password at <strong>myaccount.google.com/apppasswords</strong>.</p>
+            </div>
+          </div>
+          <div class="setup-step">
+            <span class="step-num">3</span>
+            <div>
+              <strong>Configure SMS via Twilio (optional)</strong>
+              <p>Sign up free at <strong>twilio.com</strong>, then set <code>TWILIO_ACCOUNT_SID</code>, <code>TWILIO_AUTH_TOKEN</code>, <code>TWILIO_FROM_NUMBER</code>, <code>TWILIO_TO_NUMBER</code> in your <code>.env</code> file.</p>
+            </div>
+          </div>
+          <div class="setup-step">
+            <span class="step-num">4</span>
+            <div>
+              <strong>Restart the backend</strong>
+              <p>After editing <code>.env</code>, restart uvicorn. Then click <strong>Send Preview Email</strong> or <strong>Send Test WhatsApp</strong> to verify.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Portfolio Tab -->
+    <section id="tab-portfolio" class="tab">
+      <div class="portfolio-header">
+        <div>
+          <h2>Portfolio</h2>
+          <p class="portfolio-subtitle">Track your purchased stocks, cost basis, and profit/loss.</p>
+        </div>
+        <div class="pred-actions">
+          <a id="btn-portfolio-template" href="/api/portfolio/template" download class="btn-secondary">↓ CSV Template</a>
+          <button id="btn-import-portfolio" class="btn-secondary">⇪ Import CSV</button>
+          <input id="import-file-input" type="file" accept=".csv" style="display:none" />
+          <button id="btn-import-pdf" class="btn-secondary">⇪ Import Saxo PDF</button>
+          <input id="import-pdf-input" type="file" accept=".pdf" style="display:none" />
+          <button id="btn-refresh-portfolio" class="btn-secondary">↻ Refresh</button>
+        </div>
+      </div>
+
+      <!-- Summary bar -->
+      <div id="portfolio-summary" class="portfolio-summary hidden">
+        <div class="port-item"><span class="port-label">Invested Cost</span><span id="port-invested" class="port-value">—</span></div>
+        <div class="port-item"><span class="port-label">Market Value</span><span id="port-current" class="port-value">—</span></div>
+        <div class="port-item"><span class="port-label">Unrealised P&L</span><span id="port-unrealised" class="port-value">—</span></div>
+        <div class="port-item"><span class="port-label">Realised P&L</span><span id="port-realised" class="port-value">—</span></div>
+        <div class="port-item"><span class="port-label">Running P&L</span><span id="port-total" class="port-value">—</span></div>
+      </div>
+
+      <!-- Trade form -->
+      <div class="trade-form">
+        <input id="trade-ticker" type="text" placeholder="Ticker (e.g. AAPL)" />
+        <input id="trade-qty" type="number" placeholder="Qty" min="0.0001" step="any" />
+        <input id="trade-price" type="number" placeholder="Price ($)" min="0" step="any" />
+        <input id="trade-date" type="date" />
+        <button id="btn-buy" class="btn-buy">+ Buy</button>
+        <button id="btn-sell" class="btn-sell">− Sell</button>
+      </div>
+      <div id="portfolio-status" class="status-msg"></div>
+
+      <!-- Positions table -->
+      <div class="table-wrap">
+        <table id="portfolio-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Name</th>
+              <th>Shares</th>
+              <th>Avg Cost</th>
+              <th>Current Price</th>
+              <th>Cost Basis</th>
+              <th>Current Value</th>
+              <th>Unrealised P&L</th>
+              <th>Realised P&L</th>
+            </tr>
+          </thead>
+          <tbody id="portfolio-body"></tbody>
+        </table>
+      </div>
+      <p id="portfolio-empty" class="empty-msg">No positions yet. Use the form above to record a purchase.</p>
+    </section>
+
+    <!-- Paper P&L Tab -->
+    <section id="tab-paper" class="tab">
+      <div class="paper-header">
+        <div>
+          <h2>Paper P&amp;L</h2>
+          <p id="paper-subtitle" class="paper-subtitle">Simulated trading from your configured start capital. Trades are added from Recommendations.</p>
+        </div>
+        <div class="pred-actions">
+          <button id="btn-refresh-paper" class="btn-secondary">↻ Refresh</button>
+          <button id="btn-reset-paper" class="btn-danger">✕ Reset</button>
+        </div>
+      </div>
+
+      <!-- Summary bar -->
+      <div id="paper-summary" class="paper-summary hidden">
+        <div class="paper-stat">
+          <span class="paper-stat-label">Starting Float</span>
+          <span id="paper-initial" class="paper-stat-value">—</span>
+        </div>
+        <div class="paper-stat">
+          <span class="paper-stat-label">Cash</span>
+          <span id="paper-cash" class="paper-stat-value">—</span>
+        </div>
+        <div class="paper-stat">
+          <span class="paper-stat-label">Holdings Value</span>
+          <span id="paper-invested" class="paper-stat-value">—</span>
+        </div>
+        <div class="paper-stat">
+          <span class="paper-stat-label">Total Value</span>
+          <span id="paper-total" class="paper-stat-value">—</span>
+        </div>
+        <div class="paper-stat">
+          <span class="paper-stat-label">Unrealised P&amp;L</span>
+          <span id="paper-unrealised" class="paper-stat-value">—</span>
+        </div>
+        <div class="paper-stat">
+          <span class="paper-stat-label">Realised P&amp;L</span>
+          <span id="paper-realised" class="paper-stat-value">—</span>
+        </div>
+        <div class="paper-stat paper-stat-pnl">
+          <span class="paper-stat-label">Total P&amp;L</span>
+          <span id="paper-pnl" class="paper-stat-value">—</span>
+        </div>
+      </div>
+
+      <div id="paper-status" class="status-msg"></div>
+
+      <!-- Open Positions -->
+      <h3 class="paper-section-title" id="paper-positions-heading" style="display:none">Open Positions</h3>
+      <div class="table-wrap" id="paper-positions-wrap" style="display:none">
+        <table id="paper-positions-table">
+          <thead>
+            <tr>
+              <th>Ticker</th><th>Name</th><th>Shares</th><th>Avg Cost</th>
+              <th>Current Price</th><th>Cost Basis</th><th>Market Value</th>
+              <th>Unrealised P&amp;L</th><th>%</th><th>Realised P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody id="paper-positions-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Trade History -->
+      <h3 class="paper-section-title" id="paper-history-heading" style="display:none">Trade History</h3>
+      <div class="table-wrap" id="paper-history-wrap" style="display:none">
+        <table id="paper-history-table">
+          <thead>
+            <tr>
+              <th>Date</th><th>Type</th><th>Ticker</th><th>Shares</th><th>Price</th><th>Value</th><th>P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody id="paper-history-body"></tbody>
+        </table>
+      </div>
+
+      <p id="paper-empty" class="empty-msg">No paper trades yet. Click "Paper Buy" on a recommendation to get started.</p>
+    </section>
+
+  <!-- PDF Import Preview Modal -->
+  <div id="pdf-import-overlay" class="overlay hidden">
+    <div class="modal-box" style="max-width:700px;width:95%">
+      <h3 style="margin-bottom:0.5rem">Saxo PDF Import — Preview</h3>
+      <p id="pdf-import-summary" style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem"></p>
+      <div class="table-wrap" style="max-height:320px">
+        <table>
+          <thead><tr><th>Type</th><th>Ticker</th><th>Name</th><th>Qty</th><th>Price</th><th>Date</th></tr></thead>
+          <tbody id="pdf-preview-body"></tbody>
+        </table>
+      </div>
+      <div id="pdf-import-errors" style="margin-top:0.75rem;font-size:0.82rem;color:var(--red)"></div>
+      <div class="modal-btns" style="margin-top:1.25rem">
+        <button id="btn-pdf-confirm" class="btn-login-submit">Confirm Import</button>
+        <button id="btn-pdf-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stock Detail Panel -->
+  <div id="detail-overlay" class="overlay hidden">
+    <div class="detail-panel">
+      <button id="detail-close" class="close-btn">✕</button>
+      <div id="detail-header">
+        <div>
+          <h2 id="detail-name"></h2>
+          <span id="detail-ticker" class="ticker-badge"></span>
+          <span id="detail-sector" class="sector-badge"></span>
+        </div>
+        <div class="detail-price-block">
+          <span id="detail-price" class="detail-price"></span>
+          <span id="detail-change" class="detail-change"></span>
+        </div>
+      </div>
+
+      <div class="detail-stats">
+        <div class="stat"><span class="stat-label">P/E Ratio</span><div class="stat-value-row"><span id="stat-pe" class="stat-val">—</span><span id="arrow-pe" class="val-arrow"></span></div></div>
+        <div class="stat"><span class="stat-label">PEG Ratio</span><div class="stat-value-row"><span id="stat-peg" class="stat-val">—</span><span id="arrow-peg" class="val-arrow"></span></div></div>
+        <div class="stat"><span class="stat-label">P/B Ratio</span><div class="stat-value-row"><span id="stat-pb" class="stat-val">—</span><span id="arrow-pb" class="val-arrow"></span></div></div>
+        <div class="stat"><span class="stat-label">EV/EBITDA</span><div class="stat-value-row"><span id="stat-ev" class="stat-val">—</span><span id="arrow-ev" class="val-arrow"></span></div></div>
+        <div class="stat"><span class="stat-label">FCF Yield</span><div class="stat-value-row"><span id="stat-fcf" class="stat-val">—</span><span id="arrow-fcf" class="val-arrow"></span></div></div>
+        <div class="stat"><span class="stat-label">Profit Margin</span><span id="stat-margin" class="stat-val">—</span></div>
+        <div class="stat"><span class="stat-label">52W High</span><span id="stat-high" class="stat-val">—</span></div>
+        <div class="stat"><span class="stat-label">52W Low</span><span id="stat-low" class="stat-val">—</span></div>
+        <div class="stat"><span class="stat-label">Market Cap</span><span id="stat-cap" class="stat-val">—</span></div>
+        <div class="stat"><span class="stat-label">Beta</span><span id="stat-beta" class="stat-val">—</span></div>
+        <div class="stat"><span class="stat-label">EPS Growth</span><span id="stat-eps" class="stat-val">—</span></div>
+        <div class="stat"><span class="stat-label">Rev Growth</span><span id="stat-rev" class="stat-val">—</span></div>
+      </div>
+
+      <div class="chart-container">
+        <canvas id="price-chart"></canvas>
+      </div>
+
+      <p id="detail-desc" class="detail-desc"></p>
+
+      <button id="detail-watchlist-btn" class="btn-primary full-width"></button>
+    </div>
+  </div>
+
+  <!-- Change Password Modal -->
+  <div id="change-pw-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+      <h3>Change Password</h3>
+      <div id="change-pw-error" class="login-error" style="display:none"></div>
+      <div id="change-pw-ok" class="login-info" style="display:none"></div>
+      <label>Current Password</label>
+      <input id="cp-current" type="password" placeholder="Current password" />
+      <label>New Password</label>
+      <input id="cp-new" type="password" placeholder="New password" />
+      <label>Confirm New Password</label>
+      <input id="cp-confirm" type="password" placeholder="Confirm new password" />
+      <div class="modal-btns">
+        <button id="btn-cp-save" class="btn-login-submit">Update Password</button>
+        <button id="btn-cp-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/legacy-app.js?v=1"></script>
+
+  <!-- Footer -->
+  <footer class="app-footer">
+    <div class="footer-content">
+      <span class="version">StockLens v1.2.0</span>
+      <span class="copyright">© 2026 Subhas Patel. All rights reserved.</span>
+    </div>
+  </footer>
+</body>
+</html>

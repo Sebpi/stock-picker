@@ -363,6 +363,13 @@ def serve_index():
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
+@app.get("/legacy", include_in_schema=False)
+def serve_legacy_index():
+    return FileResponse(
+        FRONTEND_DIR / "legacy.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
 @app.get("/static/{filename:path}", include_in_schema=False)
 def serve_static(filename: str):
     file_path = FRONTEND_DIR / filename
