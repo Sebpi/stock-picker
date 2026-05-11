@@ -3308,7 +3308,7 @@ async function loadThesisHistory(ticker) {
 function renderThesisHistory(ticker) {
   return `
     <details class="thesis-decision-log" id="thesis-history-details">
-      <summary>Thesis history</summary>
+      <summary>Dated thesis history (last 12 months)</summary>
       <div id="thesis-history-content"><p class="thesis-muted">Loading…</p></div>
     </details>
   `;
@@ -3319,7 +3319,7 @@ async function populateThesisHistory(ticker) {
   if (!el) return;
   const rows = await loadThesisHistory(ticker);
   if (!rows.length) {
-    el.innerHTML = `<p class="thesis-muted">No previous theses found.</p>`;
+    el.innerHTML = `<p class="thesis-muted">No previous theses found in the last 12 months.</p>`;
     return;
   }
   el.innerHTML = `

@@ -18,6 +18,7 @@ from schemas import AgentSignal, InvestmentThesis
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "stockpicker.db"
+RETENTION_DAYS = 365
 
 
 def _safe_json_loads(text: str, default: Any) -> Any:
@@ -187,7 +188,29 @@ CREATE TABLE IF NOT EXISTS alert_log (
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(DDL)
+    prune_agent_history()
     logger.info("SQLite DB initialised at %s", DB_PATH)
+
+
+def prune_agent_history() -> dict[str, int]:
+    """Delete cached agent/thesis results older than 12 months."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+    with get_conn() as conn:
+        outcome_cur = conn.execute(
+            "DELETE FROM forecast_outcome WHERE thesis_generated_at IS NOT NULL AND thesis_generated_at < ?",
+            (cutoff,),
+        )
+        thesis_cur = conn.execute("DELETE FROM investment_thesis WHERE generated_at < ?", (cutoff,))
+        signal_cur = conn.execute("DELETE FROM agent_signal WHERE as_of < ?", (cutoff,))
+        run_cur = conn.execute("DELETE FROM agent_run WHERE started_at < ?", (cutoff,))
+        thesis_run_cur = conn.execute("DELETE FROM thesis_run WHERE started_at < ?", (cutoff,))
+    return {
+        "forecast_outcomes": outcome_cur.rowcount or 0,
+        "investment_theses": thesis_cur.rowcount or 0,
+        "agent_signals": signal_cur.rowcount or 0,
+        "agent_runs": run_cur.rowcount or 0,
+        "thesis_runs": thesis_run_cur.rowcount or 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +300,7 @@ def get_signal_for_agent(ticker: str, agent_id: str) -> AgentSignal | None:
 # ---------------------------------------------------------------------------
 
 def store_thesis(thesis: InvestmentThesis) -> None:
+    prune_agent_history()
     payload = thesis.model_dump(mode="json")
     with get_conn() as conn:
         conn.execute(
@@ -309,6 +333,7 @@ def store_thesis(thesis: InvestmentThesis) -> None:
 
 
 def get_latest_thesis(ticker: str) -> InvestmentThesis | None:
+    prune_agent_history()
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -328,6 +353,7 @@ def get_latest_thesis(ticker: str) -> InvestmentThesis | None:
 
 
 def get_thesis_by_id(thesis_id: str) -> InvestmentThesis | None:
+    prune_agent_history()
     with get_conn() as conn:
         row = conn.execute(
             "SELECT full_json FROM investment_thesis WHERE thesis_id = ?",
@@ -343,17 +369,19 @@ def get_thesis_by_id(thesis_id: str) -> InvestmentThesis | None:
 
 def get_thesis_history(ticker: str, limit: int = 10) -> list[dict]:
     """Return lightweight thesis summaries for a ticker, newest first."""
+    prune_agent_history()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
     with get_conn() as conn:
         rows = conn.execute(
             """
             SELECT thesis_id, generated_at, composite_score, risk_rating,
                    evidence_quality, current_price
             FROM investment_thesis
-            WHERE ticker = ?
+            WHERE ticker = ? AND generated_at >= ?
             ORDER BY generated_at DESC
             LIMIT ?
             """,
-            (ticker, max(1, min(limit, 50))),
+            (ticker, cutoff, max(1, min(limit, 50))),
         ).fetchall()
     return [dict(r) for r in rows]
 
