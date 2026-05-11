@@ -152,7 +152,15 @@ def _verify_pw(password: str, hashed: str) -> bool:
     return _bcrypt.checkpw(password.encode(), hashed.encode())
 
 http_bearer = HTTPBearer(auto_error=False)
-USERS_FILE  = Path(__file__).parent / "users.json"
+# Users live on the persistent Fly volume (DATA_DIR) so password resets
+# survive redeploys. If a legacy users.json exists alongside the code
+# (pre-v2.0.3 layout), migrate it on first boot.
+_DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent.parent / "data")))
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
+USERS_FILE = _DATA_DIR / "users.json"
+_legacy_users = Path(__file__).parent / "users.json"
+if _legacy_users.exists() and not USERS_FILE.exists():
+    USERS_FILE.write_text(_legacy_users.read_text())
 
 # In-memory password reset tokens: token -> (username, expiry)
 _reset_tokens: dict[str, tuple[str, datetime]] = {}
