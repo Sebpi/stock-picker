@@ -5,8 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>StockLens v2 - Mobile First</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
+  <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    window.tailwind = window.tailwind || {};
+    // Play CDN reads tailwind.config from this script tag AFTER it has loaded.
+    // Setting the config before the CDN script blanks it out, so bg-pulse-*,
+    // border-pulse-*, and from-pulse-cyan utilities never get generated and
+    // inputs render with a default white background.
     tailwind.config = {
         theme: {
           extend: {
@@ -39,7 +43,6 @@
         }
     };
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <style>
