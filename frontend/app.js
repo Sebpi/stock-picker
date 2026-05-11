@@ -3034,7 +3034,7 @@ function renderThesis(thesis, quality = {}, backtest = {}) {
     </div>
   `;
 
-  hydrateStockPickerReconciliation(thesis.ticker);
+  hydrateStockPickerReconciliation(thesis);
 }
 
 function renderStockPickerReconciliationShell(ticker) {
@@ -3051,11 +3051,16 @@ function renderStockPickerReconciliationShell(ticker) {
   `;
 }
 
-async function hydrateStockPickerReconciliation(ticker) {
+async function hydrateStockPickerReconciliation(thesis) {
   const el = document.getElementById("thesis-reconciliation");
+  const ticker = thesis?.ticker;
   if (!el || !ticker) return;
   try {
-    const res = await fetch(`${PICK_SHOVELS_API}/api/reconcile/${encodeURIComponent(ticker)}?theme_id=ai-infra`);
+    const res = await fetch(`${PICK_SHOVELS_API}/api/reconcile/${encodeURIComponent(ticker)}?theme_id=ai-infra`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stock_analysis: thesis }),
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     el.outerHTML = renderStockPickerReconciliation(data);
@@ -3088,7 +3093,7 @@ function renderStockPickerReconciliation(data) {
         <div class="ps-recon-hint">
           ${theme.tier != null ? `Tier ${safe(theme.tier)}` : "Theme tier unavailable"}
           ${theme.exposure_pct != null ? ` · ${safe(theme.exposure_pct)}% exposure` : ""}
-          ${data?.from_cache ? " · using cached Stock Picker thesis" : ""}
+          ${data?.source === "provided" ? " · using displayed Stock Picker thesis" : data?.from_cache ? " · using cached Stock Picker thesis" : ""}
         </div>
         ${conflicts.length ? `
           <div class="ps-recon-conflicts">
