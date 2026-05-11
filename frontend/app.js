@@ -1,4 +1,5 @@
 const API = "";
+const PICK_SHOVELS_API = "https://pick-shovels-wistful-morning-252.fly.dev";
 
 // ── Tooltip system (fixed-position, never clipped) ────────────
 (function () {
@@ -2963,73 +2964,205 @@ function renderThesis(thesis, quality = {}, backtest = {}) {
   const narrative = thesis.narrative || {};
   const generated = thesis.generated_at ? new Date(thesis.generated_at).toLocaleString() : "-";
   const score = Number(thesis.composite_score || 0);
+  const direction = score >= 60 ? "BULLISH" : score <= 40 ? "BEARISH" : "NEUTRAL";
+  const directionClass = score >= 60 ? "score-good" : score <= 40 ? "score-bad" : "score-mid";
 
   document.getElementById("thesis-output").innerHTML = `
-    <div class="thesis-summary">
-      <div class="thesis-score ${scoreClass(score)}">
-        <span>Composite</span>
-        <strong>${score.toFixed(1)}</strong>
+    <div class="ps-deep-dive">
+      <div class="ps-kicker">DEEP DIVE · 8-AGENT ANALYSIS</div>
+      <div class="ps-deep-header">
+        <div>
+          <h3>${safe(thesis.ticker || "Thesis")} Analysis</h3>
+          <p>${safe(generated)}${thesis.thesis_id ? ` · thesis ${safe(String(thesis.thesis_id).slice(0, 8))}` : ""}</p>
+        </div>
+        <a href="/v1/thesis/${encodeURIComponent(thesis.ticker)}/export.pdf"
+           target="_blank"
+           class="btn btn-ghost ps-export-link">Export PDF</a>
       </div>
-      <div class="thesis-meta-grid">
-        <div><span>Risk</span><strong class="${qualityClass(thesis.risk_rating)}">${safe(thesis.risk_rating || "-")}</strong></div>
-        <div><span>Evidence</span><strong class="${qualityClass(thesis.evidence_quality)}">${safe(thesis.evidence_quality || "-")}</strong></div>
-        <div><span>Price</span><strong>${fmtUsd(thesis.current_price)}</strong></div>
-        <div><span>Generated</span><strong>${safe(generated)}</strong></div>
-      </div>
-    </div>
 
-    <div class="thesis-section">
-      <h3>Forecasts</h3>
+      ${renderStockPickerReconciliationShell(thesis.ticker)}
+
+      <div class="ps-section ps-score-section">
+        <div>
+          <div class="ps-section-label">COMPOSITE SCORE</div>
+          <div class="ps-score ${scoreClass(score)}">${score.toFixed(1)}<span>/100</span></div>
+        </div>
+        <div class="ps-score-meta">
+          <span class="ps-signal-pill ${directionClass}">${direction}</span>
+          <span>${safe(thesis.risk_rating || "-").replace(/_/g, " ")} risk</span>
+          <span>${safe(thesis.evidence_quality || "-")} evidence</span>
+          <span>${fmtUsd(thesis.current_price)}</span>
+        </div>
+      </div>
+
+      <div class="ps-section">
+        <div class="ps-section-label">RETURN FORECASTS</div>
       <div class="thesis-forecast-grid">
         ${["3m", "6m", "12m"].map(h => renderForecastCard(h, forecast[h], weighted[h])).join("")}
       </div>
-    </div>
+      </div>
 
-    <div class="thesis-two-col">
-      <div class="thesis-section">
-        <h3>Drivers</h3>
-        ${renderThesisList(thesis.drivers, "No drivers recorded.")}
+      <div class="ps-section">
+        <div class="ps-section-label">SCENARIOS</div>
+        ${renderScenarioCards(narrative)}
       </div>
-      <div class="thesis-section">
-        <h3>Risks</h3>
-        ${renderThesisList(thesis.risks, "No risks recorded.")}
-      </div>
-    </div>
 
-    <div class="thesis-section">
-      <h3>Bull / Base / Bear Narrative</h3>
-      <div class="thesis-narrative-grid">
-        ${["bull", "base", "bear"].map(k => `
-          <div class="thesis-narrative-card thesis-${k}">
-            <span>${safe(k)}</span>
-            <p>${safe(narrative[k] || "No narrative available.")}</p>
-          </div>
-        `).join("")}
+      <div class="ps-section">
+        <div class="ps-section-label">AGENT SCORES</div>
+        ${renderStockPickerAgentScores(agentScores, agentMeta)}
       </div>
-    </div>
 
-    <div class="thesis-two-col">
-      <div class="thesis-section">
-        <h3>Agent Scores</h3>
-        ${renderAgentScores(agentScores, agentMeta)}
+      <div class="thesis-two-col">
+        <div class="ps-section">
+          <div class="ps-section-label ps-positive">DRIVERS</div>
+          ${renderThesisList(thesis.drivers, "No drivers recorded.")}
+        </div>
+        <div class="ps-section">
+          <div class="ps-section-label ps-negative">RISKS</div>
+          ${renderThesisList(thesis.risks, "No risks recorded.")}
+        </div>
       </div>
-      <div class="thesis-section">
-        <h3>Quality &amp; Backtest</h3>
+
+      <div class="ps-section">
+        <div class="ps-section-label">QUALITY & BACKTEST</div>
         ${renderQualityAndBacktest(thesis, quality, backtest)}
       </div>
-    </div>
 
-    ${renderDecisionLog(thesis.decision_log)}
+      ${renderDecisionLog(thesis.decision_log)}
 
-    ${renderThesisHistory(thesis.ticker)}
-
-    <div class="thesis-section" style="text-align:right;padding-top:4px">
-      <a href="/v1/thesis/${encodeURIComponent(thesis.ticker)}/export.pdf"
-         target="_blank"
-         class="btn btn-ghost"
-         style="text-decoration:none;font-size:12px">⬇ Export PDF</a>
+      ${renderThesisHistory(thesis.ticker)}
     </div>
   `;
+
+  hydrateStockPickerReconciliation(thesis.ticker);
+}
+
+function renderStockPickerReconciliationShell(ticker) {
+  if (!ticker) return "";
+  return `
+    <div id="thesis-reconciliation" class="ps-reconciliation ps-reconciliation-loading">
+      <div class="ps-recon-icon">i</div>
+      <div>
+        <div class="ps-section-label">SIGNAL RECONCILIATION</div>
+        <div class="ps-recon-title">Checking Picks-Shovels theme signal for ${safe(ticker)}...</div>
+        <div class="ps-recon-hint">Comparing Stock Picker thesis with supply-chain position.</div>
+      </div>
+    </div>
+  `;
+}
+
+async function hydrateStockPickerReconciliation(ticker) {
+  const el = document.getElementById("thesis-reconciliation");
+  if (!el || !ticker) return;
+  try {
+    const res = await fetch(`${PICK_SHOVELS_API}/api/reconcile/${encodeURIComponent(ticker)}?theme_id=ai-infra`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    el.outerHTML = renderStockPickerReconciliation(data);
+  } catch {
+    el.outerHTML = `
+      <div class="ps-reconciliation ps-reconciliation-muted">
+        <div class="ps-recon-icon">i</div>
+        <div>
+          <div class="ps-section-label">SIGNAL RECONCILIATION</div>
+          <div class="ps-recon-title">Picks-Shovels context unavailable</div>
+          <div class="ps-recon-hint">This Stock Picker thesis is still valid, but it is not reconciled to theme tier/exposure here.</div>
+        </div>
+      </div>
+    `;
+  }
+}
+
+function renderStockPickerReconciliation(data) {
+  const summary = data?.summary || {};
+  const conflicts = Array.isArray(data?.conflicts) ? data.conflicts : [];
+  const theme = data?.theme_data || {};
+  const statusClass = summary.color ? `ps-reconciliation-${safe(summary.color)}` : "ps-reconciliation-muted";
+  const icon = summary.status === "ALIGNED" ? "✓" : summary.severity === "high" ? "!" : summary.severity === "medium" ? "!" : "i";
+  return `
+    <div class="ps-reconciliation ${statusClass}">
+      <div class="ps-recon-icon">${icon}</div>
+      <div class="ps-recon-body">
+        <div class="ps-section-label">SIGNAL RECONCILIATION</div>
+        <div class="ps-recon-title">${safe(summary.message || "Theme signal checked")}</div>
+        <div class="ps-recon-hint">
+          ${theme.tier != null ? `Tier ${safe(theme.tier)}` : "Theme tier unavailable"}
+          ${theme.exposure_pct != null ? ` · ${safe(theme.exposure_pct)}% exposure` : ""}
+          ${data?.from_cache ? " · using cached Stock Picker thesis" : ""}
+        </div>
+        ${conflicts.length ? `
+          <div class="ps-recon-conflicts">
+            ${conflicts.map(conflict => `
+              <div class="ps-recon-conflict">
+                <div class="ps-recon-conflict-title">${safe(conflict.title)}</div>
+                <div class="ps-recon-views">
+                  <div><span>STOCK VIEW</span><strong>${safe(conflict.stock_view)}</strong></div>
+                  <div><span>THEME VIEW</span><strong>${safe(conflict.theme_view)}</strong></div>
+                </div>
+                <p>${safe(conflict.explanation)}</p>
+                <div class="ps-recon-columns">
+                  <div>
+                    <span>WHAT IT MEANS</span>
+                    <ul>${(conflict.what_it_means || []).map(item => `<li>${safe(item)}</li>`).join("")}</ul>
+                  </div>
+                  <div>
+                    <span>WHAT TO DO</span>
+                    <ul>${(conflict.what_to_do || []).map(item => `<li>${safe(item)}</li>`).join("")}</ul>
+                  </div>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<div class="ps-recon-hint">No conflict detected between Stock Picker and Picks-Shovels theme signals.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderScenarioCards(narrative = {}) {
+  const config = [
+    ["bull", "BULL CASE"],
+    ["base", "BASE CASE"],
+    ["bear", "BEAR CASE"],
+  ];
+  return `<div class="thesis-narrative-grid">
+    ${config.map(([key, label]) => `
+      <div class="thesis-narrative-card thesis-${key}">
+        <span>${label}</span>
+        <p>${safe(narrative[key] || "No narrative available.")}</p>
+      </div>
+    `).join("")}
+  </div>`;
+}
+
+const THESIS_AGENT_LABELS = {
+  "agent.fundamentals": "Fundamentals",
+  "agent.valuation": "Valuation",
+  "agent.growth_revisions": "Growth",
+  "agent.macro_liquidity": "Macro",
+  "agent.sentiment_news": "Sentiment",
+  "agent.technical_risk": "Technical",
+  "agent.industry_competition": "Industry",
+  "agent.portfolio_risk": "Risk",
+};
+
+function renderStockPickerAgentScores(scores, meta = {}) {
+  const entries = Object.entries(scores || {});
+  if (!entries.length) return `<p class="thesis-muted">No agent scores recorded.</p>`;
+  return `<div class="ps-agent-score-list">
+    ${entries.map(([agent, score]) => {
+      const n = Number(score || 0);
+      const m = meta[agent] || {};
+      const usable = m.usable !== false;
+      return `
+        <div class="ps-agent-score-row${usable ? "" : " is-stale"}">
+          <span>${safe(THESIS_AGENT_LABELS[agent] || agent.replace("agent.", ""))}</span>
+          <div class="thesis-score-bar"><i class="${scoreClass(n)}" style="width:${Math.max(0, Math.min(100, n))}%"></i></div>
+          <strong class="${usable ? scoreClass(n) : ""}">${n.toFixed(0)}</strong>
+        </div>
+      `;
+    }).join("")}
+  </div>`;
 }
 
 function renderForecastCard(horizon, forecast, weightedScore) {
