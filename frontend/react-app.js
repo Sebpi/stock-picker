@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.6")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.7")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1170,7 +1170,7 @@
       try {
         if (kind === "ops") setPanelData(await api("/v1/operations/status"));
         if (kind === "health") setPanelData(await api("/v1/agents/health"));
-        if (kind === "evaluate") setPanelData(await api("/v1/evaluate", { method: "POST" }));
+        if (kind === "evaluate") setPanelData(await api("/v1/evaluate/status"));
       } catch (err) { setPanelData({ error: err.message }); }
     }
 
@@ -1433,7 +1433,9 @@
 
   function AgentHealthPanel({ data }) {
     const generated = data && data.generated_at ? data.generated_at : null;
-    const agents = data && Array.isArray(data.agents) ? data.agents : [];
+    const agents = data && data.agents
+      ? (Array.isArray(data.agents) ? data.agents : Object.values(data.agents))
+      : [];
     return h("div", { className: "grid gap-4" },
       generated ? h(Status, { message: `Updated ${fmtDate(generated)}` }) : null,
       agents.length ? h("div", { className: "grid gap-3" },
@@ -1458,9 +1460,19 @@
   function EvaluatePanel({ data }) {
     const summary = data && data.summary ? data.summary : {};
     const backtest = data && data.backtest ? data.backtest : {};
+    const outcomes = data && data.outcomes ? data.outcomes : {};
+    const scheduler = data && data.scheduler ? data.scheduler : {};
     const rows = Object.entries(summary);
     const cals = Object.entries(backtest.calibration || {});
     return h("div", { className: "grid gap-4" },
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim" }, "Evaluation Status"),
+        h("div", { className: "mt-3 grid gap-2 sm:grid-cols-3" },
+          h(Metric, { label: "Scheduler", value: scheduler.enabled ? "ENABLED" : "DISABLED", tone: scheduler.enabled ? "text-pulse-green" : "text-pulse-muted" }),
+          h(Metric, { label: "Pending", value: outcomes.pending == null ? "0" : String(outcomes.pending) }),
+          h(Metric, { label: "Matured Pending", value: outcomes.matured_pending == null ? "0" : String(outcomes.matured_pending) })
+        )
+      ),
       h(Card, { className: "p-4" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim" }, "Evaluation Summary"),
         rows.length ? h("div", { className: "mt-3 grid gap-2 sm:grid-cols-3" },
