@@ -388,12 +388,39 @@ def serve_static(filename: str):
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
-WATCHLIST_FILE       = Path(__file__).parent / "watchlist.json"
-PREDICTIONS_FILE     = Path(__file__).parent / "predictions.json"
-ALERTS_FILE          = Path(__file__).parent / "alerts.json"
-PORTFOLIO_FILE       = Path(__file__).parent / "portfolio.json"
-SETTINGS_FILE        = Path(__file__).parent / "settings.json"
-PAPER_PORTFOLIO_FILE = Path(__file__).parent / "paper_portfolio.json"
+WATCHLIST_FILE       = _DATA_DIR / "watchlist.json"
+PREDICTIONS_FILE     = _DATA_DIR / "predictions.json"
+ALERTS_FILE          = _DATA_DIR / "alerts.json"
+PORTFOLIO_FILE       = _DATA_DIR / "portfolio.json"
+SETTINGS_FILE        = _DATA_DIR / "settings.json"
+PAPER_PORTFOLIO_FILE = _DATA_DIR / "paper_portfolio.json"
+
+def _migrate_legacy_json_data_files() -> None:
+    """
+    One-time migration of JSON state from the old backend-local paths
+    into DATA_DIR-backed persistent storage.
+    """
+    legacy_dir = Path(__file__).parent
+    files = [
+        "watchlist.json",
+        "predictions.json",
+        "alerts.json",
+        "portfolio.json",
+        "settings.json",
+        "paper_portfolio.json",
+    ]
+    for name in files:
+        src = legacy_dir / name
+        dst = _DATA_DIR / name
+        if dst.exists() or not src.exists():
+            continue
+        try:
+            _atomic_write(dst, src.read_text())
+            logger.info("MIGRATE_DATA_FILE file=%s from=%s to=%s", name, src, dst)
+        except Exception as exc:
+            logger.warning("MIGRATE_DATA_FILE_FAIL file=%s err=%s", name, exc)
+
+_migrate_legacy_json_data_files()
 
 PAPER_INITIAL_FLOAT = 200_000.0
 
