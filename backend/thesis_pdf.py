@@ -24,8 +24,8 @@ _ACCENT  = colors.HexColor("#3b82f6")
 _GREEN   = colors.HexColor("#22c55e")
 _RED     = colors.HexColor("#ef4444")
 _YELLOW  = colors.HexColor("#eab308")
-_TEXT    = colors.HexColor("#e6edf3")
-_MUTED   = colors.HexColor("#8b949e")
+_TEXT    = colors.HexColor("#111827")
+_MUTED   = colors.HexColor("#4b5563")
 _WHITE   = colors.white
 
 
@@ -72,9 +72,9 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
     h2 = ParagraphStyle("H2", parent=styles["Heading2"],
                          textColor=_ACCENT, fontSize=12, spaceBefore=14, spaceAfter=4)
     body = ParagraphStyle("Body", parent=styles["Normal"],
-                          textColor=_TEXT, fontSize=9, leading=13)
+                          textColor=_TEXT, fontSize=10, leading=14)
     muted = ParagraphStyle("Muted", parent=styles["Normal"],
-                           textColor=_MUTED, fontSize=8, leading=11)
+                           textColor=_MUTED, fontSize=9, leading=12)
     label = ParagraphStyle("Label", parent=styles["Normal"],
                            textColor=_MUTED, fontSize=7, spaceAfter=1)
 
@@ -100,7 +100,7 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
     ]
     t = Table(summary_data, colWidths=["25%", "25%", "25%", "25%"])
     t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), _SURFACE),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f9fafb")),
         ("BOX", (0, 0), (-1, -1), 0.5, _ACCENT),
         ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#30363d")),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
@@ -137,7 +137,7 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
         ("BACKGROUND", (0, 0), (-1, 0), _ACCENT),
         ("TEXTCOLOR", (0, 0), (-1, 0), _WHITE),
         ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("BACKGROUND", (0, 1), (-1, -1), _SURFACE),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#ffffff")),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#30363d")),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -186,7 +186,7 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
         at = Table(rows, colWidths=["70%", "30%"])
         at.setStyle(TableStyle([
             ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#30363d")),
-            ("BACKGROUND", (0, 0), (-1, -1), _SURFACE),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ffffff")),
             ("ROWHEIGHT", (0, 0), (-1, -1), 18),
             ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ]))
@@ -198,7 +198,7 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
     if flags:
         story.append(Paragraph("Quality Flags", h2))
         story.append(Paragraph("  ".join(flags), ParagraphStyle(
-            "Flags", textColor=_YELLOW, fontSize=8)))
+            "Flags", textColor=colors.HexColor("#92400e"), fontSize=9)))
         story.append(Spacer(1, 0.2 * cm))
 
     # ── Footer ────────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
     story.append(Paragraph(
         f"StockPicker Multi-Agent Thesis | thesis_id: {thesis.thesis_id} | "
         f"Generated {generated}",
-        ParagraphStyle("Footer", textColor=_MUTED, fontSize=7, spaceBefore=4)))
+        ParagraphStyle("Footer", textColor=_MUTED, fontSize=8, spaceBefore=4)))
 
     doc.build(story)
     return buf.getvalue()
@@ -224,7 +224,7 @@ def _fmt(val: Any) -> str:
 
 def _cell(label: str, value: str, value_color: colors.Color, styles: Any) -> Table:
     inner = Table(
-        [[Paragraph(label, ParagraphStyle("CL", textColor=colors.HexColor("#8b949e"), fontSize=7, alignment=1))],
+        [[Paragraph(label, ParagraphStyle("CL", textColor=colors.HexColor("#374151"), fontSize=8, alignment=1))],
          [Paragraph(value, ParagraphStyle("CV", textColor=value_color, fontSize=13,
                                           fontName="Helvetica-Bold", alignment=1))]],
         colWidths=["100%"],
@@ -236,16 +236,16 @@ def _cell(label: str, value: str, value_color: colors.Color, styles: Any) -> Tab
 
 def _bullet_list(title: str, items: list[str], bullet_color: colors.Color, styles: Any) -> Table:
     title_p = Paragraph(title, ParagraphStyle(
-        "BT", textColor=colors.HexColor("#8b949e"), fontSize=8, spaceBefore=0, spaceAfter=4))
+        "BT", textColor=colors.HexColor("#374151"), fontSize=9, spaceBefore=0, spaceAfter=4))
     rows: list[list[Any]] = [[title_p]]
     for item in items[:8]:
         rows.append([Paragraph(
             f"• {item}",
-            ParagraphStyle("BI", textColor=colors.HexColor("#e6edf3"),
-                           fontSize=8, leading=11, leftIndent=4))])
+            ParagraphStyle("BI", textColor=colors.HexColor("#111827"),
+                           fontSize=9, leading=13, leftIndent=4))])
     if not items:
         rows.append([Paragraph("None recorded.", ParagraphStyle(
-            "BN", textColor=colors.HexColor("#8b949e"), fontSize=8))])
+            "BN", textColor=colors.HexColor("#4b5563"), fontSize=9))])
     t = Table(rows, colWidths=["100%"])
     t.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0),
                              ("TOPPADDING", (0, 0), (-1, -1), 1),
