@@ -177,6 +177,8 @@ RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HI
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
 PREDICTIONS_UNIVERSE_FILL_LIMIT = max(0, int(os.getenv("PREDICTIONS_UNIVERSE_FILL_LIMIT", "6")))
 PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192")))
+PREDICTION_MODEL_VERSION = os.getenv("PREDICTION_MODEL_VERSION", "pred-v3.1.0").strip() or "pred-v3.1.0"
+PREDICTION_PROMPT_VERSION = os.getenv("PREDICTION_PROMPT_VERSION", "prompt-v2").strip() or "prompt-v2"
 THESIS_AUTO_RUN_ENABLED = os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 THESIS_AUTO_RUN_INTERVAL_MINUTES = max(15, int(os.getenv("THESIS_AUTO_RUN_INTERVAL_MINUTES", "1440")))
 THESIS_AUTO_RUN_MAX_TICKERS = max(1, int(os.getenv("THESIS_AUTO_RUN_MAX_TICKERS", "8")))
@@ -607,6 +609,7 @@ evaluation_scheduler_status = {
     "active": False,
     "runs_started": 0,
     "last_evaluated_count": None,
+    "last_prediction_evaluated_count": None,
     "last_error": None,
 }
 prediction_scheduler_status = {
@@ -773,6 +776,35 @@ def prediction_horizon_returns(
     return result
 
 
+def prediction_short_horizon_returns(
+    predicted_pct: Optional[float],
+    direction: str | None = None,
+    score: Optional[float] = None,
+    confidence: str = "medium",
+) -> dict[str, float | None]:
+    """Create 1D/1W/1M forecasts from the daily signal and 3M curve."""
+    if predicted_pct is None and score is None:
+        return {"predicted_1d_pct": None, "predicted_1w_pct": None, "predicted_1m_pct": None}
+
+    medium_horizons = prediction_horizon_returns(predicted_pct, direction, score, confidence)
+    three_month = medium_horizons.get("predicted_3m_pct")
+    one_week = None
+    one_month = None
+    try:
+        three_month_float = float(three_month)
+        if three_month_float > -99.0:
+            one_month = ((1 + three_month_float / 100.0) ** (1 / 3.0) - 1) * 100.0
+            one_week = ((1 + one_month / 100.0) ** (7 / 30.0) - 1) * 100.0
+    except (TypeError, ValueError):
+        pass
+
+    return {
+        "predicted_1d_pct": round(float(predicted_pct), 2) if predicted_pct is not None else None,
+        "predicted_1w_pct": round(one_week, 2) if one_week is not None else None,
+        "predicted_1m_pct": round(one_month, 2) if one_month is not None else None,
+    }
+
+
 def prediction_hit(prediction: dict) -> bool | None:
     actual_pct = prediction.get("actual_pct")
     if actual_pct is None:
@@ -813,7 +845,10 @@ def normalize_prediction(pred: dict) -> dict:
     normalized["direction"] = direction
     normalized["score"] = score
 
-    horizons = prediction_horizon_returns(predicted_pct, direction, score, confidence)
+    horizons = {
+        **prediction_short_horizon_returns(predicted_pct, direction, score, confidence),
+        **prediction_horizon_returns(predicted_pct, direction, score, confidence),
+    }
     for key, value in horizons.items():
         if normalized.get(key) is None:
             normalized[key] = value
@@ -1976,11 +2011,18 @@ async def run_evaluation_job(source: str = "manual") -> int:
         import evaluation
 
         loop = asyncio.get_event_loop()
-        count = await loop.run_in_executor(None, evaluation.evaluate_pending_outcomes)
-        evaluation_scheduler_status["last_evaluated_count"] = count
-        logger.info("[Evaluation] %s job evaluated %d outcomes", source, count)
+        thesis_count = await loop.run_in_executor(None, evaluation.evaluate_pending_outcomes)
+        prediction_count = await evaluate_prediction_outcomes(limit=200)
+        evaluation_scheduler_status["last_evaluated_count"] = thesis_count
+        evaluation_scheduler_status["last_prediction_evaluated_count"] = prediction_count
+        logger.info(
+            "[Evaluation] %s job evaluated thesis=%d prediction=%d outcomes",
+            source,
+            thesis_count,
+            prediction_count,
+        )
         _reset_bg_failures("evaluation")
-        return count
+        return thesis_count + prediction_count
     except Exception as exc:
         evaluation_scheduler_status["last_error"] = str(exc)
         if source == "scheduler":
@@ -3244,6 +3286,119 @@ async def _attach_current_prices_to_predictions(predictions: list[dict]) -> list
     return enriched
 
 
+def _sync_prediction_history(predictions: list[dict]) -> int:
+    try:
+        import db as _db
+        return _db.sync_prediction_history(
+            predictions,
+            model_version=PREDICTION_MODEL_VERSION,
+            prompt_version=PREDICTION_PROMPT_VERSION,
+        )
+    except Exception as exc:
+        logger.warning("Prediction history sync failed: %s", exc)
+        return 0
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except Exception:
+        return None
+
+
+def _close_on_or_before(price_points: list[tuple[date, float]], target: date) -> float | None:
+    eligible = [price for day, price in price_points if day <= target]
+    return eligible[-1] if eligible else None
+
+
+def _close_on_or_after(price_points: list[tuple[date, float]], target: date) -> float | None:
+    for day, price in price_points:
+        if day >= target:
+            return price
+    return None
+
+
+async def evaluate_prediction_outcomes(limit: int = 100) -> int:
+    """Evaluate matured prediction horizons against realised closes."""
+    try:
+        import db as _db
+        due = _db.list_due_prediction_outcomes(limit=limit)
+    except Exception as exc:
+        logger.warning("Prediction outcome query failed: %s", exc)
+        return 0
+    if not due:
+        return 0
+
+    by_ticker: dict[str, list[dict]] = {}
+    for row in due:
+        by_ticker.setdefault(str(row.get("ticker") or "").upper(), []).append(row)
+
+    evaluated = 0
+    for ticker, rows in by_ticker.items():
+        parsed_dates = [
+            d for row in rows
+            for d in (_parse_iso_date(row.get("prediction_date")), _parse_iso_date(row.get("target_date")))
+            if d is not None
+        ]
+        if not ticker or not parsed_dates:
+            continue
+        start = min(parsed_dates) - timedelta(days=7)
+        end = max(parsed_dates) + timedelta(days=10)
+        try:
+            hist = await asyncio.to_thread(
+                lambda t=ticker, s=start, e=end: yf.Ticker(t).history(start=s.isoformat(), end=e.isoformat())
+            )
+            if hist is None or hist.empty:
+                continue
+            price_points = [
+                (idx.date(), float(close))
+                for idx, close in zip(hist.index, hist["Close"])
+                if close is not None and math.isfinite(float(close))
+            ]
+            price_points.sort(key=lambda item: item[0])
+        except Exception as exc:
+            logger.warning("Prediction outcome price fetch failed for %s: %s", ticker, exc)
+            continue
+
+        for row in rows:
+            prediction_date = _parse_iso_date(row.get("prediction_date"))
+            target_date = _parse_iso_date(row.get("target_date"))
+            if not prediction_date or not target_date:
+                continue
+            start_price = row.get("price_at_prediction")
+            try:
+                start_price = float(start_price) if start_price is not None else None
+            except (TypeError, ValueError):
+                start_price = None
+            if not start_price or not math.isfinite(start_price):
+                start_price = _close_on_or_before(price_points, prediction_date)
+            end_price = _close_on_or_after(price_points, target_date)
+            if not start_price or not end_price:
+                continue
+
+            realised = ((end_price - start_price) / start_price) * 100.0
+            forecast = row.get("forecast_return_pct")
+            try:
+                forecast_float = float(forecast) if forecast is not None else None
+            except (TypeError, ValueError):
+                forecast_float = None
+            direction_match = None if forecast_float is None else (realised >= 0) == (forecast_float >= 0)
+            forecast_error = None if forecast_float is None else realised - forecast_float
+            try:
+                _db.update_prediction_outcome(
+                    row["outcome_id"],
+                    realised_return_pct=realised,
+                    direction_match=direction_match,
+                    forecast_error=forecast_error,
+                )
+                evaluated += 1
+            except Exception as exc:
+                logger.warning("Prediction outcome update failed for %s %s: %s", ticker, row.get("horizon"), exc)
+    return evaluated
+
+
 @app.get("/api/predictions")
 async def get_predictions():
     today = str(date.today())
@@ -3271,12 +3426,20 @@ async def get_predictions():
             updated = True
         derived_direction = prediction_direction(p.get("predicted_pct"))
         derived_score = prediction_score(p.get("predicted_pct"), p.get("confidence", "medium"))
-        derived_horizons = prediction_horizon_returns(
-            p.get("predicted_pct"),
-            p.get("direction"),
-            p.get("score"),
-            p.get("confidence", "medium"),
-        )
+        derived_horizons = {
+            **prediction_short_horizon_returns(
+                p.get("predicted_pct"),
+                p.get("direction"),
+                p.get("score"),
+                p.get("confidence", "medium"),
+            ),
+            **prediction_horizon_returns(
+                p.get("predicted_pct"),
+                p.get("direction"),
+                p.get("score"),
+                p.get("confidence", "medium"),
+            ),
+        }
         if p.get("predicted_pct") is not None:
             if p.get("direction") != derived_direction:
                 p["direction"] = derived_direction
@@ -3338,13 +3501,37 @@ async def get_predictions():
                 "reasoning": "Not yet analysed. Click Generate Predictions to include this stock.",
                 "actual_pct": None,
                 "price_at_prediction": None,
+                **prediction_short_horizon_returns(None),
                 **prediction_horizon_returns(None),
             })
     response = sanitize_jsonable(sorted_preds)
+    _sync_prediction_history(response)
     _predictions_cache["date"] = today
     _predictions_cache["mtime_ns"] = PREDICTIONS_FILE.stat().st_mtime_ns if PREDICTIONS_FILE.exists() else None
     _predictions_cache["data"] = response
     return await _attach_current_prices_to_predictions(response)
+
+
+@app.get("/api/predictions/learning")
+@limiter.limit("20/hour")
+async def get_predictions_learning(request: Request, evaluate: bool = True):
+    """Return durable prediction outcome learning metrics."""
+    try:
+        import db as _db
+        predictions = load_predictions()
+        synced = _sync_prediction_history(predictions)
+        evaluated_now = await evaluate_prediction_outcomes(limit=100) if evaluate else 0
+        summary = _db.get_prediction_learning_summary()
+        summary.update({
+            "synced_predictions": synced,
+            "evaluated_now": evaluated_now,
+            "model_version": PREDICTION_MODEL_VERSION,
+            "prompt_version": PREDICTION_PROMPT_VERSION,
+        })
+        return summary
+    except Exception as exc:
+        logger.exception("Prediction learning summary failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Prediction learning summary failed: {exc}")
 
 
 async def _generate_predictions_impl():
@@ -3402,10 +3589,30 @@ async def _generate_predictions_impl():
     if not to_analyze:
         if updated:
             save_predictions(predictions)
+        _sync_prediction_history(predictions)
         return {
             "message": "Predictions already generated for today.",
             "predictions": [p for p in predictions if p["date"] == today],
         }
+
+    prediction_run_id = str(uuid.uuid4())
+    prediction_run_created = False
+    try:
+        import db as _db
+        _db.create_prediction_run(
+            prediction_run_id,
+            to_analyze,
+            model_version=PREDICTION_MODEL_VERSION,
+            prompt_version=PREDICTION_PROMPT_VERSION,
+            source="generate",
+            meta={
+                "include_stock_research": PREDICTIONS_INCLUDE_STOCK_RESEARCH,
+                "universe_fill_limit": PREDICTIONS_UNIVERSE_FILL_LIMIT,
+            },
+        )
+        prediction_run_created = True
+    except Exception as exc:
+        logger.warning("Could not create prediction run record: %s", exc)
 
     try:
         macro = await fetch_macro_data()
@@ -3785,12 +3992,22 @@ Rules:
             "actual_pct":         None,
             "price_at_prediction": price_map.get(ticker),
             "generated_at":       datetime.utcnow().isoformat(),
+            "model_version":      PREDICTION_MODEL_VERSION,
+            "prompt_version":     PREDICTION_PROMPT_VERSION,
             # Quant data
             "factor_scores":      stock_data.get("factor_scores"),
             "dcf":                stock_data.get("dcf"),
             "annualised_vol_pct": stock_data.get("annualised_vol_pct"),
             "max_drawdown_pct":   stock_data.get("max_drawdown_pct"),
         }
+        entry.update(
+            prediction_short_horizon_returns(
+                entry["predicted_pct"],
+                entry["direction"],
+                entry["score"],
+                entry["confidence"],
+            )
+        )
         entry.update(
             prediction_horizon_returns(
                 entry["predicted_pct"],
@@ -3803,6 +4020,31 @@ Rules:
         new_preds.append(entry)
 
     save_predictions(predictions)
+    stored_predictions = 0
+    try:
+        import db as _db
+        for entry in new_preds:
+            prediction_id = _db.store_prediction_snapshot(
+                entry,
+                run_id=prediction_run_id if prediction_run_created else None,
+                model_version=PREDICTION_MODEL_VERSION,
+                prompt_version=PREDICTION_PROMPT_VERSION,
+                macro=macro,
+            )
+            entry["prediction_id"] = prediction_id
+            stored_predictions += 1
+        if stored_predictions:
+            save_predictions(predictions)
+        if prediction_run_created:
+            _db.complete_prediction_run(prediction_run_id, "completed", stored_predictions)
+    except Exception as exc:
+        logger.warning("Could not store prediction snapshots: %s", exc)
+        if prediction_run_created:
+            try:
+                import db as _db
+                _db.complete_prediction_run(prediction_run_id, "failed", stored_predictions, str(exc))
+            except Exception:
+                pass
 
     # Schedule background backfill for any entries that came back with no factor_scores
     missing = [e["ticker"] for e in new_preds if not e.get("factor_scores")]
@@ -3839,6 +4081,7 @@ async def _backfill_factor_scores(tickers: list[str], pred_date: str):
                     updated = True
             if updated:
                 save_predictions(preds)
+                _sync_prediction_history(preds)
                 logger.info("Factor score backfill complete for %s", ticker)
         except Exception as exc:
             logger.warning("Factor score backfill failed for %s: %s", ticker, exc)

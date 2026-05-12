@@ -368,7 +368,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.13")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.1.0")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -875,6 +875,7 @@
     const [selected, setSelected] = useState(null);
     const [period, setPeriod] = useState("all");
     const [showFactorGuide, setShowFactorGuide] = useState(false);
+    const [learning, setLearning] = useState(null);
 
     async function load() {
       setBusy(true); setError("");
@@ -882,6 +883,14 @@
         const data = await api("/api/predictions");
         setRows(Array.isArray(data) ? data : (data.predictions || data.rows || []));
       } catch (err) { setError(err.message); } finally { setBusy(false); }
+    }
+    async function loadLearning(evaluate) {
+      try {
+        const data = await api(`/api/predictions/learning?evaluate=${evaluate ? "true" : "false"}`);
+        setLearning(data);
+      } catch (err) {
+        console.warn("Prediction learning summary unavailable", err);
+      }
     }
     async function waitForGenerateCompletion(maxPolls = 40, delayMs = 1500) {
       for (let i = 0; i < maxPolls; i++) {
@@ -907,6 +916,7 @@
           setStatus(`Generation complete${count > 0 ? `: ${count} predictions` : ""}.`);
         }
         await load();
+        loadLearning(true);
       } catch (err) {
         setError(err.message);
         setStatus("");
@@ -920,6 +930,7 @@
         const result = await api("/api/predictions/backfill-factors", { method: "POST" });
         setStatus(result?.message || "Backfill started.");
         await load();
+        loadLearning(false);
       } catch (err) {
         setError(err.message);
         setStatus("");
@@ -927,14 +938,14 @@
         setBusy(false);
       }
     }
-    useEffect(() => { load(); }, []);
+    useEffect(() => { load(); loadLearning(true); }, []);
 
     const filtered = useMemo(() => filterByPeriod(rows, period), [rows, period]);
     const accuracy = useMemo(() => computeAccuracy(filtered), [filtered]);
 
     return h("div", null,
       h(SectionHead, { title: "Predictions", kicker: "Daily ranking", subtitle: "Multi-horizon forecasts with factor scores. Claude analyses macro trends, news and fundamentals.", actions: [
-        h(Button, { key: "refresh", onClick: load, disabled: busy }, "Refresh actuals"),
+        h(Button, { key: "refresh", onClick: async () => { await load(); loadLearning(false); }, disabled: busy }, "Refresh actuals"),
         h(Button, { key: "back", onClick: backfill, disabled: busy, title: "Retry factor scores for today's predictions" }, "Backfill factors"),
         h(Button, { key: "gen", kind: "primary", onClick: generate, disabled: busy }, busy ? "Working..." : "Generate today"),
       ] }),
@@ -954,6 +965,7 @@
           h(Metric, { label: "Avg Actual", value: fmtPct(accuracy.avg_actual, 1) })
         )
       ) : null,
+      learning ? h(PredictionLearningPanel, { learning }) : null,
       h(Card, { className: "mb-4" },
         h("button", {
           className: "flex w-full items-center justify-between p-4 text-left",
@@ -1036,6 +1048,50 @@
       avg_pred: sumPred / scored.length,
       avg_actual: sumActual / scored.length,
     };
+  }
+
+  function PredictionLearningPanel({ learning }) {
+    const horizons = learning.by_horizon || [];
+    const plainPct = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? `${n.toFixed(1)}%` : "—";
+    };
+    const modelLabel = [learning.model_version, learning.prompt_version].filter(Boolean).join(" · ") || "versioned";
+    return h(Card, { className: "mb-4 p-4" },
+      h("div", { className: "mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between" },
+        h("div", null,
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Learning loop"),
+          h("h3", { className: "mt-1 text-lg font-semibold text-pulse-ink" }, "Prediction outcome memory"),
+          h("p", { className: "mt-1 text-sm text-pulse-muted" }, `Every generated signal is stored for 12 months, then evaluated when each horizon matures.`)
+        ),
+        h("div", { className: "rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2 text-xs text-pulse-muted" },
+          modelLabel
+        )
+      ),
+      h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-4" },
+        h(Metric, { label: "Evaluated", value: learning.evaluated_outcomes || 0 }),
+        h(Metric, { label: "Pending", value: learning.pending_outcomes || 0 }),
+        h(Metric, { label: "Due Now", value: learning.matured_pending_outcomes || 0, tone: Number(learning.matured_pending_outcomes || 0) ? "text-pulse-amber" : "text-pulse-green" }),
+        h(Metric, { label: "Evaluated Now", value: learning.evaluated_now || 0 })
+      ),
+      h("div", { className: "mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3" },
+        horizons.length ? horizons.map((row) => h("div", {
+          key: row.horizon,
+          className: "rounded-lg border border-pulse-line bg-pulse-panel p-3"
+        },
+          h("div", { className: "mb-2 flex items-center justify-between gap-2" },
+            h("span", { className: "font-mono text-xs uppercase text-pulse-cyan" }, row.horizon),
+            h("span", { className: cx("font-mono text-sm", Number(row.directional_hit_rate_pct || 0) >= 55 ? "text-pulse-green" : "text-pulse-amber") }, plainPct(row.directional_hit_rate_pct))
+          ),
+          h("div", { className: "grid grid-cols-2 gap-2 text-xs text-pulse-muted" },
+            h("div", null, "MAE ", h("span", { className: "font-mono text-pulse-ink" }, plainPct(row.mean_absolute_error_pct))),
+            h("div", null, "Done ", h("span", { className: "font-mono text-pulse-ink" }, row.evaluated || 0)),
+            h("div", null, "Forecast ", h("span", { className: "font-mono text-pulse-ink" }, plainPct(row.avg_forecast_pct))),
+            h("div", null, "Actual ", h("span", { className: "font-mono text-pulse-ink" }, plainPct(row.avg_realised_pct)))
+          )
+        )) : h("div", { className: "rounded-lg border border-dashed border-pulse-line p-3 text-sm text-pulse-muted" }, "Generate predictions and let horizons mature to build learning data.")
+      )
+    );
   }
 
   function PredictionRow({ p, onOpen }) {

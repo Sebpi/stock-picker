@@ -26,6 +26,7 @@ test-results-run/
 .claude/
 backend/lockout_state.json
 backend/scheduler_settings.json
+data/
 screenshots/
 screenshot.js
 screenshot2.js

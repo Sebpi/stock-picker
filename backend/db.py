@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -17,7 +19,15 @@ from schemas import AgentSignal, InvestmentThesis
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent / "stockpicker.db"
+_DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent.parent / "data")))
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = _DATA_DIR / "stockpicker.db"
+_LEGACY_DB_PATH = Path(__file__).parent / "stockpicker.db"
+if _LEGACY_DB_PATH.exists() and not DB_PATH.exists():
+    try:
+        shutil.copy2(_LEGACY_DB_PATH, DB_PATH)
+    except Exception as exc:
+        logger.warning("Could not migrate legacy SQLite DB to DATA_DIR: %s", exc)
 RETENTION_DAYS = 365
 
 
@@ -150,6 +160,83 @@ CREATE TABLE IF NOT EXISTS forecast_outcome (
     thesis_generated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS prediction_run (
+    run_id              TEXT PRIMARY KEY,
+    status              TEXT NOT NULL,
+    tickers_json        TEXT NOT NULL,
+    model_version       TEXT,
+    prompt_version      TEXT,
+    source              TEXT,
+    started_at          TEXT NOT NULL,
+    completed_at        TEXT,
+    prediction_count    INTEGER DEFAULT 0,
+    error               TEXT,
+    meta_json           TEXT DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_run_started
+    ON prediction_run(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS prediction_snapshot (
+    prediction_id       TEXT PRIMARY KEY,
+    run_id              TEXT,
+    ticker              TEXT NOT NULL,
+    prediction_date     TEXT NOT NULL,
+    generated_at        TEXT,
+    model_version       TEXT,
+    prompt_version      TEXT,
+    name                TEXT,
+    direction           TEXT,
+    score               REAL,
+    confidence          TEXT,
+    predicted_1d_pct    REAL,
+    predicted_1w_pct    REAL,
+    predicted_1m_pct    REAL,
+    predicted_3m_pct    REAL,
+    predicted_6m_pct    REAL,
+    predicted_12m_pct   REAL,
+    raw_predicted_pct   REAL,
+    bias_correction     REAL,
+    inverted            INTEGER DEFAULT 0,
+    price_at_prediction REAL,
+    factor_scores_json  TEXT,
+    dcf_json            TEXT,
+    macro_json          TEXT,
+    payload_json        TEXT,
+    created_at          TEXT DEFAULT (datetime('now')),
+    updated_at          TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_snapshot_ticker_date
+    ON prediction_snapshot(ticker, prediction_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_snapshot_model
+    ON prediction_snapshot(model_version, prompt_version, prediction_date DESC);
+
+CREATE TABLE IF NOT EXISTS prediction_outcome (
+    outcome_id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    prediction_id       TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    prediction_date     TEXT NOT NULL,
+    horizon             TEXT NOT NULL,
+    target_date         TEXT NOT NULL,
+    forecast_return_pct REAL,
+    realised_return_pct REAL,
+    direction_match     INTEGER,
+    forecast_error      REAL,
+    evaluated_at        TEXT,
+    status              TEXT DEFAULT 'pending',
+    created_at          TEXT DEFAULT (datetime('now')),
+    UNIQUE(prediction_id, horizon),
+    FOREIGN KEY(prediction_id) REFERENCES prediction_snapshot(prediction_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_outcome_due
+    ON prediction_outcome(status, target_date);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_outcome_ticker
+    ON prediction_outcome(ticker, horizon, prediction_date DESC);
+
 CREATE TABLE IF NOT EXISTS consensus_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker          TEXT NOT NULL,
@@ -204,12 +291,18 @@ def prune_agent_history() -> dict[str, int]:
         signal_cur = conn.execute("DELETE FROM agent_signal WHERE as_of < ?", (cutoff,))
         run_cur = conn.execute("DELETE FROM agent_run WHERE started_at < ?", (cutoff,))
         thesis_run_cur = conn.execute("DELETE FROM thesis_run WHERE started_at < ?", (cutoff,))
+        pred_outcome_cur = conn.execute("DELETE FROM prediction_outcome WHERE prediction_date < ?", (cutoff[:10],))
+        pred_snapshot_cur = conn.execute("DELETE FROM prediction_snapshot WHERE prediction_date < ?", (cutoff[:10],))
+        pred_run_cur = conn.execute("DELETE FROM prediction_run WHERE started_at < ?", (cutoff,))
     return {
         "forecast_outcomes": outcome_cur.rowcount or 0,
         "investment_theses": thesis_cur.rowcount or 0,
         "agent_signals": signal_cur.rowcount or 0,
         "agent_runs": run_cur.rowcount or 0,
         "thesis_runs": thesis_run_cur.rowcount or 0,
+        "prediction_outcomes": pred_outcome_cur.rowcount or 0,
+        "prediction_snapshots": pred_snapshot_cur.rowcount or 0,
+        "prediction_runs": pred_run_cur.rowcount or 0,
     }
 
 
@@ -448,6 +541,412 @@ def update_outcome(outcome_id: str, realised: float, benchmark: float,
             """,
             (realised, benchmark, sector_relative, int(direction_match), forecast_error, outcome_id),
         )
+
+
+# ---------------------------------------------------------------------------
+# Prediction memory helpers
+# ---------------------------------------------------------------------------
+
+PREDICTION_OUTCOME_HORIZONS: dict[str, int] = {
+    "1d": 1,
+    "1w": 7,
+    "1m": 30,
+    "3m": 91,
+    "6m": 182,
+    "12m": 365,
+}
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _safe_date(value: Any) -> str:
+    if value:
+        text = str(value).strip()
+        if len(text) >= 10:
+            candidate = text[:10]
+            try:
+                datetime.fromisoformat(candidate)
+                return candidate
+            except Exception:
+                pass
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"), default=str)
+
+
+def prediction_id_for(
+    prediction: dict[str, Any],
+    model_version: str = "pred-v1",
+    prompt_version: str = "prompt-v1",
+) -> str:
+    """Deterministic ID so JSON predictions can be synced into SQLite repeatedly."""
+    ticker = str(prediction.get("ticker") or "").upper().strip()
+    prediction_date = _safe_date(prediction.get("date") or prediction.get("prediction_date"))
+    key = f"stocklens:prediction:{ticker}:{prediction_date}:{model_version}:{prompt_version}"
+    return f"pred_{uuid.uuid5(uuid.NAMESPACE_URL, key).hex}"
+
+
+def _target_date(prediction_date: str, horizon: str) -> str:
+    try:
+        base = datetime.fromisoformat(prediction_date[:10])
+    except Exception:
+        base = datetime.now(timezone.utc)
+    return (base + timedelta(days=PREDICTION_OUTCOME_HORIZONS[horizon])).date().isoformat()
+
+
+def create_prediction_run(
+    run_id: str,
+    tickers: list[str],
+    model_version: str,
+    prompt_version: str,
+    source: str = "manual",
+    meta: dict[str, Any] | None = None,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO prediction_run
+                (run_id, status, tickers_json, model_version, prompt_version,
+                 source, started_at, meta_json)
+            VALUES (?, 'running', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                _json_dumps(tickers),
+                model_version,
+                prompt_version,
+                source,
+                datetime.now(timezone.utc).isoformat(),
+                _json_dumps(meta or {}),
+            ),
+        )
+
+
+def complete_prediction_run(
+    run_id: str,
+    status: str,
+    prediction_count: int = 0,
+    error: str | None = None,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE prediction_run SET
+                status = ?,
+                completed_at = ?,
+                prediction_count = ?,
+                error = ?
+            WHERE run_id = ?
+            """,
+            (
+                status,
+                datetime.now(timezone.utc).isoformat(),
+                int(prediction_count or 0),
+                error,
+                run_id,
+            ),
+        )
+
+
+def store_prediction_snapshot(
+    prediction: dict[str, Any],
+    run_id: str | None = None,
+    model_version: str = "pred-v1",
+    prompt_version: str = "prompt-v1",
+    macro: dict[str, Any] | None = None,
+) -> str:
+    """Upsert a generated prediction and its pending evaluation horizons."""
+    ticker = str(prediction.get("ticker") or "").upper().strip()
+    if not ticker:
+        raise ValueError("prediction missing ticker")
+    prediction_date = _safe_date(prediction.get("date") or prediction.get("prediction_date"))
+    prediction_id = (
+        str(prediction.get("prediction_id") or "").strip()
+        or prediction_id_for(prediction, model_version, prompt_version)
+    )
+    generated_at = prediction.get("generated_at") or datetime.now(timezone.utc).isoformat()
+    predicted_1d = _safe_float(prediction.get("predicted_1d_pct"))
+    if predicted_1d is None:
+        predicted_1d = _safe_float(prediction.get("predicted_pct"))
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_snapshot
+                (prediction_id, run_id, ticker, prediction_date, generated_at,
+                 model_version, prompt_version, name, direction, score, confidence,
+                 predicted_1d_pct, predicted_1w_pct, predicted_1m_pct,
+                 predicted_3m_pct, predicted_6m_pct, predicted_12m_pct,
+                 raw_predicted_pct, bias_correction, inverted, price_at_prediction,
+                 factor_scores_json, dcf_json, macro_json, payload_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(prediction_id) DO UPDATE SET
+                run_id=COALESCE(excluded.run_id, prediction_snapshot.run_id),
+                generated_at=excluded.generated_at,
+                name=excluded.name,
+                direction=excluded.direction,
+                score=excluded.score,
+                confidence=excluded.confidence,
+                predicted_1d_pct=excluded.predicted_1d_pct,
+                predicted_1w_pct=excluded.predicted_1w_pct,
+                predicted_1m_pct=excluded.predicted_1m_pct,
+                predicted_3m_pct=excluded.predicted_3m_pct,
+                predicted_6m_pct=excluded.predicted_6m_pct,
+                predicted_12m_pct=excluded.predicted_12m_pct,
+                raw_predicted_pct=excluded.raw_predicted_pct,
+                bias_correction=excluded.bias_correction,
+                inverted=excluded.inverted,
+                price_at_prediction=COALESCE(excluded.price_at_prediction, prediction_snapshot.price_at_prediction),
+                factor_scores_json=excluded.factor_scores_json,
+                dcf_json=excluded.dcf_json,
+                macro_json=COALESCE(excluded.macro_json, prediction_snapshot.macro_json),
+                payload_json=excluded.payload_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                prediction_id,
+                run_id,
+                ticker,
+                prediction_date,
+                str(generated_at),
+                model_version,
+                prompt_version,
+                prediction.get("name"),
+                prediction.get("direction"),
+                _safe_float(prediction.get("score")),
+                prediction.get("confidence"),
+                predicted_1d,
+                _safe_float(prediction.get("predicted_1w_pct")),
+                _safe_float(prediction.get("predicted_1m_pct")),
+                _safe_float(prediction.get("predicted_3m_pct")),
+                _safe_float(prediction.get("predicted_6m_pct")),
+                _safe_float(prediction.get("predicted_12m_pct")),
+                _safe_float(prediction.get("raw_predicted_pct")),
+                _safe_float(prediction.get("bias_correction")),
+                1 if prediction.get("inverted") else 0,
+                _safe_float(prediction.get("price_at_prediction")),
+                _json_dumps(prediction.get("factor_scores") or {}),
+                _json_dumps(prediction.get("dcf") or {}),
+                _json_dumps(macro) if macro is not None else None,
+                _json_dumps(prediction),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+        forecast_by_horizon = {
+            "1d": predicted_1d,
+            "1w": _safe_float(prediction.get("predicted_1w_pct")),
+            "1m": _safe_float(prediction.get("predicted_1m_pct")),
+            "3m": _safe_float(prediction.get("predicted_3m_pct")),
+            "6m": _safe_float(prediction.get("predicted_6m_pct")),
+            "12m": _safe_float(prediction.get("predicted_12m_pct")),
+        }
+        for horizon, forecast in forecast_by_horizon.items():
+            conn.execute(
+                """
+                INSERT INTO prediction_outcome
+                    (prediction_id, ticker, prediction_date, horizon, target_date,
+                     forecast_return_pct)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(prediction_id, horizon) DO UPDATE SET
+                    ticker=excluded.ticker,
+                    prediction_date=excluded.prediction_date,
+                    target_date=excluded.target_date,
+                    forecast_return_pct=excluded.forecast_return_pct
+                """,
+                (
+                    prediction_id,
+                    ticker,
+                    prediction_date,
+                    horizon,
+                    _target_date(prediction_date, horizon),
+                    forecast,
+                ),
+            )
+    return prediction_id
+
+
+def sync_prediction_history(
+    predictions: list[dict[str, Any]],
+    model_version: str = "pred-v1",
+    prompt_version: str = "prompt-v1",
+) -> int:
+    """Backfill/sync JSON predictions into the durable SQLite learning store."""
+    synced = 0
+    for prediction in predictions:
+        if not isinstance(prediction, dict) or not prediction.get("ticker") or not prediction.get("date"):
+            continue
+        try:
+            store_prediction_snapshot(
+                prediction,
+                model_version=str(prediction.get("model_version") or model_version),
+                prompt_version=str(prediction.get("prompt_version") or prompt_version),
+            )
+            synced += 1
+        except Exception as exc:
+            logger.warning("Could not sync prediction %s: %s", prediction.get("ticker"), exc)
+    return synced
+
+
+def list_due_prediction_outcomes(limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 100), 500))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT po.outcome_id, po.prediction_id, po.ticker, po.prediction_date,
+                   po.horizon, po.target_date, po.forecast_return_pct,
+                   ps.price_at_prediction
+            FROM prediction_outcome po
+            LEFT JOIN prediction_snapshot ps ON ps.prediction_id = po.prediction_id
+            WHERE po.realised_return_pct IS NULL
+              AND po.status = 'pending'
+              AND po.target_date <= date('now')
+            ORDER BY po.target_date ASC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_prediction_outcome(
+    outcome_id: str,
+    realised_return_pct: float,
+    direction_match: bool | None,
+    forecast_error: float | None,
+) -> None:
+    match_value = None if direction_match is None else int(direction_match)
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE prediction_outcome SET
+                realised_return_pct = ?,
+                direction_match = ?,
+                forecast_error = ?,
+                evaluated_at = ?,
+                status = 'evaluated'
+            WHERE outcome_id = ?
+            """,
+            (
+                round(float(realised_return_pct), 4),
+                match_value,
+                None if forecast_error is None else round(float(forecast_error), 4),
+                datetime.now(timezone.utc).isoformat(),
+                outcome_id,
+            ),
+        )
+
+
+def get_prediction_learning_summary(limit_tickers: int = 20) -> dict[str, Any]:
+    with get_conn() as conn:
+        overall = dict(conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN realised_return_pct IS NOT NULL THEN 1 ELSE 0 END) AS evaluated,
+                   SUM(CASE WHEN realised_return_pct IS NULL THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN realised_return_pct IS NULL AND target_date <= date('now') THEN 1 ELSE 0 END) AS matured_pending,
+                   MAX(evaluated_at) AS last_evaluated_at
+            FROM prediction_outcome
+            """
+        ).fetchone())
+        horizon_rows = conn.execute(
+            """
+            SELECT horizon,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN realised_return_pct IS NOT NULL THEN 1 ELSE 0 END) AS evaluated,
+                   SUM(CASE WHEN realised_return_pct IS NULL THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN realised_return_pct IS NULL AND target_date <= date('now') THEN 1 ELSE 0 END) AS matured_pending,
+                   SUM(CASE WHEN direction_match = 1 THEN 1 ELSE 0 END) AS correct,
+                   SUM(CASE WHEN direction_match IS NOT NULL THEN 1 ELSE 0 END) AS scored,
+                   AVG(ABS(forecast_error)) AS mae,
+                   AVG(forecast_return_pct) AS avg_forecast,
+                   AVG(realised_return_pct) AS avg_realised
+            FROM prediction_outcome
+            GROUP BY horizon
+            """
+        ).fetchall()
+        ticker_rows = conn.execute(
+            """
+            SELECT ticker,
+                   COUNT(*) AS evaluated,
+                   SUM(CASE WHEN direction_match = 1 THEN 1 ELSE 0 END) AS correct,
+                   AVG(ABS(forecast_error)) AS mae,
+                   AVG(realised_return_pct) AS avg_realised
+            FROM prediction_outcome
+            WHERE direction_match IS NOT NULL
+            GROUP BY ticker
+            ORDER BY evaluated DESC, ticker ASC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit_tickers or 20), 100)),),
+        ).fetchall()
+        run_rows = conn.execute(
+            """
+            SELECT run_id, status, tickers_json, model_version, prompt_version,
+                   source, started_at, completed_at, prediction_count, error
+            FROM prediction_run
+            ORDER BY started_at DESC
+            LIMIT 5
+            """
+        ).fetchall()
+
+    horizon_order = {name: idx for idx, name in enumerate(PREDICTION_OUTCOME_HORIZONS)}
+    by_horizon = []
+    for row in sorted([dict(r) for r in horizon_rows], key=lambda r: horizon_order.get(r["horizon"], 99)):
+        scored = row.get("scored") or 0
+        by_horizon.append({
+            "horizon": row["horizon"],
+            "total": row.get("total") or 0,
+            "evaluated": row.get("evaluated") or 0,
+            "pending": row.get("pending") or 0,
+            "matured_pending": row.get("matured_pending") or 0,
+            "directional_hit_rate_pct": round(((row.get("correct") or 0) / scored) * 100, 1) if scored else None,
+            "mean_absolute_error_pct": round(row["mae"], 2) if row.get("mae") is not None else None,
+            "avg_forecast_pct": round(row["avg_forecast"], 2) if row.get("avg_forecast") is not None else None,
+            "avg_realised_pct": round(row["avg_realised"], 2) if row.get("avg_realised") is not None else None,
+        })
+
+    by_ticker = []
+    for row in ticker_rows:
+        data = dict(row)
+        evaluated = data.get("evaluated") or 0
+        by_ticker.append({
+            "ticker": data["ticker"],
+            "evaluated": evaluated,
+            "directional_hit_rate_pct": round(((data.get("correct") or 0) / evaluated) * 100, 1) if evaluated else None,
+            "mean_absolute_error_pct": round(data["mae"], 2) if data.get("mae") is not None else None,
+            "avg_realised_pct": round(data["avg_realised"], 2) if data.get("avg_realised") is not None else None,
+        })
+
+    runs = []
+    for row in run_rows:
+        data = dict(row)
+        tickers_json = data.pop("tickers_json", "[]")
+        runs.append({
+            **data,
+            "tickers": _safe_json_loads(tickers_json or "[]", []),
+        })
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total_outcomes": overall.get("total") or 0,
+        "evaluated_outcomes": overall.get("evaluated") or 0,
+        "pending_outcomes": overall.get("pending") or 0,
+        "matured_pending_outcomes": overall.get("matured_pending") or 0,
+        "last_evaluated_at": overall.get("last_evaluated_at"),
+        "by_horizon": by_horizon,
+        "by_ticker": by_ticker,
+        "recent_runs": runs,
+        "retention_days": RETENTION_DAYS,
+    }
 
 
 # ---------------------------------------------------------------------------

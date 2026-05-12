@@ -213,6 +213,55 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
     return buf.getvalue()
 
 
+def build_compare_pdf(theses: list[InvestmentThesis]) -> bytes:
+    """Render a side-by-side compare PDF for 2+ tickers."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, leftMargin=1.5 * cm, rightMargin=1.5 * cm, topMargin=1.5 * cm, bottomMargin=1.5 * cm
+    )
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("CmpH1", parent=styles["Heading1"], textColor=_TEXT, fontSize=16, spaceAfter=6)
+    h2 = ParagraphStyle("CmpH2", parent=styles["Heading2"], textColor=_ACCENT, fontSize=10, spaceBefore=8, spaceAfter=4)
+    body = ParagraphStyle("CmpBody", parent=styles["Normal"], textColor=_TEXT, fontSize=9, leading=12)
+    muted = ParagraphStyle("CmpMuted", parent=styles["Normal"], textColor=_MUTED, fontSize=8, leading=10)
+
+    story: list[Any] = []
+    names = ", ".join([t.ticker for t in theses])
+    story.append(Paragraph(f"Ticker Compare — {names}", h1))
+    story.append(Paragraph(f"Generated {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}", muted))
+    story.append(Spacer(1, 0.2 * cm))
+
+    headers = ["Metric"] + [t.ticker for t in theses]
+    rows = [
+        ["Composite Score"] + [f"{t.composite_score:.1f}" for t in theses],
+        ["Risk"] + [_fmt(t.risk_rating) for t in theses],
+        ["Evidence"] + [_fmt(t.evidence_quality) for t in theses],
+        ["Current Price"] + [f"${t.current_price:,.2f}" if t.current_price else "-" for t in theses],
+        ["3M Base"] + [f"{(t.forecast.get('3m').base_return_pct if t.forecast.get('3m') else 0):+.1f}%" if t.forecast.get("3m") else "-" for t in theses],
+        ["12M Base"] + [f"{(t.forecast.get('12m').base_return_pct if t.forecast.get('12m') else 0):+.1f}%" if t.forecast.get("12m") else "-" for t in theses],
+    ]
+    colw = [3.2 * cm] + [((A4[0] - 3.0 * cm) - 3.2 * cm) / max(1, len(theses))] * len(theses)
+    table = Table([headers] + rows, colWidths=colw)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), _ACCENT),
+        ("TEXTCOLOR", (0, 0), (-1, 0), _WHITE),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d1d5db")),
+        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+        ("TEXTCOLOR", (0, 1), (0, -1), colors.HexColor("#374151")),
+    ]))
+    story.append(table)
+
+    story.append(Spacer(1, 0.25 * cm))
+    story.append(Paragraph("Narrative Snapshot", h2))
+    for t in theses:
+        story.append(Paragraph(f"<b>{t.ticker}</b>: {(t.narrative or {}).get('base', 'No base narrative.')}", body))
+        story.append(Spacer(1, 0.1 * cm))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _fmt(val: Any) -> str:
