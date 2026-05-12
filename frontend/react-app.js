@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.5")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.6")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1251,6 +1251,10 @@
             thesis_auto_run_max_tickers: Math.max(1, Math.min(50, Number(cfg.thesis_auto_run_max_tickers || 8))),
             evaluation_auto_run_enabled: !!cfg.evaluation_auto_run_enabled,
             evaluation_auto_run_interval_minutes: Math.max(60, Number(cfg.evaluation_auto_run_interval_minutes || 1440)),
+            prediction_auto_run_enabled: !!cfg.prediction_auto_run_enabled,
+            prediction_auto_run_interval_minutes: Math.max(5, Number(cfg.prediction_auto_run_interval_minutes || 15)),
+            monitor_auto_run_enabled: !!cfg.monitor_auto_run_enabled,
+            monitor_auto_run_interval_minutes: Math.max(1, Number(cfg.monitor_auto_run_interval_minutes || 5)),
           }),
         });
         setCfgStatus(`Saved and applied at ${new Date().toLocaleTimeString()}`);
@@ -1356,6 +1360,50 @@
                 className: "max-w-[120px]",
                 value: cfg.evaluation_auto_run_interval_minutes ?? 1440,
                 onChange: (e) => setCfg(prev => Object.assign({}, prev, { evaluation_auto_run_interval_minutes: e.target.value }))
+              })
+            )
+          ),
+          h("div", { className: "grid gap-2 rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+            h("div", { className: "text-sm font-semibold" }, "Prediction Auto-Run"),
+            h("label", { className: "flex items-center justify-between text-sm" },
+              h("span", { className: "text-pulse-muted" }, "Enabled"),
+              h("input", {
+                type: "checkbox",
+                checked: !!cfg.prediction_auto_run_enabled,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { prediction_auto_run_enabled: e.target.checked }))
+              })
+            ),
+            h("label", { className: "flex items-center justify-between text-sm gap-2" },
+              h("span", { className: "text-pulse-muted" }, "Interval (minutes)"),
+              h(TextInput, {
+                type: "number",
+                min: 5,
+                step: 5,
+                className: "max-w-[120px]",
+                value: cfg.prediction_auto_run_interval_minutes ?? 15,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { prediction_auto_run_interval_minutes: e.target.value }))
+              })
+            )
+          ),
+          h("div", { className: "grid gap-2 rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+            h("div", { className: "text-sm font-semibold" }, "Monitor Auto-Run"),
+            h("label", { className: "flex items-center justify-between text-sm" },
+              h("span", { className: "text-pulse-muted" }, "Enabled"),
+              h("input", {
+                type: "checkbox",
+                checked: !!cfg.monitor_auto_run_enabled,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { monitor_auto_run_enabled: e.target.checked }))
+              })
+            ),
+            h("label", { className: "flex items-center justify-between text-sm gap-2" },
+              h("span", { className: "text-pulse-muted" }, "Interval (minutes)"),
+              h(TextInput, {
+                type: "number",
+                min: 1,
+                step: 1,
+                className: "max-w-[120px]",
+                value: cfg.monitor_auto_run_interval_minutes ?? 5,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { monitor_auto_run_interval_minutes: e.target.value }))
               })
             )
           )

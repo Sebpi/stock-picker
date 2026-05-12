@@ -609,6 +609,20 @@ evaluation_scheduler_status = {
     "last_evaluated_count": None,
     "last_error": None,
 }
+prediction_scheduler_status = {
+    "enabled": True,
+    "last_run": None,
+    "active": False,
+    "runs_started": 0,
+    "last_error": None,
+}
+monitor_scheduler_status = {
+    "enabled": True,
+    "last_run": None,
+    "active": False,
+    "runs_started": 0,
+    "last_error": None,
+}
 _bg_consecutive_failures: dict[str, int] = {"thesis": 0, "evaluation": 0}
 _BG_ALERT_THRESHOLD = 3
 
@@ -1767,7 +1781,12 @@ def _build_alert_email(buy_alerts: list, sell_alerts: list, time_str: str, previ
 # ── Stock monitoring (runs every 5 min) ───────────────────────────────────────
 
 async def monitor_stocks():
+    monitor_scheduler_status["active"] = True
+    monitor_scheduler_status["runs_started"] += 1
+    monitor_scheduler_status["last_run"] = datetime.now(timezone.utc).isoformat()
+    monitor_scheduler_status["last_error"] = None
     if not is_market_open():
+        monitor_scheduler_status["active"] = False
         return
     now = datetime.now(timezone.utc)
     monitor_status["last_check"] = now.isoformat()
@@ -1850,19 +1869,28 @@ async def monitor_stocks():
             append_alert(record)
 
     monitor_status["active"] = True
+    monitor_scheduler_status["active"] = False
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 async def auto_predict():
     """Refresh predictions every 15 mins during market hours."""
+    prediction_scheduler_status["active"] = True
+    prediction_scheduler_status["runs_started"] += 1
+    prediction_scheduler_status["last_run"] = datetime.now(timezone.utc).isoformat()
+    prediction_scheduler_status["last_error"] = None
     if not is_market_open():
+        prediction_scheduler_status["active"] = False
         return
     try:
         await _generate_predictions_impl()
         print("[Predictions] Auto-refreshed during market hours.")
     except Exception as e:
+        prediction_scheduler_status["last_error"] = str(e)
         print(f"[Predictions] Auto-refresh failed: {e}")
+    finally:
+        prediction_scheduler_status["active"] = False
 
 
 async def auto_thesis():
@@ -2020,21 +2048,30 @@ async def startup():
         print("="*55 + "\n")
         logger.info("First-run admin account created")
 
-    scheduler.add_job(monitor_stocks, "interval", minutes=5,  id="monitor")
-    scheduler.add_job(
-        lambda: asyncio.ensure_future(_prewarm_universe_cache()),
-        "interval", hours=6, id="screener_prewarm", max_instances=1, coalesce=True,
-    )
-    scheduler.add_job(auto_predict,   "interval", minutes=15, id="predictions")
     # Load persisted scheduler settings (overrides .env)
     import scheduler_settings as _ss
     _sched_cfg = _ss.load()
+    _mon_enabled = _sched_cfg["monitor_auto_run_enabled"]
+    _mon_interval = _sched_cfg["monitor_auto_run_interval_minutes"]
+    _pred_enabled = _sched_cfg["prediction_auto_run_enabled"]
+    _pred_interval = _sched_cfg["prediction_auto_run_interval_minutes"]
     _thesis_enabled  = _sched_cfg["thesis_auto_run_enabled"]
     _thesis_interval = _sched_cfg["thesis_auto_run_interval_minutes"]
     _eval_enabled    = _sched_cfg["evaluation_auto_run_enabled"]
     _eval_interval   = _sched_cfg["evaluation_auto_run_interval_minutes"]
+    monitor_scheduler_status["enabled"] = _mon_enabled
+    prediction_scheduler_status["enabled"] = _pred_enabled
     thesis_scheduler_status["enabled"] = _thesis_enabled
     evaluation_scheduler_status["enabled"] = _eval_enabled
+
+    if _mon_enabled:
+        scheduler.add_job(monitor_stocks, "interval", minutes=_mon_interval, id="monitor")
+    scheduler.add_job(
+        lambda: asyncio.ensure_future(_prewarm_universe_cache()),
+        "interval", hours=6, id="screener_prewarm", max_instances=1, coalesce=True,
+    )
+    if _pred_enabled:
+        scheduler.add_job(auto_predict, "interval", minutes=_pred_interval, id="predictions")
 
     if _thesis_enabled:
         scheduler.add_job(
@@ -2058,10 +2095,10 @@ async def startup():
     asyncio.ensure_future(_prewarm_universe_cache())
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
-    if THESIS_AUTO_RUN_ENABLED:
-        print(f"[Thesis] Multi-agent thesis scheduled every {THESIS_AUTO_RUN_INTERVAL_MINUTES} minutes.")
-    if EVALUATION_AUTO_RUN_ENABLED:
-        print(f"[Evaluation] Forecast evaluation scheduled every {EVALUATION_AUTO_RUN_INTERVAL_MINUTES} minutes.")
+    if _thesis_enabled:
+        print(f"[Thesis] Multi-agent thesis scheduled every {_thesis_interval} minutes.")
+    if _eval_enabled:
+        print(f"[Evaluation] Forecast evaluation scheduled every {_eval_interval} minutes.")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -5956,6 +5993,8 @@ def v1_patch_scheduler_settings(request: Request, body: dict, current_user: str 
         "thesis_auto_run_enabled", "thesis_auto_run_interval_minutes",
         "thesis_auto_run_max_tickers", "evaluation_auto_run_enabled",
         "evaluation_auto_run_interval_minutes",
+        "prediction_auto_run_enabled", "prediction_auto_run_interval_minutes",
+        "monitor_auto_run_enabled", "monitor_auto_run_interval_minutes",
     }
     patch = {k: v for k, v in body.items() if k in allowed}
     if not patch:
@@ -5991,6 +6030,32 @@ def v1_patch_scheduler_settings(request: Request, body: dict, current_user: str 
             )
         evaluation_scheduler_status["enabled"] = cfg["evaluation_auto_run_enabled"]
 
+    if "prediction_auto_run_enabled" in patch or "prediction_auto_run_interval_minutes" in patch:
+        try:
+            scheduler.remove_job("predictions")
+        except Exception:
+            pass
+        if cfg["prediction_auto_run_enabled"]:
+            scheduler.add_job(
+                auto_predict, "interval",
+                minutes=cfg["prediction_auto_run_interval_minutes"],
+                id="predictions", max_instances=1, coalesce=True,
+            )
+        prediction_scheduler_status["enabled"] = cfg["prediction_auto_run_enabled"]
+
+    if "monitor_auto_run_enabled" in patch or "monitor_auto_run_interval_minutes" in patch:
+        try:
+            scheduler.remove_job("monitor")
+        except Exception:
+            pass
+        if cfg["monitor_auto_run_enabled"]:
+            scheduler.add_job(
+                monitor_stocks, "interval",
+                minutes=cfg["monitor_auto_run_interval_minutes"],
+                id="monitor", max_instances=1, coalesce=True,
+            )
+        monitor_scheduler_status["enabled"] = cfg["monitor_auto_run_enabled"]
+
     return {"status": "ok", "settings": cfg}
 
 
@@ -6011,6 +6076,8 @@ def v1_operations_status(request: Request, current_user: str = Depends(get_curre
     return observability.operations_status(
         thesis_scheduler=thesis_scheduler_status,
         evaluation_scheduler=evaluation_scheduler_status,
+        prediction_scheduler=prediction_scheduler_status,
+        monitor_scheduler=monitor_scheduler_status,
         recent_run_limit=10,
     )
 

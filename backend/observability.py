@@ -121,6 +121,8 @@ def thesis_quality_summary(ticker: str) -> dict[str, Any]:
 def operations_status(
     thesis_scheduler: dict[str, Any] | None = None,
     evaluation_scheduler: dict[str, Any] | None = None,
+    prediction_scheduler: dict[str, Any] | None = None,
+    monitor_scheduler: dict[str, Any] | None = None,
     recent_run_limit: int = 10,
 ) -> dict[str, Any]:
     """Return a compact operational snapshot for the multi-agent pipeline."""
@@ -143,6 +145,8 @@ def operations_status(
         "agents": health["summary"],
         "thesis_scheduler": thesis_scheduler or {},
         "evaluation_scheduler": evaluation_scheduler or {},
+        "prediction_scheduler": prediction_scheduler or {},
+        "monitor_scheduler": monitor_scheduler or {},
         "forecast_outcomes": outcome_status,
         "recent_runs": recent_runs,
         "recent_failures": recent_failures,
