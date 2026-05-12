@@ -217,7 +217,7 @@
       h("div", { className: "hidden overflow-x-auto rounded-xl border border-pulse-line bg-pulse-card md:block" },
         h("table", { className: "min-w-full border-collapse text-sm", style: minWidth ? { minWidth: minWidth + "px" } : null },
           h("thead", { className: "bg-pulse-panel text-left font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
-            h("tr", null, columns.map(col => h("th", { key: col.key, className: cx("whitespace-nowrap border-b border-pulse-line px-3 py-3", col.headClass) }, col.label)))
+            h("tr", null, columns.map(col => h("th", { key: col.key, className: cx("whitespace-nowrap border-b border-pulse-line px-2 py-3", col.headClass) }, col.label)))
           ),
           h("tbody", null, rows.length ? rows.map((row, i) =>
             h("tr", {
@@ -225,7 +225,7 @@
               className: cx("border-b border-pulse-line/60 last:border-0", onRowClick ? "cursor-pointer hover:bg-pulse-panel/60" : "hover:bg-pulse-panel/40"),
               onClick: onRowClick ? (e) => { if (e.target.tagName !== "BUTTON" && e.target.closest("button") == null) onRowClick(row); } : undefined,
             },
-              columns.map(col => h("td", { key: col.key, className: cx("whitespace-nowrap px-3 py-3", col.className) }, col.render ? col.render(row) : row[col.key]))
+              columns.map(col => h("td", { key: col.key, className: cx("whitespace-nowrap px-2 py-3", col.className) }, col.render ? col.render(row) : row[col.key]))
             )
           ) : h("tr", null, h("td", { className: "px-3 py-4 text-pulse-muted", colSpan: columns.length }, emptyText || "No rows.")))
         )
@@ -368,7 +368,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.3.1")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.4.0")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1952,12 +1952,23 @@
           h(McCard, { label: `Prob. hit ${fmtGbp(s.target, 0)}`, value: mc.prob_target_pct + "%", pct: "across 1,000 sims", tone: probCls })
         ),
         Array.isArray(mc.sample_paths) && mc.sample_paths.length ? h("div", { className: "mt-4" },
-          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Sample paths · 10 / 50 / 90th percentiles"),
-          h(MultiSparkline, { paths: [
-            { data: mc.sample_paths[0] || [], color: "#ff4d6e" },
-            { data: mc.sample_paths[4] || [], color: "#00e5d9" },
-            { data: mc.sample_paths[9] || [], color: "#3fde7e" },
-          ], target: s.target })
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Projected portfolio paths · 12 months"),
+          h(MultiSparkline, {
+            paths: [
+              { data: mc.sample_paths[0] || [], color: "#ff4d6e", label: "Pessimistic (10th %)" },
+              { data: mc.sample_paths[4] || [], color: "#00e5d9", label: "Median (50th %)" },
+              { data: mc.sample_paths[9] || [], color: "#3fde7e", label: "Optimistic (90th %)" },
+            ],
+            target: s.target,
+            targetLabel: `Target ${fmtGbp(s.target, 0)}`,
+            startValue: s.initial_float,
+            xStartLabel: "Day 0",
+            xEndLabel: `Day ${(mc.sample_paths[0] || []).length - 1 || mc.n_days || 252}`,
+          }),
+          h("p", { className: "mt-3 text-xs leading-relaxed text-pulse-muted" },
+            h("strong", { className: "text-pulse-ink" }, "Reading this chart: "),
+            "Three representative paths sampled from the 1,000 Monte Carlo simulations. The vertical axis is portfolio value in GBP, horizontal is trading days forward. The dashed amber line is your target — paths that finish above it would hit the goal. Use the gap between the red (pessimistic) and green (optimistic) lines as a sense of how wide the outcome range is for your current trading edge."
+          )
         ) : null
       ),
       h(Card, { className: "p-4 text-sm leading-relaxed text-pulse-muted" },
@@ -1975,11 +1986,12 @@
     );
   }
 
-  function MultiSparkline({ paths, target }) {
+  function MultiSparkline({ paths, target, targetLabel, startValue, xStartLabel, xEndLabel }) {
     const allData = paths.flatMap(p => p.data || []);
     if (!allData.length) return h("p", { className: "mt-2 text-sm text-pulse-muted" }, "No path data.");
-    const min = Math.min.apply(null, allData.concat([target || allData[0]]));
-    const max = Math.max.apply(null, allData.concat([target || allData[0]]));
+    const extras = [target, startValue].filter(v => v != null);
+    const min = Math.min.apply(null, allData.concat(extras));
+    const max = Math.max.apply(null, allData.concat(extras));
     const span = max - min || 1;
     const w = 800, hgt = 200;
     function poly(arr) {
@@ -1987,10 +1999,43 @@
       const step = w / (arr.length - 1);
       return arr.map((v, i) => `${(i * step).toFixed(1)},${(hgt - ((v - min) / span) * hgt).toFixed(1)}`).join(" ");
     }
-    const targetY = target != null ? hgt - ((target - min) / span) * hgt : null;
-    return h("svg", { viewBox: `0 0 ${w} ${hgt}`, className: "mt-2 h-48 w-full", preserveAspectRatio: "none" },
-      targetY != null ? h("line", { x1: 0, x2: w, y1: targetY, y2: targetY, stroke: "#ffc857", strokeDasharray: "4 4", strokeWidth: 1 }) : null,
-      paths.map((p, i) => h("polyline", { key: i, fill: "none", stroke: p.color, strokeWidth: 1.5, points: poly(p.data || []) }))
+    const yFor = v => hgt - ((v - min) / span) * hgt;
+    const targetY = target != null ? yFor(target) : null;
+    const startY = startValue != null ? yFor(startValue) : null;
+
+    return h("div", { className: "mt-2" },
+      // SVG chart
+      h("svg", { viewBox: `0 0 ${w} ${hgt}`, className: "h-48 w-full", preserveAspectRatio: "none" },
+        // Light horizontal gridlines
+        [0.25, 0.5, 0.75].map(f => h("line", { key: f, x1: 0, x2: w, y1: hgt * f, y2: hgt * f, stroke: "#242a3a", strokeWidth: 0.5 })),
+        // Start line (solid dim)
+        startY != null ? h("line", { x1: 0, x2: w, y1: startY, y2: startY, stroke: "#5e6678", strokeWidth: 0.6, strokeDasharray: "2 4" }) : null,
+        // Target line (amber dashed, bolder)
+        targetY != null ? h("line", { x1: 0, x2: w, y1: targetY, y2: targetY, stroke: "#ffc857", strokeDasharray: "6 4", strokeWidth: 1.4 }) : null,
+        // Sample paths
+        paths.map((p, i) => h("polyline", { key: i, fill: "none", stroke: p.color, strokeWidth: 1.6, points: poly(p.data || []) }))
+      ),
+      // Y-axis range + X-axis labels (HTML so they don't get stretched by SVG preserveAspectRatio)
+      h("div", { className: "mt-1 flex justify-between font-mono text-[10px] text-pulse-dim" },
+        h("span", null, xStartLabel || "start"),
+        h("span", null, "value range ", fmtGbp(min, 0), " → ", fmtGbp(max, 0)),
+        h("span", null, xEndLabel || "end")
+      ),
+      // Legend
+      h("div", { className: "mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs" },
+        paths.map((p, i) => h("span", { key: i, className: "inline-flex items-center gap-2" },
+          h("span", { className: "inline-block h-[2px] w-5", style: { backgroundColor: p.color } }),
+          h("span", { className: "text-pulse-muted" }, p.label || `series ${i + 1}`)
+        )),
+        target != null ? h("span", { className: "inline-flex items-center gap-2" },
+          h("span", { className: "inline-block h-[2px] w-5", style: { background: "repeating-linear-gradient(to right, #ffc857 0 4px, transparent 4px 8px)" } }),
+          h("span", { className: "text-pulse-muted" }, targetLabel || "target")
+        ) : null,
+        startValue != null ? h("span", { className: "inline-flex items-center gap-2" },
+          h("span", { className: "inline-block h-[2px] w-5", style: { background: "repeating-linear-gradient(to right, #5e6678 0 2px, transparent 2px 6px)" } }),
+          h("span", { className: "text-pulse-muted" }, `Start ${fmtGbp(startValue, 0)}`)
+        ) : null
+      )
     );
   }
 

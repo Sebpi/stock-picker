@@ -172,6 +172,10 @@ STOCK_RESEARCH_MAX_TOKENS = max(256, int(os.getenv("STOCK_RESEARCH_MAX_TOKENS", 
 RECOMMEND_MAX_TOKENS = max(256, int(os.getenv("RECOMMEND_MAX_TOKENS", "800")))
 SEARCH_RESULTS_LIMIT = max(1, int(os.getenv("SEARCH_RESULTS_LIMIT", "12")))
 SEARCH_INFO_TIMEOUT_SEC = max(0.5, float(os.getenv("SEARCH_INFO_TIMEOUT_SEC", "2.5")))
+# Universe build (prewarm + cache-miss screen) is batched/concurrent and is
+# allowed to wait longer per ticker, so each Index returns close to its full
+# constituent list rather than the ~40-50% that survived a 2.5s timeout.
+UNIVERSE_INFO_TIMEOUT_SEC = max(2.0, float(os.getenv("UNIVERSE_INFO_TIMEOUT_SEC", "8.0")))
 RECOMMENDATION_INFO_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_INFO_TIMEOUT_SEC", "4.0")))
 RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HISTORY_TIMEOUT_SEC", "4.0")))
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
@@ -509,17 +513,49 @@ _WIKI_HEADERS = {
 }
 
 
+def _wiki_constituents(url: str, symbol_headers: tuple[str, ...], min_rows: int = 50) -> list[str]:
+    """Pull a Wikipedia constituents page and return the values from the first
+    `wikitable` whose header row contains one of `symbol_headers`. Uses bs4
+    directly because the runtime image has neither `lxml` nor `html5lib`, so
+    `pandas.read_html` silently fails and returns nothing."""
+    import requests
+    from bs4 import BeautifulSoup
+
+    html = requests.get(url, headers=_WIKI_HEADERS, timeout=15).text
+    soup = BeautifulSoup(html, "html.parser")
+    wanted = {h.lower() for h in symbol_headers}
+
+    for table in soup.select("table.wikitable"):
+        head_row = table.find("tr")
+        if not head_row:
+            continue
+        headers = [th.get_text(strip=True).lower() for th in head_row.find_all(["th", "td"])]
+        try:
+            col_idx = next(i for i, h in enumerate(headers) if h in wanted)
+        except StopIteration:
+            continue
+
+        values: list[str] = []
+        for row in table.find_all("tr")[1:]:
+            cells = row.find_all(["td", "th"])
+            if col_idx >= len(cells):
+                continue
+            text = cells[col_idx].get_text(strip=True)
+            if text and text not in {"-", "—"}:
+                values.append(text)
+        if len(values) >= min_rows:
+            return values
+    return []
+
+
 def _fetch_sp500_from_wiki() -> list:
     try:
-        import pandas as pd
-        import requests
-        html = requests.get(
+        rows = _wiki_constituents(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            headers=_WIKI_HEADERS, timeout=15
-        ).text
-        tables = pd.read_html(io.StringIO(html), header=0)
-        tickers = tables[0]["Symbol"].tolist()
-        return [str(t).replace(".", "-") for t in tickers]
+            ("symbol", "ticker"),
+        )
+        # yfinance uses '-' instead of '.' (e.g. BRK-B not BRK.B).
+        return [s.replace(".", "-").upper() for s in rows]
     except Exception as e:
         logger.warning(f"Failed to fetch S&P 500 from Wikipedia: {e}")
         return []
@@ -527,21 +563,35 @@ def _fetch_sp500_from_wiki() -> list:
 
 def _fetch_nasdaq100_from_wiki() -> list:
     try:
-        import pandas as pd
-        import requests
-        html = requests.get(
+        rows = _wiki_constituents(
             "https://en.wikipedia.org/wiki/Nasdaq-100",
-            headers=_WIKI_HEADERS, timeout=15
-        ).text
-        tables = pd.read_html(io.StringIO(html), header=0)
-        for table in tables:
-            if "Ticker" in table.columns:
-                return [str(t) for t in table["Ticker"].tolist()]
-            if "Symbol" in table.columns:
-                return [str(t) for t in table["Symbol"].tolist()]
-        return []
+            ("ticker", "symbol"),
+        )
+        return [s.upper() for s in rows]
     except Exception as e:
         logger.warning(f"Failed to fetch NASDAQ 100 from Wikipedia: {e}")
+        return []
+
+
+def _fetch_ftse250_from_wiki() -> list:
+    """Current FTSE 250 constituents with the yfinance-compatible `.L` suffix.
+    Falls back to an empty list so the caller can keep the hardcoded seed."""
+    try:
+        rows = _wiki_constituents(
+            "https://en.wikipedia.org/wiki/FTSE_250_Index",
+            ("ticker", "epic", "symbol", "code"),
+        )
+        cleaned: list[str] = []
+        for sym in rows:
+            s = sym.strip().upper().replace(" ", "")
+            if not s:
+                continue
+            if "." not in s:
+                s += ".L"
+            cleaned.append(s)
+        return cleaned
+    except Exception as e:
+        logger.warning(f"Failed to fetch FTSE 250 from Wikipedia: {e}")
         return []
 
 TICKER_NAMES = {
@@ -960,7 +1010,7 @@ async def _prewarm_universe_cache():
         for i in range(0, len(pool), _PREWARM_BATCH):
             batch = pool[i: i + _PREWARM_BATCH]
             infos = await asyncio.gather(
-                *[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in batch],
+                *[get_info_with_timeout(t, UNIVERSE_INFO_TIMEOUT_SEC) for t in batch],
                 return_exceptions=True,
             )
             for ticker, info in zip(batch, infos):
@@ -2063,16 +2113,20 @@ class ResetPasswordRequest(BaseModel):
 async def startup():
     _load_lockout_state()
     # Refresh index constituent lists from Wikipedia
-    global SP500_TICKERS, NASDAQ100_TICKERS, UNIVERSE
+    global SP500_TICKERS, NASDAQ100_TICKERS, FTSE250_TICKERS, UNIVERSE
     loop = asyncio.get_event_loop()
     sp500   = await loop.run_in_executor(None, _fetch_sp500_from_wiki)
     nasdaq  = await loop.run_in_executor(None, _fetch_nasdaq100_from_wiki)
+    ftse250 = await loop.run_in_executor(None, _fetch_ftse250_from_wiki)
     if sp500:
         SP500_TICKERS = sp500
         logger.info(f"S&P 500 tickers refreshed from Wikipedia ({len(sp500)} stocks)")
     if nasdaq:
         NASDAQ100_TICKERS = nasdaq
         logger.info(f"NASDAQ 100 tickers refreshed from Wikipedia ({len(nasdaq)} stocks)")
+    if ftse250:
+        FTSE250_TICKERS = ftse250
+        logger.info(f"FTSE 250 tickers refreshed from Wikipedia ({len(ftse250)} stocks)")
     UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
 
     # Create default admin account on first run
@@ -2360,7 +2414,7 @@ async def screen_stocks(
         universe_rows = cached_universe[0]
     else:
         pool = index_map.get(index, UNIVERSE) if index else UNIVERSE
-        infos = await asyncio.gather(*[get_info_with_timeout(t, SEARCH_INFO_TIMEOUT_SEC) for t in pool], return_exceptions=True)
+        infos = await asyncio.gather(*[get_info_with_timeout(t, UNIVERSE_INFO_TIMEOUT_SEC) for t in pool], return_exceptions=True)
         universe_rows = []
         for ticker, info in zip(pool, infos):
             if isinstance(info, Exception) or not isinstance(info, dict):
