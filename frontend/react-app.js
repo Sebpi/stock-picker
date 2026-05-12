@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.8")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.9")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1535,6 +1535,27 @@
     const score = Number(thesis.composite_score || 0);
     const direction = score >= 60 ? "BULLISH" : score <= 40 ? "BEARISH" : "NEUTRAL";
     const forecast = thesis.forecast || {};
+    async function exportPdf(e) {
+      e.preventDefault();
+      try {
+        const res = await fetch(`/v1/thesis/${encodeURIComponent(thesis.ticker)}/export.pdf`, {
+          headers: token() ? { Authorization: `Bearer ${token()}` } : {},
+        });
+        if (!res.ok) throw new Error(`Export failed (HTTP ${res.status})`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `thesis_${thesis.ticker}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (_) {
+        window.open(`/v1/thesis/${encodeURIComponent(thesis.ticker)}/export.pdf`, "_blank");
+      }
+    }
+
     return h("div", { className: "grid gap-4" },
       h(Card, { className: "p-4" },
         h("div", { className: "flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between" },
@@ -1543,7 +1564,7 @@
             h("h3", { className: "mt-1 text-2xl font-semibold" }, thesis.ticker, " Analysis"),
             h("p", { className: "mt-1 text-sm text-pulse-muted" }, fmtDate(thesis.generated_at), thesis.thesis_id ? ` · thesis ${String(thesis.thesis_id).slice(0, 8)}` : "")
           ),
-          h("a", { href: `/v1/thesis/${encodeURIComponent(thesis.ticker)}/export.pdf`, target: "_blank", className: "inline-flex min-h-10 items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink" }, "Export PDF")
+          h("a", { href: "#", onClick: exportPdf, className: "inline-flex min-h-10 items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink" }, "Export PDF")
         )
       ),
       h(Reconciliation, { data: recon }),
