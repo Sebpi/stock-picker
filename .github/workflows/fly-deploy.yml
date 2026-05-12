@@ -1,0 +1,98 @@
+name: Stock Picker CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test-and-quality:
+    name: Tests + Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-asyncio pip-audit bandit
+
+      - name: Run backend tests
+        run: /usr/bin/env PYTHONPATH=backend pytest -q backend/tests
+
+      - name: Bandit SAST (high severity)
+        run: bandit -r backend -ll
+
+      - name: Dependency audit
+        run: pip-audit -r backend/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: JS syntax check
+        run: node --check frontend/react-app.js
+
+      - name: npm audit (high severity)
+        run: npm audit --audit-level=high
+
+  deploy:
+    name: Deploy to Fly
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test-and-quality
+    runs-on: ubuntu-latest
+    concurrency: deploy-group
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  smoke:
+    name: Post-deploy smoke
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS https://stock-picker-sp.fly.dev/api/health >/dev/null; then
+              echo "live"; exit 0
+            fi
+            sleep 5
+          done
+          echo "site never came up"; exit 1
+      - name: Basic smoke checks
+        run: |
+          curl -fsS https://stock-picker-sp.fly.dev/ >/dev/null
+          curl -fsS https://stock-picker-sp.fly.dev/legacy >/dev/null
+          curl -fsS https://stock-picker-sp.fly.dev/api/health | jq -e '.status=="ok"'
+
+  owasp-zap:
+    name: OWASP ZAP Baseline
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: "https://stock-picker-sp.fly.dev"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a"
+

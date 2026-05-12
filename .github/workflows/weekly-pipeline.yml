@@ -1,0 +1,34 @@
+name: Weekly cloud maintenance
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Monday 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  maintenance:
+    name: Evaluation + scheduler health
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Run evaluation in cloud
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          STOCK_PICKER_SERVICE_KEY: ${{ secrets.STOCK_PICKER_SERVICE_KEY }}
+        run: |
+          flyctl ssh console -a stock-picker-sp \
+            --command "/bin/sh -c '
+              cd /app &&
+              echo === Trigger evaluation === &&
+              curl -fsS -X POST http://127.0.0.1:8080/v1/evaluate \
+                -H \"x-service-key: ${STOCK_PICKER_SERVICE_KEY}\" || exit 1
+            '"
+        shell: bash
+
+      - name: Verify scheduler status
+        run: |
+          curl -fsS https://stock-picker-sp.fly.dev/v1/operations/status \
+            -H "x-service-key: ${{ secrets.STOCK_PICKER_SERVICE_KEY }}" \
+            | jq -e '.thesis_scheduler.enabled != null and .evaluation_scheduler.enabled != null'

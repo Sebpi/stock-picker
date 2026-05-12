@@ -1,0 +1,9 @@
+# Fail on high-risk findings by default.
+# Format: <ruleId>\t<IGNORE|INFO|WARN|FAIL>\t(optional message)
+10015	FAIL	Incomplete or no cache-control header set
+10016	FAIL	Web Browser XSS Protection not enabled
+10020	FAIL	X-Frame-Options header not set
+10021	FAIL	X-Content-Type-Options header missing
+10038	FAIL	Content Security Policy (CSP) header not set
+10055	FAIL	CSP allows unsafe-inline
+10098	FAIL	Strict-Transport-Security header not set
