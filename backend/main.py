@@ -5956,7 +5956,16 @@ def v1_thesis_by_id(request: Request, thesis_id: str, current_user: str = Depend
 def v1_thesis_compare(request: Request, tickers: str, current_user: str = Depends(get_current_user)):
     """Compare latest theses for a comma-separated list of tickers (max 10)."""
     import db as _db
-    symbols = [_validate_ticker(t.strip()) for t in tickers.split(",") if t.strip()][:10]
+    # Accept flexible separators: "AAPL,MSFT", "AAPL MSFT", "AAPL vs MSFT"
+    raw_parts = re.split(r"\bVS\b|[,/\s]+", (tickers or "").upper())
+    symbols = []
+    for part in raw_parts:
+        part = part.strip()
+        if not part:
+            continue
+        symbols.append(_validate_ticker(part))
+        if len(symbols) >= 10:
+            break
     results = []
     for sym in symbols:
         thesis = _db.get_latest_thesis(sym)
