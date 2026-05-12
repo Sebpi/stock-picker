@@ -4570,7 +4570,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
     # Use today's predictions; fall back to most recent date
     dated = [p for p in predictions if p.get("score") is not None or p.get("predicted_pct") is not None]
     if not dated:
-        return {"buys": [], "sells": [], "summary": {}}
+        return {"buys": [], "sells": [], "summary": {}, "explanation": "No predictions with score/return data found yet."}
     latest_date  = max(p["date"] for p in dated)
     latest_preds = [normalize_prediction(p) for p in dated if p["date"] == latest_date]
 
@@ -5042,10 +5042,20 @@ async def _build_recommendations(progress: Optional[callable] = None):
 
     stage_started = datetime.now(timezone.utc)
     _tick("finalize", "Finalizing recommendation set…", 1, 1)
+    explanation = None
+    if not buys and not sells:
+        if remaining_cash < 500:
+            explanation = "No buy signals: available paper cash is below £500 minimum allocation."
+        elif latest_preds:
+            explanation = "No actionable signals: latest predictions did not pass confidence/quality/risk filters."
+        else:
+            explanation = "No actionable signals available."
+
     result = {
         "buys":            buys,
         "sells":           sells,
         "prediction_date": latest_date,
+        "explanation":     explanation,
         "summary": {
             "initial_float":         PAPER_INITIAL_FLOAT,
             "target":                target,
@@ -5983,6 +5993,38 @@ def v1_thesis_compare(request: Request, tickers: str, current_user: str = Depend
         else:
             results.append({"ticker": sym, "error": "No thesis found"})
     return {"tickers": symbols, "comparison": results}
+
+
+@app.get("/v1/thesis/compare/export.pdf")
+@limiter.limit("10/minute")
+def v1_thesis_compare_pdf(request: Request, tickers: str, current_user: str = Depends(get_current_user)):
+    """Export side-by-side compare PDF for multiple tickers."""
+    import db as _db
+    import thesis_pdf as _pdf
+    from fastapi.responses import Response
+    raw_parts = re.split(r"\bVS\b|[,/\s]+", (tickers or "").upper())
+    symbols = []
+    for part in raw_parts:
+        part = part.strip()
+        if not part:
+            continue
+        symbols.append(_validate_ticker(part))
+        if len(symbols) >= 10:
+            break
+    theses = []
+    for sym in symbols:
+        t = _db.get_latest_thesis(sym)
+        if t:
+            theses.append(t)
+    if len(theses) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 tickers with thesis data to export compare PDF")
+    pdf_bytes = _pdf.build_compare_pdf(theses)
+    joined = "_".join([t.ticker for t in theses[:4]])
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=compare_{joined}.pdf"},
+    )
 
 
 @app.get("/v1/settings/scheduler")

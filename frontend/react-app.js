@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.10")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.11")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1506,13 +1506,33 @@
 
   function CompareCard({ data, onClose }) {
     const items = Array.isArray(data) ? data : (data.comparison || data.results || []);
+    async function exportComparePdf() {
+      const tickers = items.map(i => i.ticker).filter(Boolean).join(",");
+      if (!tickers) return;
+      const res = await fetch(`/v1/thesis/compare/export.pdf?tickers=${encodeURIComponent(tickers)}`, {
+        headers: token() ? { Authorization: `Bearer ${token()}` } : {},
+      });
+      if (!res.ok) throw new Error(`Export failed (HTTP ${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `compare_${tickers.replace(/,/g, "_")}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
     return h(Card, { className: "mb-4 p-4" },
       h("div", { className: "flex items-start justify-between gap-3" },
         h("div", null,
           h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Compare"),
           h("h3", { className: "mt-1 text-lg font-semibold" }, "Side-by-side")
         ),
-        h(Button, { onClick: onClose, className: "min-h-9 px-3 text-xs" }, "Close")
+        h("div", { className: "flex gap-2" },
+          h(Button, { onClick: exportComparePdf, className: "min-h-9 px-3 text-xs" }, "Export PDF"),
+          h(Button, { onClick: onClose, className: "min-h-9 px-3 text-xs" }, "Close")
+        )
       ),
       Array.isArray(items) && items.length ? h("div", { className: "mt-3 overflow-x-auto" },
         h("table", { className: "min-w-full text-sm" },
@@ -1866,6 +1886,7 @@
     const s = data?.summary || {};
     const buys = data?.buys || [];
     const sells = data?.sells || [];
+    const explanation = data?.explanation || "";
 
     return h("div", null,
       h(SectionHead, { title: "Recommendations", kicker: "Buy/Sell signals", subtitle: "Sized from your float. Click View for reasoning.", actions: [h(Button, { key: "run", kind: "primary", onClick: load, disabled: busy }, busy ? "Running..." : "↻ Refresh")] }),
@@ -1937,7 +1958,7 @@
           )
         )
       ) : null,
-      data && !buys.length && !sells.length ? h(Empty, null, "No recommendations available. Generate today's predictions first.") : null,
+      data && !buys.length && !sells.length ? h(Empty, null, explanation || "No recommendations available for the latest prediction set.") : null,
       !data && !busy ? h(Empty, null, "Click Refresh to generate recommendations.") : null,
       reasoning ? h(SlideOver, { title: `${reasoning.ticker} ${reasoning.type}`, kicker: "Reasoning", onClose: () => setReasoning(null) },
         h("div", { className: "grid gap-3" },
