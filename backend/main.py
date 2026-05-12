@@ -968,7 +968,12 @@ _predictions_cache: dict[str, object] = {
 _screen_universe_cache: dict[str, tuple[list[dict], datetime]] = {}
 _PREWARM_BATCH = 25          # tickers per batch
 _PREWARM_DELAY = 1.2         # seconds between batches (avoids yfinance rate-limit)
-_SCREEN_TTL    = 300         # cache TTL seconds
+# Match the cache TTL to the prewarm cadence (6h, see scheduler in startup()).
+# Each cache miss otherwise fans out hundreds of concurrent yfinance calls,
+# which Yahoo rate-limits, leaving the cache populated with a bad partial set
+# for the next TTL window. Letting the gently-batched prewarm dominate gives
+# the screener a steady, full ticker count.
+_SCREEN_TTL    = 6 * 60 * 60  # 6 hours
 
 
 def _build_universe_row(ticker: str, info: dict) -> dict | None:
@@ -996,6 +1001,31 @@ def _build_universe_row(ticker: str, info: dict) -> dict | None:
         return None
 
 
+async def _build_universe_rows(pool: list[str]) -> list[dict]:
+    """Fetch yfinance info for every ticker in `pool` in small concurrent
+    batches and return the screener rows. Batching + the inter-batch delay
+    are what keep the screener inside Yahoo's rate-limit envelope — fanning
+    all 500+ tickers out concurrently triggers 429s and silently empties
+    most of the result set."""
+    rows: list[dict] = []
+    for i in range(0, len(pool), _PREWARM_BATCH):
+        batch = pool[i: i + _PREWARM_BATCH]
+        infos = await asyncio.gather(
+            *[get_info_with_timeout(t, UNIVERSE_INFO_TIMEOUT_SEC) for t in batch],
+            return_exceptions=True,
+        )
+        for ticker, info in zip(batch, infos):
+            if isinstance(info, Exception) or not isinstance(info, dict):
+                continue
+            row = _build_universe_row(ticker, info)
+            if row:
+                rows.append(row)
+        # Skip the pacing delay after the final batch.
+        if i + _PREWARM_BATCH < len(pool):
+            await asyncio.sleep(_PREWARM_DELAY)
+    return rows
+
+
 async def _prewarm_universe_cache():
     """Fetch universe data in small batches so the screener cache is always full."""
     await asyncio.sleep(5)          # let startup finish first
@@ -1006,20 +1036,7 @@ async def _prewarm_universe_cache():
         "__all__":    UNIVERSE,
     }
     for pool_key, pool in index_pools.items():
-        rows: list[dict] = []
-        for i in range(0, len(pool), _PREWARM_BATCH):
-            batch = pool[i: i + _PREWARM_BATCH]
-            infos = await asyncio.gather(
-                *[get_info_with_timeout(t, UNIVERSE_INFO_TIMEOUT_SEC) for t in batch],
-                return_exceptions=True,
-            )
-            for ticker, info in zip(batch, infos):
-                if isinstance(info, Exception) or not isinstance(info, dict):
-                    continue
-                row = _build_universe_row(ticker, info)
-                if row:
-                    rows.append(row)
-            await asyncio.sleep(_PREWARM_DELAY)
+        rows = await _build_universe_rows(pool)
         _screen_universe_cache[pool_key] = (rows, datetime.now(timezone.utc))
         logger.info("Screener cache pre-warmed: %s (%d rows)", pool_key, len(rows))
 
@@ -2413,15 +2430,10 @@ async def screen_stocks(
     if cached_universe and (now - cached_universe[1]).total_seconds() < _SCREEN_TTL:
         universe_rows = cached_universe[0]
     else:
+        # Cache miss: batch the fetch (same pacing as prewarm) so we don't
+        # rate-limit Yahoo by opening hundreds of concurrent connections.
         pool = index_map.get(index, UNIVERSE) if index else UNIVERSE
-        infos = await asyncio.gather(*[get_info_with_timeout(t, UNIVERSE_INFO_TIMEOUT_SEC) for t in pool], return_exceptions=True)
-        universe_rows = []
-        for ticker, info in zip(pool, infos):
-            if isinstance(info, Exception) or not isinstance(info, dict):
-                continue
-            row = _build_universe_row(ticker, info)
-            if row:
-                universe_rows.append(row)
+        universe_rows = await _build_universe_rows(pool)
         _screen_universe_cache[pool_key] = (universe_rows, now)
 
     results = []
