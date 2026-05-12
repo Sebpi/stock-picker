@@ -368,7 +368,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.1.0")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.2.0")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1007,6 +1007,15 @@
           ),
           h(Card, { className: "p-4" }, h(FactorCluster, { scores: selected.factor_scores || {} })),
           selected.dcf && selected.dcf.margin_of_safety_pct != null ? h(Metric, { label: "DCF Margin of Safety", value: fmtPct(selected.dcf.margin_of_safety_pct, 0), tone: selected.dcf.margin_of_safety_pct >= 0 ? "text-pulse-green" : "text-pulse-red" }) : null,
+          selected.learning_adjustment ? h(Card, { className: "p-4" },
+            h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-cyan" }, "Learning adjustment"),
+            h("div", { className: "mt-3 grid grid-cols-3 gap-2" },
+              h(Metric, { label: "Total", value: fmtPct(selected.learning_adjustment.total_adjustment, 2) }),
+              h(Metric, { label: "Bias", value: fmtPct(selected.learning_adjustment.bias_adjustment, 2) }),
+              h(Metric, { label: "Factors", value: fmtPct(selected.learning_adjustment.factor_adjustment, 2) })
+            ),
+            h("p", { className: "mt-3 text-xs text-pulse-muted" }, (selected.learning_adjustment.notes || []).join(" · ") || "No active adjustment for this ticker.")
+          ) : null,
           h(Card, { className: "p-4 text-sm leading-relaxed text-pulse-muted whitespace-pre-wrap" }, selected.reasoning || "No reasoning available.")
         )
       ) : null
@@ -1052,6 +1061,13 @@
 
   function PredictionLearningPanel({ learning }) {
     const horizons = learning.by_horizon || [];
+    const calibration = learning.calibration || {};
+    const global1d = (calibration.global || {})["1d"] || {};
+    const factors1d = (calibration.factor_learning || {})["1d"] || {};
+    const factorRows = Object.entries(factors1d)
+      .filter(([, data]) => data && data.correlation != null)
+      .sort((a, b) => Math.abs(Number(b[1].correlation || 0)) - Math.abs(Number(a[1].correlation || 0)))
+      .slice(0, 4);
     const plainPct = (value) => {
       const n = Number(value);
       return Number.isFinite(n) ? `${n.toFixed(1)}%` : "—";
@@ -1073,6 +1089,34 @@
         h(Metric, { label: "Pending", value: learning.pending_outcomes || 0 }),
         h(Metric, { label: "Due Now", value: learning.matured_pending_outcomes || 0, tone: Number(learning.matured_pending_outcomes || 0) ? "text-pulse-amber" : "text-pulse-green" }),
         h(Metric, { label: "Evaluated Now", value: learning.evaluated_now || 0 })
+      ),
+      h("div", { className: "mt-4 grid gap-3 lg:grid-cols-[1fr_1.3fr]" },
+        h("div", { className: "rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-cyan" }, "Adaptive calibration"),
+          h("div", { className: "mt-2 grid grid-cols-2 gap-2" },
+            h(Metric, { label: "1D Samples", value: global1d.samples || 0 }),
+            h(Metric, { label: "1D Hit Rate", value: plainPct(global1d.directional_hit_rate_pct), tone: Number(global1d.directional_hit_rate_pct || 0) >= 55 ? "text-pulse-green" : "text-pulse-amber" }),
+            h(Metric, { label: "Mean Error", value: plainPct(global1d.mean_error_pct) }),
+            h(Metric, { label: "MAE", value: plainPct(global1d.mean_absolute_error_pct) })
+          ),
+          h("p", { className: "mt-2 text-xs text-pulse-muted" },
+            calibration.enabled === false ? "Learning is disabled." :
+            global1d.eligible ? "Calibration is active for future prediction runs." :
+            "Calibration is warming up until enough outcomes mature."
+          )
+        ),
+        h("div", { className: "rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-cyan" }, "Learned factor signal"),
+          factorRows.length ? h("div", { className: "mt-2 grid gap-2 sm:grid-cols-2" },
+            factorRows.map(([name, data]) => h("div", { key: name, className: "rounded-md border border-pulse-line/70 bg-pulse-card/70 p-2" },
+              h("div", { className: "flex items-center justify-between gap-2" },
+                h("span", { className: "font-mono text-xs uppercase text-pulse-ink" }, name.replace(/_/g, " ")),
+                h("span", { className: cx("font-mono text-xs", Number(data.correlation || 0) >= 0 ? "text-pulse-green" : "text-pulse-red") }, Number(data.correlation || 0).toFixed(3))
+              ),
+              h("div", { className: "mt-1 text-xs text-pulse-muted" }, `${data.samples || 0} samples · ${data.direction || "weak"}`)
+            ))
+          ) : h("p", { className: "mt-2 text-sm text-pulse-muted" }, "Factor learning will appear once enough evaluated predictions include factor scores.")
+        )
       ),
       h("div", { className: "mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3" },
         horizons.length ? horizons.map((row) => h("div", {

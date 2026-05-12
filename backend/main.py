@@ -177,8 +177,10 @@ RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HI
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
 PREDICTIONS_UNIVERSE_FILL_LIMIT = max(0, int(os.getenv("PREDICTIONS_UNIVERSE_FILL_LIMIT", "6")))
 PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192")))
-PREDICTION_MODEL_VERSION = os.getenv("PREDICTION_MODEL_VERSION", "pred-v3.1.0").strip() or "pred-v3.1.0"
-PREDICTION_PROMPT_VERSION = os.getenv("PREDICTION_PROMPT_VERSION", "prompt-v2").strip() or "prompt-v2"
+PREDICTION_MODEL_VERSION = os.getenv("PREDICTION_MODEL_VERSION", "pred-v3.2.0").strip() or "pred-v3.2.0"
+PREDICTION_PROMPT_VERSION = os.getenv("PREDICTION_PROMPT_VERSION", "prompt-v3").strip() or "prompt-v3"
+PREDICTION_LEARNING_ENABLED = os.getenv("PREDICTION_LEARNING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+PREDICTION_CALIBRATION_MIN_SAMPLES = max(1, int(os.getenv("PREDICTION_CALIBRATION_MIN_SAMPLES", "3")))
 THESIS_AUTO_RUN_ENABLED = os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 THESIS_AUTO_RUN_INTERVAL_MINUTES = max(15, int(os.getenv("THESIS_AUTO_RUN_INTERVAL_MINUTES", "1440")))
 THESIS_AUTO_RUN_MAX_TICKERS = max(1, int(os.getenv("THESIS_AUTO_RUN_MAX_TICKERS", "8")))
@@ -3184,6 +3186,160 @@ def compute_calibration(predictions: list[dict]) -> dict:
     return cal
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _downgrade_confidence(confidence: str, steps: int = 1) -> str:
+    order = ["low", "medium", "high"]
+    label = (confidence or "medium").lower()
+    if label not in order:
+        label = "medium"
+    return order[max(0, order.index(label) - max(0, steps))]
+
+
+def _build_prediction_calibration_model(store: bool = False) -> dict:
+    if not PREDICTION_LEARNING_ENABLED:
+        return {"enabled": False, "sample_count": 0, "recommendations": ["Prediction learning is disabled."]}
+    try:
+        import db as _db
+        model = _db.build_prediction_calibration_model(PREDICTION_CALIBRATION_MIN_SAMPLES)
+        model["enabled"] = True
+        if store:
+            model["calibration_id"] = _db.store_prediction_calibration(
+                PREDICTION_MODEL_VERSION,
+                PREDICTION_PROMPT_VERSION,
+                model,
+            )
+        return model
+    except Exception as exc:
+        logger.warning("Prediction calibration model unavailable: %s", exc)
+        return {"enabled": False, "sample_count": 0, "error": str(exc), "recommendations": []}
+
+
+def _format_prediction_learning_for_prompt(calibration_model: dict) -> str:
+    if not calibration_model or not calibration_model.get("enabled"):
+        return "=== SELF-LEARNING CALIBRATION ===\nNo durable calibration available yet.\n"
+
+    global_1d = (calibration_model.get("global") or {}).get("1d") or {}
+    lines = ["=== SELF-LEARNING CALIBRATION ==="]
+    if not global_1d.get("eligible"):
+        lines.append(
+            f"Calibration warming up: {global_1d.get('samples', 0)} evaluated 1d outcomes. "
+            "Do not overfit; use factor rules conservatively."
+        )
+    else:
+        mean_error = global_1d.get("mean_error_pct")
+        mean_error_text = f"{mean_error:+.2f}%" if isinstance(mean_error, (int, float)) else "N/A"
+        lines.append(
+            "1d calibration: "
+            f"{global_1d.get('samples', 0)} samples, "
+            f"{global_1d.get('directional_hit_rate_pct', 'N/A')}% directional hit rate, "
+            f"{mean_error_text} mean error, "
+            f"{global_1d.get('mean_absolute_error_pct', 'N/A')} MAE."
+        )
+
+    factor_learning = (calibration_model.get("factor_learning") or {}).get("1d") or {}
+    eligible_factors = [
+        (name, data)
+        for name, data in factor_learning.items()
+        if data.get("eligible") and data.get("correlation") is not None
+    ]
+    if eligible_factors:
+        lines.append("Observed 1d factor relationships:")
+        for name, data in sorted(eligible_factors, key=lambda item: abs(item[1].get("correlation") or 0), reverse=True)[:5]:
+            lines.append(
+                f"- {name}: corr {data['correlation']:+.3f}, {data['samples']} samples "
+                f"({data.get('direction', 'weak')})."
+            )
+    else:
+        lines.append("Factor calibration does not have enough evaluated samples yet.")
+
+    recs = calibration_model.get("recommendations") or []
+    if recs:
+        lines.append("Calibration guidance:")
+        lines.extend([f"- {rec}" for rec in recs[:4]])
+    return "\n".join(lines) + "\n"
+
+
+def _learning_adjustment_for_stock(ticker: str, stock_data: dict, calibration_model: dict) -> dict:
+    if not PREDICTION_LEARNING_ENABLED or not calibration_model or not calibration_model.get("enabled"):
+        return {
+            "total_adjustment": 0.0,
+            "bias_adjustment": 0.0,
+            "factor_adjustment": 0.0,
+            "invert_signal": False,
+            "confidence_steps": 0,
+            "source": "none",
+            "notes": [],
+        }
+
+    notes: list[str] = []
+    source = "global"
+    ticker_stats = ((calibration_model.get("by_ticker") or {}).get(ticker) or {}).get("1d") or {}
+    global_stats = (calibration_model.get("global") or {}).get("1d") or {}
+    stat = ticker_stats if ticker_stats.get("eligible") else global_stats
+    if ticker_stats.get("eligible"):
+        source = "ticker"
+    elif not global_stats.get("eligible"):
+        stat = {}
+        source = "warming"
+
+    bias_adjustment = 0.0
+    invert_signal = False
+    confidence_steps = 0
+    if stat:
+        mean_error = stat.get("mean_error_pct")
+        if isinstance(mean_error, (int, float)):
+            weight = 0.55 if source == "ticker" else 0.25
+            bias_adjustment = _clamp(mean_error * weight, -1.25, 1.25)
+            if abs(bias_adjustment) >= 0.1:
+                notes.append(f"{source} bias {bias_adjustment:+.2f}%")
+        invert_signal = bool(stat.get("invert_signal"))
+        if invert_signal:
+            notes.append(f"{source} hit rate {stat.get('directional_hit_rate_pct')}%, invert")
+        if stat.get("downshift_confidence"):
+            confidence_steps = 1
+            notes.append(f"{source} hit rate {stat.get('directional_hit_rate_pct')}%, confidence downshift")
+
+    factor_adjustment = 0.0
+    factors = stock_data.get("factor_scores") or {}
+    factor_learning = (calibration_model.get("factor_learning") or {}).get("1d") or {}
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for factor in ("value", "momentum", "quality", "growth"):
+        learned = factor_learning.get(factor) or {}
+        corr = learned.get("correlation")
+        score = factors.get(factor)
+        if not learned.get("eligible") or corr is None or score is None:
+            continue
+        try:
+            normalized = (float(score) - 50.0) / 50.0
+            corr_float = float(corr)
+        except (TypeError, ValueError):
+            continue
+        weighted_sum += normalized * corr_float
+        weight_total += abs(corr_float)
+
+    if weight_total > 0:
+        factor_adjustment = _clamp((weighted_sum / weight_total) * 0.45, -0.45, 0.45)
+        if abs(factor_adjustment) >= 0.1:
+            notes.append(f"factor tilt {factor_adjustment:+.2f}%")
+
+    total_adjustment = round(_clamp(bias_adjustment + factor_adjustment, -1.5, 1.5), 2)
+    return {
+        "total_adjustment": total_adjustment,
+        "bias_adjustment": round(bias_adjustment, 2),
+        "factor_adjustment": round(factor_adjustment, 2),
+        "invert_signal": invert_signal,
+        "confidence_steps": confidence_steps,
+        "source": source,
+        "notes": notes,
+        "ticker_hit_rate_pct": ticker_stats.get("directional_hit_rate_pct"),
+        "global_hit_rate_pct": global_stats.get("directional_hit_rate_pct"),
+    }
+
+
 _POSITIVE_KEYWORDS = {"upgrade", "beat", "beats", "strong", "raised", "record", "buyback",
                        "partnership", "growth", "acquisition", "outperform", "buy", "bullish",
                        "rally", "surge", "profit", "dividend", "approved", "wins"}
@@ -3522,16 +3678,32 @@ async def get_predictions_learning(request: Request, evaluate: bool = True):
         synced = _sync_prediction_history(predictions)
         evaluated_now = await evaluate_prediction_outcomes(limit=100) if evaluate else 0
         summary = _db.get_prediction_learning_summary()
+        calibration = _build_prediction_calibration_model(store=False)
         summary.update({
             "synced_predictions": synced,
             "evaluated_now": evaluated_now,
             "model_version": PREDICTION_MODEL_VERSION,
             "prompt_version": PREDICTION_PROMPT_VERSION,
+            "learning_enabled": PREDICTION_LEARNING_ENABLED,
+            "calibration": calibration,
         })
         return summary
     except Exception as exc:
         logger.exception("Prediction learning summary failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Prediction learning summary failed: {exc}")
+
+
+@app.get("/api/predictions/calibration")
+@limiter.limit("20/hour")
+async def get_predictions_calibration(request: Request, store: bool = False):
+    """Return the adaptive calibration model used by future prediction runs."""
+    model = _build_prediction_calibration_model(store=store)
+    model.update({
+        "model_version": PREDICTION_MODEL_VERSION,
+        "prompt_version": PREDICTION_PROMPT_VERSION,
+        "learning_enabled": PREDICTION_LEARNING_ENABLED,
+    })
+    return model
 
 
 async def _generate_predictions_impl():
@@ -3711,6 +3883,8 @@ async def _generate_predictions_impl():
     stocks_data = [r for r in _pred_raw if isinstance(r, dict)]
 
     calibration = compute_calibration(predictions)
+    durable_calibration = _build_prediction_calibration_model(store=True)
+    durable_learning_summary = _format_prediction_learning_for_prompt(durable_calibration)
 
     completed = [p for p in predictions if p.get("actual_pct") is not None]
     accuracy_summary = "\n=== HISTORICAL CALIBRATION — apply these corrections to your predictions ===\n"
@@ -3791,6 +3965,7 @@ Each stock includes a pre-calculated `sentiment_score` (%) built from:
 
 {json.dumps(stocks_data, indent=2)}
 {accuracy_summary}
+{durable_learning_summary}
 === SCORING RULES ===
 1. START with `sentiment_score` as your baseline signal strength for each stock.
 2. Each stock now includes pre-computed `factor_scores` (0-100 each). Use these to ANCHOR and VALIDATE your analysis:
@@ -3958,15 +4133,24 @@ Rules:
         raw_pct = cp.get("predicted_pct")
         if raw_pct is None:
             raw_pct = legacy_predicted_pct(cp_direction, cp_score)
+        try:
+            raw_pct = round(float(raw_pct), 2)
+        except (TypeError, ValueError):
+            raw_pct = 0.0
         cal     = calibration.get(ticker, {})
+        stock_data = stock_map.get(ticker, {})
+        learning_adjustment = _learning_adjustment_for_stock(ticker, stock_data, durable_calibration)
 
-        # 1. Bias correction — shift prediction by historical mean error
-        bias         = cal.get("mean_bias", 0.0)
+        # 1. Bias correction — shift prediction by historical mean error.
+        # JSON actuals give a short local loop; durable SQLite outcomes add versioned self-learning.
+        legacy_bias = cal.get("mean_bias", 0.0)
+        learning_bias = learning_adjustment.get("total_adjustment", 0.0)
+        bias = round(float(legacy_bias or 0.0) + float(learning_bias or 0.0), 2)
         bias_applied = abs(bias) >= 0.1   # only correct if systematic (>=0.1%)
         corrected    = round(raw_pct + bias, 2) if bias_applied else raw_pct
 
         # 2. Signal inversion — flip direction if model has been consistently wrong
-        inverted  = cal.get("inverted", False)
+        inverted  = bool(cal.get("inverted", False) or learning_adjustment.get("invert_signal"))
         final_pct = round(-corrected, 2) if inverted else corrected
 
         # Append calibration notes to reasoning
@@ -3974,26 +4158,33 @@ Rules:
         if bias_applied:
             cal_note += f" [Bias corrected {bias:+.2f}%: raw={raw_pct:+.2f}%]"
         if inverted:
-            cal_note += f" [Direction INVERTED — historical accuracy {cal['accuracy_pct']}%, signal flipped]"
+            hist_acc = cal.get("accuracy_pct") or learning_adjustment.get("ticker_hit_rate_pct") or learning_adjustment.get("global_hit_rate_pct")
+            cal_note += f" [Direction INVERTED — historical accuracy {hist_acc}%, signal flipped]"
+        if learning_adjustment.get("notes"):
+            cal_note += " [Learning: " + "; ".join(learning_adjustment["notes"]) + "]"
 
-        stock_data = stock_map.get(ticker, {})
+        confidence = cp.get("confidence", "medium")
+        if learning_adjustment.get("confidence_steps"):
+            confidence = _downgrade_confidence(confidence, learning_adjustment["confidence_steps"])
+
         entry = {
             "date":               today,
             "ticker":             ticker,
             "name":               name_map.get(ticker, ""),
             "predicted_pct":      final_pct,
             "raw_predicted_pct":  raw_pct,
-            "direction":          cp_direction or prediction_direction(final_pct),
-            "score":              cp_score if cp_score is not None else prediction_score(final_pct, cp.get("confidence", "medium")),
+            "direction":          prediction_direction(final_pct),
+            "score":              prediction_score(final_pct, confidence),
             "bias_correction":    round(bias, 3) if bias_applied else 0.0,
             "inverted":           inverted,
-            "confidence":         cp.get("confidence", "medium"),
+            "confidence":         confidence,
             "reasoning":          cp.get("reasoning", "") + cal_note,
             "actual_pct":         None,
             "price_at_prediction": price_map.get(ticker),
             "generated_at":       datetime.utcnow().isoformat(),
             "model_version":      PREDICTION_MODEL_VERSION,
             "prompt_version":     PREDICTION_PROMPT_VERSION,
+            "learning_adjustment": learning_adjustment,
             # Quant data
             "factor_scores":      stock_data.get("factor_scores"),
             "dcf":                stock_data.get("dcf"),

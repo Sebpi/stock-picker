@@ -237,6 +237,18 @@ CREATE INDEX IF NOT EXISTS idx_prediction_outcome_due
 CREATE INDEX IF NOT EXISTS idx_prediction_outcome_ticker
     ON prediction_outcome(ticker, horizon, prediction_date DESC);
 
+CREATE TABLE IF NOT EXISTS prediction_calibration (
+    calibration_id      TEXT PRIMARY KEY,
+    model_version       TEXT,
+    prompt_version      TEXT,
+    generated_at        TEXT NOT NULL,
+    sample_count        INTEGER DEFAULT 0,
+    calibration_json    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_calibration_generated
+    ON prediction_calibration(generated_at DESC);
+
 CREATE TABLE IF NOT EXISTS consensus_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker          TEXT NOT NULL,
@@ -294,6 +306,7 @@ def prune_agent_history() -> dict[str, int]:
         pred_outcome_cur = conn.execute("DELETE FROM prediction_outcome WHERE prediction_date < ?", (cutoff[:10],))
         pred_snapshot_cur = conn.execute("DELETE FROM prediction_snapshot WHERE prediction_date < ?", (cutoff[:10],))
         pred_run_cur = conn.execute("DELETE FROM prediction_run WHERE started_at < ?", (cutoff,))
+        pred_cal_cur = conn.execute("DELETE FROM prediction_calibration WHERE generated_at < ?", (cutoff,))
     return {
         "forecast_outcomes": outcome_cur.rowcount or 0,
         "investment_theses": thesis_cur.rowcount or 0,
@@ -303,6 +316,7 @@ def prune_agent_history() -> dict[str, int]:
         "prediction_outcomes": pred_outcome_cur.rowcount or 0,
         "prediction_snapshots": pred_snapshot_cur.rowcount or 0,
         "prediction_runs": pred_run_cur.rowcount or 0,
+        "prediction_calibrations": pred_cal_cur.rowcount or 0,
     }
 
 
@@ -947,6 +961,195 @@ def get_prediction_learning_summary(limit_tickers: int = 20) -> dict[str, Any]:
         "recent_runs": runs,
         "retention_days": RETENTION_DAYS,
     }
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = len(xs)
+    if n < 3 or n != len(ys):
+        return None
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    dx = [x - mean_x for x in xs]
+    dy = [y - mean_y for y in ys]
+    denom_x = sum(x * x for x in dx)
+    denom_y = sum(y * y for y in dy)
+    if denom_x <= 0 or denom_y <= 0:
+        return None
+    return sum(x * y for x, y in zip(dx, dy)) / ((denom_x * denom_y) ** 0.5)
+
+
+def build_prediction_calibration_model(min_samples: int = 3) -> dict[str, Any]:
+    """Build a lightweight calibration model from evaluated prediction outcomes."""
+    min_samples = max(1, int(min_samples or 3))
+    with get_conn() as conn:
+        stat_rows = conn.execute(
+            """
+            SELECT ticker, horizon,
+                   COUNT(*) AS samples,
+                   SUM(CASE WHEN direction_match = 1 THEN 1 ELSE 0 END) AS correct,
+                   AVG(forecast_error) AS mean_error,
+                   AVG(ABS(forecast_error)) AS mae,
+                   AVG(forecast_return_pct) AS avg_forecast,
+                   AVG(realised_return_pct) AS avg_realised
+            FROM prediction_outcome
+            WHERE realised_return_pct IS NOT NULL
+              AND forecast_return_pct IS NOT NULL
+            GROUP BY ticker, horizon
+            """
+        ).fetchall()
+        global_rows = conn.execute(
+            """
+            SELECT horizon,
+                   COUNT(*) AS samples,
+                   SUM(CASE WHEN direction_match = 1 THEN 1 ELSE 0 END) AS correct,
+                   AVG(forecast_error) AS mean_error,
+                   AVG(ABS(forecast_error)) AS mae,
+                   AVG(forecast_return_pct) AS avg_forecast,
+                   AVG(realised_return_pct) AS avg_realised
+            FROM prediction_outcome
+            WHERE realised_return_pct IS NOT NULL
+              AND forecast_return_pct IS NOT NULL
+            GROUP BY horizon
+            """
+        ).fetchall()
+        factor_rows = conn.execute(
+            """
+            SELECT po.horizon, po.realised_return_pct, po.direction_match,
+                   ps.factor_scores_json, ps.dcf_json
+            FROM prediction_outcome po
+            JOIN prediction_snapshot ps ON ps.prediction_id = po.prediction_id
+            WHERE po.realised_return_pct IS NOT NULL
+              AND po.forecast_return_pct IS NOT NULL
+            """
+        ).fetchall()
+
+    def _stat(row: sqlite3.Row) -> dict[str, Any]:
+        samples = row["samples"] or 0
+        correct = row["correct"] or 0
+        hit_rate = (correct / samples) * 100 if samples else None
+        return {
+            "samples": samples,
+            "directional_hit_rate_pct": round(hit_rate, 1) if hit_rate is not None else None,
+            "mean_error_pct": round(row["mean_error"], 3) if row["mean_error"] is not None else None,
+            "mean_absolute_error_pct": round(row["mae"], 3) if row["mae"] is not None else None,
+            "avg_forecast_pct": round(row["avg_forecast"], 3) if row["avg_forecast"] is not None else None,
+            "avg_realised_pct": round(row["avg_realised"], 3) if row["avg_realised"] is not None else None,
+            "eligible": samples >= min_samples,
+            "invert_signal": samples >= max(5, min_samples) and hit_rate is not None and hit_rate < 45.0,
+            "downshift_confidence": samples >= min_samples and hit_rate is not None and hit_rate < 50.0,
+        }
+
+    global_stats: dict[str, Any] = {}
+    for row in global_rows:
+        global_stats[row["horizon"]] = _stat(row)
+
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for row in stat_rows:
+        by_ticker.setdefault(row["ticker"], {})[row["horizon"]] = _stat(row)
+
+    factor_names = ("value", "momentum", "quality", "growth", "composite")
+    factor_points: dict[str, dict[str, dict[str, list[float]]]] = {}
+    for row in factor_rows:
+        horizon = row["horizon"]
+        realised = _safe_float(row["realised_return_pct"])
+        if realised is None:
+            continue
+        try:
+            factors = json.loads(row["factor_scores_json"] or "{}")
+        except Exception:
+            factors = {}
+        try:
+            dcf = json.loads(row["dcf_json"] or "{}")
+        except Exception:
+            dcf = {}
+        values = {name: _safe_float(factors.get(name)) for name in factor_names}
+        values["margin_of_safety"] = _safe_float(dcf.get("margin_of_safety_pct"))
+        for factor, score in values.items():
+            if score is None:
+                continue
+            bucket = factor_points.setdefault(horizon, {}).setdefault(factor, {"scores": [], "returns": []})
+            bucket["scores"].append(float(score))
+            bucket["returns"].append(realised)
+
+    factor_learning: dict[str, dict[str, Any]] = {}
+    for horizon, factors in factor_points.items():
+        factor_learning[horizon] = {}
+        for factor, values in factors.items():
+            n = len(values["scores"])
+            corr = _pearson(values["scores"], values["returns"])
+            factor_learning[horizon][factor] = {
+                "samples": n,
+                "correlation": round(corr, 4) if corr is not None else None,
+                "eligible": n >= max(8, min_samples),
+                "direction": (
+                    "positive" if corr is not None and corr > 0.05
+                    else "negative" if corr is not None and corr < -0.05
+                    else "weak"
+                ),
+            }
+
+    one_day = global_stats.get("1d") or {}
+    sample_count = sum((row["samples"] or 0) for row in global_rows)
+    recommendations: list[str] = []
+    if not sample_count:
+        recommendations.append("No evaluated prediction outcomes yet; calibration will activate after the first horizons mature.")
+    elif one_day.get("samples", 0) < min_samples:
+        recommendations.append(f"Need at least {min_samples} evaluated 1d outcomes before applying short-horizon calibration.")
+    elif one_day.get("directional_hit_rate_pct") is not None and one_day["directional_hit_rate_pct"] < 50:
+        recommendations.append("1d directional hit rate is below 50%; future high-confidence calls should be downshifted until accuracy improves.")
+    if one_day.get("mean_error_pct") is not None and abs(one_day["mean_error_pct"]) >= 0.25:
+        recommendations.append(f"Average 1d forecast error is {one_day['mean_error_pct']:+.2f}%; apply partial bias correction.")
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "min_samples": min_samples,
+        "sample_count": sample_count,
+        "global": global_stats,
+        "by_ticker": by_ticker,
+        "factor_learning": factor_learning,
+        "recommendations": recommendations,
+    }
+
+
+def store_prediction_calibration(
+    model_version: str,
+    prompt_version: str,
+    calibration: dict[str, Any],
+) -> str:
+    calibration_id = f"cal_{uuid.uuid4().hex}"
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_calibration
+                (calibration_id, model_version, prompt_version, generated_at,
+                 sample_count, calibration_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                calibration_id,
+                model_version,
+                prompt_version,
+                calibration.get("generated_at") or datetime.now(timezone.utc).isoformat(),
+                int(calibration.get("sample_count") or 0),
+                _json_dumps(calibration),
+            ),
+        )
+    return calibration_id
+
+
+def get_latest_prediction_calibration() -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT calibration_json
+            FROM prediction_calibration
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        return None
+    return _safe_json_loads(row["calibration_json"], None)
 
 
 # ---------------------------------------------------------------------------
