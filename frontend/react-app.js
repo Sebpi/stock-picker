@@ -257,11 +257,11 @@
 
   function FactorCluster({ scores }) {
     const config = [["V", "value"], ["M", "momentum"], ["Q", "quality"], ["G", "growth"], ["C", "composite"]];
-    return h("div", { className: "flex flex-wrap gap-1" },
+    return h("div", { className: "flex flex-nowrap items-center gap-1 overflow-x-auto whitespace-nowrap pb-1" },
       config.map(([label, key]) => {
         const value = scores ? scores[key] : null;
         const tone = value == null ? "border-pulse-line text-pulse-dim" : value >= 70 ? "border-pulse-green/30 bg-pulse-green/10 text-pulse-green" : value >= 45 ? "border-pulse-amber/30 bg-pulse-amber/10 text-pulse-amber" : "border-pulse-red/30 bg-pulse-red/10 text-pulse-red";
-        return h("span", { key: label, className: cx("inline-flex h-9 min-w-9 flex-col items-center justify-center rounded-md border font-mono text-[10px] font-bold", tone) },
+        return h("span", { key: label, className: cx("inline-flex h-9 min-w-10 flex-col items-center justify-center rounded-md border font-mono text-[10px] font-bold", tone) },
           label,
           h("small", { className: "text-[9px] opacity-80" }, value == null ? "—" : Math.round(value))
         );
@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.3")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.4")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -995,18 +995,20 @@
 
   function filterByPeriod(preds, period) {
     if (period === "all") return preds;
+    const toLocalIso = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
     const today = new Date();
-    const todayIso = today.toISOString().slice(0, 10);
+    const todayIso = toLocalIso(today);
     const startOfWeek = new Date(today); startOfWeek.setHours(0,0,0,0);
     const dow = startOfWeek.getDay(); startOfWeek.setDate(startOfWeek.getDate() + (dow === 0 ? -6 : 1 - dow));
-    const weekIso = startOfWeek.toISOString().slice(0, 10);
+    const weekIso = toLocalIso(startOfWeek);
     const monthIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
+    const ytdIso = `${today.getFullYear()}-01-01`;
     return preds.filter(p => {
       const d = String(p.date || "");
       if (period === "today") return d === todayIso;
       if (period === "week")  return d >= weekIso && d <= todayIso;
       if (period === "month") return d >= monthIso && d <= todayIso;
-      if (period === "ytd")   return d < monthIso && d.startsWith(String(today.getFullYear()));
+      if (period === "ytd")   return d >= ytdIso && d <= todayIso;
       return true;
     });
   }
@@ -1042,7 +1044,19 @@
       h("td", { className: "px-3 py-3 font-mono" }, fmtPct(p.predicted_12m_pct, 1)),
       h("td", { className: cx("px-3 py-3 font-mono", deltaTone(p.actual_pct)) }, p.actual_pct == null ? "—" : fmtPct(p.actual_pct, 1)),
       h("td", { className: cx("px-3 py-3 font-mono", variance != null ? deltaTone(variance) : "") }, variance == null ? "—" : fmtPct(variance, 1)),
-      h("td", { className: "px-3 py-3" }, p.actual_pct == null ? h("span", { className: "text-pulse-muted text-xs" }, "pending") : h(Pill, { className: correct ? "border-pulse-green/30 bg-pulse-green/10 text-pulse-green" : "border-pulse-red/30 bg-pulse-red/10 text-pulse-red" }, correct ? "✓" : "✗")),
+      h("td", { className: "px-3 py-3" },
+        p.actual_pct == null
+          ? h("span", { className: "text-pulse-muted text-xs" }, "pending")
+          : h("span", {
+              className: cx(
+                "inline-flex h-7 w-7 items-center justify-center rounded-full border text-sm font-bold",
+                correct
+                  ? "border-pulse-green/40 bg-pulse-green/20 text-pulse-green"
+                  : "border-pulse-red/40 bg-pulse-red/20 text-pulse-red"
+              ),
+              title: correct ? "Prediction direction matched" : "Prediction direction missed"
+            }, correct ? "↑" : "↓")
+      ),
       h("td", { className: "px-3 py-3" }, h(ConfidencePill, { value: p.confidence, score: p.score })),
       h("td", { className: "px-3 py-3" }, h(Button, { onClick: onOpen, className: "min-h-8 px-2 text-xs" }, "View"))
     );
@@ -1327,7 +1341,7 @@
   }
 
   function CompareCard({ data, onClose }) {
-    const items = Array.isArray(data) ? data : (data.results || data.tickers || []);
+    const items = Array.isArray(data) ? data : (data.comparison || data.results || []);
     return h(Card, { className: "mb-4 p-4" },
       h("div", { className: "flex items-start justify-between gap-3" },
         h("div", null,
@@ -1346,7 +1360,7 @@
             h("td", { className: cx("px-3 py-2 font-mono", scoreTone(t.composite_score)) }, t.composite_score == null ? "—" : Number(t.composite_score).toFixed(1)),
             h("td", { className: "px-3 py-2" }, t.risk_rating || "—"),
             h("td", { className: "px-3 py-2" }, t.evidence_quality || "—"),
-            h("td", { className: cx("px-3 py-2 font-mono", deltaTone(t.forecast && t.forecast["12m"] && t.forecast["12m"].base_return_pct)) }, t.forecast && t.forecast["12m"] ? fmtPct(t.forecast["12m"].base_return_pct, 1) : "—")
+            h("td", { className: cx("px-3 py-2 font-mono", deltaTone(t.forecast_12m && t.forecast_12m.base_return_pct)) }, t.forecast_12m ? fmtPct(t.forecast_12m.base_return_pct, 1) : "—")
           )))
         )
       ) : h(Empty, null, "No comparison data.")
