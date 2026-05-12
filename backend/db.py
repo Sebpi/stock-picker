@@ -1152,6 +1152,36 @@ def get_latest_prediction_calibration() -> dict[str, Any] | None:
     return _safe_json_loads(row["calibration_json"], None)
 
 
+def list_prediction_calibrations(limit: int = 10) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 10), 50))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT calibration_id, model_version, prompt_version, generated_at,
+                   sample_count, calibration_json
+            FROM prediction_calibration
+            ORDER BY generated_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        calibration = _safe_json_loads(data.pop("calibration_json") or "{}", {})
+        global_1d = (calibration.get("global") or {}).get("1d") or {}
+        recs = calibration.get("recommendations") or []
+        result.append({
+            **data,
+            "one_day_samples": global_1d.get("samples", 0),
+            "one_day_hit_rate_pct": global_1d.get("directional_hit_rate_pct"),
+            "one_day_mae_pct": global_1d.get("mean_absolute_error_pct"),
+            "recommendations": recs[:3],
+        })
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Agent run tracking
 # ---------------------------------------------------------------------------

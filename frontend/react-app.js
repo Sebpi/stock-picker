@@ -368,7 +368,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.2.0")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.3.0")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -876,6 +876,7 @@
     const [period, setPeriod] = useState("all");
     const [showFactorGuide, setShowFactorGuide] = useState(false);
     const [learning, setLearning] = useState(null);
+    const [rebuilding, setRebuilding] = useState(false);
 
     async function load() {
       setBusy(true); setError("");
@@ -938,6 +939,20 @@
         setBusy(false);
       }
     }
+    async function rebuildCalibration() {
+      setRebuilding(true); setError("");
+      try {
+        const result = await api("/api/predictions/calibration/rebuild", { method: "POST" });
+        setStatus(result?.governance?.message || "Calibration model rebuilt.");
+        await load();
+        await loadLearning(false);
+      } catch (err) {
+        setError(err.message);
+        setStatus("");
+      } finally {
+        setRebuilding(false);
+      }
+    }
     useEffect(() => { load(); loadLearning(true); }, []);
 
     const filtered = useMemo(() => filterByPeriod(rows, period), [rows, period]);
@@ -947,6 +962,7 @@
       h(SectionHead, { title: "Predictions", kicker: "Daily ranking", subtitle: "Multi-horizon forecasts with factor scores. Claude analyses macro trends, news and fundamentals.", actions: [
         h(Button, { key: "refresh", onClick: async () => { await load(); loadLearning(false); }, disabled: busy }, "Refresh actuals"),
         h(Button, { key: "back", onClick: backfill, disabled: busy, title: "Retry factor scores for today's predictions" }, "Backfill factors"),
+        h(Button, { key: "rebuild", onClick: rebuildCalibration, disabled: busy || rebuilding, title: "Rebuild the adaptive calibration model" }, rebuilding ? "Rebuilding..." : "Rebuild model"),
         h(Button, { key: "gen", kind: "primary", onClick: generate, disabled: busy }, busy ? "Working..." : "Generate today"),
       ] }),
       error ? h(Empty, null, error) : null,
@@ -1062,6 +1078,7 @@
   function PredictionLearningPanel({ learning }) {
     const horizons = learning.by_horizon || [];
     const calibration = learning.calibration || {};
+    const governance = learning.governance || {};
     const global1d = (calibration.global || {})["1d"] || {};
     const factors1d = (calibration.factor_learning || {})["1d"] || {};
     const factorRows = Object.entries(factors1d)
@@ -1073,6 +1090,12 @@
       return Number.isFinite(n) ? `${n.toFixed(1)}%` : "—";
     };
     const modelLabel = [learning.model_version, learning.prompt_version].filter(Boolean).join(" · ") || "versioned";
+    const gateTone = {
+      green: "border-pulse-green/40 bg-pulse-green/10 text-pulse-green",
+      amber: "border-pulse-amber/40 bg-pulse-amber/10 text-pulse-amber",
+      red: "border-pulse-red/40 bg-pulse-red/10 text-pulse-red",
+      muted: "border-pulse-line bg-pulse-panel text-pulse-muted",
+    }[governance.tone || "muted"];
     return h(Card, { className: "mb-4 p-4" },
       h("div", { className: "mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between" },
         h("div", null,
@@ -1084,6 +1107,10 @@
           modelLabel
         )
       ),
+      governance.message ? h("div", { className: cx("mb-3 rounded-lg border px-3 py-2 text-sm", gateTone) },
+        h("div", { className: "font-semibold" }, (governance.status || "status").toUpperCase()),
+        h("div", { className: "mt-1 text-xs opacity-90" }, governance.message)
+      ) : null,
       h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-4" },
         h(Metric, { label: "Evaluated", value: learning.evaluated_outcomes || 0 }),
         h(Metric, { label: "Pending", value: learning.pending_outcomes || 0 }),
@@ -1118,6 +1145,24 @@
           ) : h("p", { className: "mt-2 text-sm text-pulse-muted" }, "Factor learning will appear once enough evaluated predictions include factor scores.")
         )
       ),
+      governance.gates && governance.gates.length ? h("div", { className: "mt-3 grid gap-2 sm:grid-cols-3" },
+        governance.gates.map((gate, i) => h("div", {
+          key: i,
+          className: cx(
+            "rounded-md border p-2 text-xs",
+            gate.passed ? "border-pulse-green/30 bg-pulse-green/10" : "border-pulse-amber/30 bg-pulse-amber/10"
+          )
+        },
+          h("div", { className: "font-mono uppercase text-pulse-ink" }, gate.name),
+          h("div", { className: "mt-1 text-pulse-muted" }, `${gate.value ?? "—"} / ${gate.target ?? "—"}`)
+        ))
+      ) : null,
+      calibration.recommendations && calibration.recommendations.length ? h("div", { className: "mt-3 rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-cyan" }, "Model notes"),
+        h("ul", { className: "mt-2 space-y-1 text-xs text-pulse-muted" },
+          calibration.recommendations.slice(0, 4).map((item, i) => h("li", { key: i }, item))
+        )
+      ) : null,
       h("div", { className: "mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3" },
         horizons.length ? horizons.map((row) => h("div", {
           key: row.horizon,

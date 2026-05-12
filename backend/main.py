@@ -177,8 +177,8 @@ RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HI
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
 PREDICTIONS_UNIVERSE_FILL_LIMIT = max(0, int(os.getenv("PREDICTIONS_UNIVERSE_FILL_LIMIT", "6")))
 PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192")))
-PREDICTION_MODEL_VERSION = os.getenv("PREDICTION_MODEL_VERSION", "pred-v3.2.0").strip() or "pred-v3.2.0"
-PREDICTION_PROMPT_VERSION = os.getenv("PREDICTION_PROMPT_VERSION", "prompt-v3").strip() or "prompt-v3"
+PREDICTION_MODEL_VERSION = os.getenv("PREDICTION_MODEL_VERSION", "pred-v3.3.0").strip() or "pred-v3.3.0"
+PREDICTION_PROMPT_VERSION = os.getenv("PREDICTION_PROMPT_VERSION", "prompt-v4").strip() or "prompt-v4"
 PREDICTION_LEARNING_ENABLED = os.getenv("PREDICTION_LEARNING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 PREDICTION_CALIBRATION_MIN_SAMPLES = max(1, int(os.getenv("PREDICTION_CALIBRATION_MIN_SAMPLES", "3")))
 THESIS_AUTO_RUN_ENABLED = os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -3217,6 +3217,65 @@ def _build_prediction_calibration_model(store: bool = False) -> dict:
         return {"enabled": False, "sample_count": 0, "error": str(exc), "recommendations": []}
 
 
+def _prediction_governance_status(calibration_model: dict) -> dict:
+    if not PREDICTION_LEARNING_ENABLED:
+        return {
+            "status": "disabled",
+            "tone": "muted",
+            "message": "Prediction learning is disabled.",
+            "gates": [],
+        }
+
+    global_1d = (calibration_model.get("global") or {}).get("1d") or {}
+    samples = int(global_1d.get("samples") or 0)
+    hit_rate = global_1d.get("directional_hit_rate_pct")
+    mae = global_1d.get("mean_absolute_error_pct")
+    gates = [
+        {
+            "name": "1D sample minimum",
+            "passed": samples >= PREDICTION_CALIBRATION_MIN_SAMPLES,
+            "value": samples,
+            "target": PREDICTION_CALIBRATION_MIN_SAMPLES,
+        },
+        {
+            "name": "Directional hit rate",
+            "passed": hit_rate is None or hit_rate >= 50,
+            "value": hit_rate,
+            "target": ">= 50%",
+        },
+        {
+            "name": "Forecast error",
+            "passed": mae is None or mae <= 5.0,
+            "value": mae,
+            "target": "<= 5% MAE",
+        },
+    ]
+
+    if samples < PREDICTION_CALIBRATION_MIN_SAMPLES:
+        status = "warming"
+        tone = "amber"
+        message = f"Learning is collecting outcomes; {samples}/{PREDICTION_CALIBRATION_MIN_SAMPLES} 1D samples ready."
+    elif hit_rate is not None and hit_rate < 45:
+        status = "caution"
+        tone = "red"
+        message = f"Calibration active, but 1D hit rate is weak at {hit_rate:.1f}%."
+    elif mae is not None and mae > 5.0:
+        status = "watch"
+        tone = "amber"
+        message = f"Calibration active, but 1D error is high at {mae:.1f}% MAE."
+    else:
+        status = "active"
+        tone = "green"
+        message = "Calibration is active and within governance gates."
+
+    return {
+        "status": status,
+        "tone": tone,
+        "message": message,
+        "gates": gates,
+    }
+
+
 def _format_prediction_learning_for_prompt(calibration_model: dict) -> str:
     if not calibration_model or not calibration_model.get("enabled"):
         return "=== SELF-LEARNING CALIBRATION ===\nNo durable calibration available yet.\n"
@@ -3679,6 +3738,7 @@ async def get_predictions_learning(request: Request, evaluate: bool = True):
         evaluated_now = await evaluate_prediction_outcomes(limit=100) if evaluate else 0
         summary = _db.get_prediction_learning_summary()
         calibration = _build_prediction_calibration_model(store=False)
+        governance = _prediction_governance_status(calibration)
         summary.update({
             "synced_predictions": synced,
             "evaluated_now": evaluated_now,
@@ -3686,6 +3746,7 @@ async def get_predictions_learning(request: Request, evaluate: bool = True):
             "prompt_version": PREDICTION_PROMPT_VERSION,
             "learning_enabled": PREDICTION_LEARNING_ENABLED,
             "calibration": calibration,
+            "governance": governance,
         })
         return summary
     except Exception as exc:
@@ -3702,8 +3763,44 @@ async def get_predictions_calibration(request: Request, store: bool = False):
         "model_version": PREDICTION_MODEL_VERSION,
         "prompt_version": PREDICTION_PROMPT_VERSION,
         "learning_enabled": PREDICTION_LEARNING_ENABLED,
+        "governance": _prediction_governance_status(model),
     })
     return model
+
+
+@app.post("/api/predictions/calibration/rebuild")
+@limiter.limit("6/hour")
+async def rebuild_predictions_calibration(request: Request, current_user: str = Depends(get_current_user)):
+    """Evaluate due outcomes, rebuild calibration, persist a model card, and return governance status."""
+    try:
+        import db as _db
+        predictions = load_predictions()
+        synced = _sync_prediction_history(predictions)
+        evaluated_now = await evaluate_prediction_outcomes(limit=250)
+        calibration = _build_prediction_calibration_model(store=True)
+        governance = _prediction_governance_status(calibration)
+        history = _db.list_prediction_calibrations(limit=5)
+        logger.info(
+            "PREDICTION_CALIBRATION_REBUILD user=%s synced=%s evaluated=%s status=%s samples=%s",
+            current_user,
+            synced,
+            evaluated_now,
+            governance["status"],
+            calibration.get("sample_count"),
+        )
+        return {
+            "status": "ok",
+            "synced_predictions": synced,
+            "evaluated_now": evaluated_now,
+            "model_version": PREDICTION_MODEL_VERSION,
+            "prompt_version": PREDICTION_PROMPT_VERSION,
+            "calibration": calibration,
+            "governance": governance,
+            "history": history,
+        }
+    except Exception as exc:
+        logger.exception("Prediction calibration rebuild failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Prediction calibration rebuild failed: {exc}")
 
 
 async def _generate_predictions_impl():
