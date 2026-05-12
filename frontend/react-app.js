@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.2")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.3")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -864,6 +864,7 @@
     const [rows, setRows] = useState([]);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
+    const [status, setStatus] = useState("");
     const [selected, setSelected] = useState(null);
     const [period, setPeriod] = useState("all");
     const [showFactorGuide, setShowFactorGuide] = useState(false);
@@ -875,19 +876,49 @@
         setRows(Array.isArray(data) ? data : (data.predictions || data.rows || []));
       } catch (err) { setError(err.message); } finally { setBusy(false); }
     }
+    async function waitForGenerateCompletion(maxPolls = 40, delayMs = 1500) {
+      for (let i = 0; i < maxPolls; i++) {
+        await new Promise(r => setTimeout(r, delayMs));
+        const job = await api("/api/predictions/generate/status");
+        if (!job || !job.running) return job || {};
+      }
+      return { running: true };
+    }
     async function generate() {
       setBusy(true); setError("");
       try {
-        await api("/api/predictions/generate", { method: "POST" });
-        setTimeout(load, 1500);
-      } catch (err) { setError(err.message); setBusy(false); }
+        const started = await api("/api/predictions/generate", { method: "POST" });
+        setStatus(started?.status === "already_running" ? "Generation already running. Waiting for completion..." : "Generating today's predictions...");
+        const job = await waitForGenerateCompletion();
+        if (job.running) {
+          setStatus("Generation is taking longer than expected. Refresh actuals shortly.");
+        } else if (job.error) {
+          setError(`Generate failed: ${job.error}`);
+          setStatus("");
+        } else {
+          const count = Number(job.count || 0);
+          setStatus(`Generation complete${count > 0 ? `: ${count} predictions` : ""}.`);
+        }
+        await load();
+      } catch (err) {
+        setError(err.message);
+        setStatus("");
+      } finally {
+        setBusy(false);
+      }
     }
     async function backfill() {
       setBusy(true); setError("");
       try {
-        await api("/api/predictions/backfill-factors", { method: "POST" });
-        load();
-      } catch (err) { setError(err.message); setBusy(false); }
+        const result = await api("/api/predictions/backfill-factors", { method: "POST" });
+        setStatus(result?.message || "Backfill started.");
+        await load();
+      } catch (err) {
+        setError(err.message);
+        setStatus("");
+      } finally {
+        setBusy(false);
+      }
     }
     useEffect(() => { load(); }, []);
 
@@ -901,6 +932,7 @@
         h(Button, { key: "gen", kind: "primary", onClick: generate, disabled: busy }, busy ? "Working..." : "Generate today"),
       ] }),
       error ? h(Empty, null, error) : null,
+      status ? h(Status, { message: status, tone: "ok", className: "mb-3" }) : null,
       h("div", { className: "mb-3 flex flex-wrap gap-2" },
         PRED_PERIODS.map(([k, label]) => h("button", {
           key: k, onClick: () => setPeriod(k),
