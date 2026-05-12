@@ -368,7 +368,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.12")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.13")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -968,7 +968,8 @@
             h("p", null, h("strong", { className: "text-pulse-ink" }, "M "), "— Momentum: RSI-14, 52w position, price vs 50d SMA. ≥70 bullish."),
             h("p", null, h("strong", { className: "text-pulse-ink" }, "Q "), "— Quality: ROE, gross & net margin, debt/equity. ≥70 strong balance sheet."),
             h("p", null, h("strong", { className: "text-pulse-ink" }, "G "), "— Growth: revenue, EPS, fwd P/E trend. ≥70 accelerating."),
-            h("p", null, h("strong", { className: "text-pulse-ink" }, "C "), "— Composite: average of V+M+Q+G. ≥70 broad conviction.")
+            h("p", null, h("strong", { className: "text-pulse-ink" }, "C "), "— Composite: average of V+M+Q+G. ≥70 broad conviction."),
+            h("p", null, h("strong", { className: "text-pulse-ink" }, "MoS "), "— Margin of Safety from DCF. Positive = trading below estimated fair value, negative = trading above.")
           ),
           h("p", { className: "mt-3" }, h("strong", { className: "text-pulse-ink" }, "Reading:"), " Start with C as the headline (≥65 solid). Check pillars — high V + low Q = cheap-but-risky. The best setups combine V≥65, M≥60, Q≥60.")
         ) : null
