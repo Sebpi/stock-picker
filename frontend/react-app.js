@@ -257,13 +257,20 @@
 
   function FactorCluster({ scores }) {
     const config = [["V", "value"], ["M", "momentum"], ["Q", "quality"], ["G", "growth"], ["C", "composite"]];
+    const descriptions = {
+      value: "Value: P/E, P/B, EV/EBITDA, FCF yield, PEG.",
+      momentum: "Momentum: RSI-14, 52w position, price vs 50d SMA.",
+      quality: "Quality: ROE, margins, debt/equity.",
+      growth: "Growth: revenue, EPS, forward trend.",
+      composite: "Composite: blended factor score across V, M, Q, G.",
+    };
     return h("div", { className: "flex flex-nowrap items-center gap-1 overflow-x-auto whitespace-nowrap pb-1" },
       config.map(([label, key]) => {
         const value = scores ? scores[key] : null;
         const tone = value == null ? "border-pulse-line text-pulse-dim" : value >= 70 ? "border-pulse-green/30 bg-pulse-green/10 text-pulse-green" : value >= 45 ? "border-pulse-amber/30 bg-pulse-amber/10 text-pulse-amber" : "border-pulse-red/30 bg-pulse-red/10 text-pulse-red";
-        return h("span", { key: label, className: cx("inline-flex h-9 min-w-10 flex-col items-center justify-center rounded-md border font-mono text-[10px] font-bold", tone) },
+        return h("span", { key: label, title: descriptions[key], className: cx("inline-flex h-10 min-w-12 flex-col items-center justify-center rounded-md border font-mono text-[10px] font-bold", tone) },
           label,
-          h("small", { className: "text-[9px] opacity-80" }, value == null ? "—" : Math.round(value))
+          h("small", { className: "text-[11px] leading-none opacity-95" }, value == null ? "—" : Math.round(value))
         );
       })
     );
@@ -361,7 +368,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.11")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.12")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -972,10 +979,10 @@
       h("div", { className: "hidden overflow-x-auto rounded-xl border border-pulse-line bg-pulse-card md:block" },
         h("table", { className: "min-w-[1200px] text-sm" },
           h("thead", { className: "bg-pulse-panel font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
-            h("tr", null, ["Date", "Ticker", "Current", "Signal", "Factors", "3M", "6M", "12M", "Actual", "Variance", "Result", "Confidence", ""].map((x, i) => h("th", { className: "px-3 py-3 text-left", key: i }, x)))
+            h("tr", null, ["Date", "Ticker", "Current", "Signal", "Factors", "MoS", "3M", "6M", "12M", "Actual", "Variance", "Result", "Confidence", ""].map((x, i) => h("th", { className: "px-3 py-3 text-left", key: i }, x)))
           ),
           h("tbody", null, filtered.length ? filtered.map((p, i) => h(PredictionRow, { key: i, p, onOpen: () => setSelected(p) })) :
-            h("tr", null, h("td", { className: "px-3 py-4 text-pulse-muted", colSpan: 13 }, busy ? "Loading..." : "No predictions for this period.")))
+            h("tr", null, h("td", { className: "px-3 py-4 text-pulse-muted", colSpan: 14 }, busy ? "Loading..." : "No predictions for this period.")))
         )
       ),
       selected ? h(SlideOver, { title: `${selected.ticker} prediction`, kicker: "Prediction thesis", onClose: () => setSelected(null) },
@@ -1039,6 +1046,7 @@
       h("td", { className: "px-3 py-3 font-mono" }, p.current_price != null ? "$" + Number(p.current_price).toFixed(2) : "—"),
       h("td", { className: cx("px-3 py-3 font-mono", scoreTone(p.score)) }, p.score == null ? "—" : `${p.score}/100`),
       h("td", { className: "px-3 py-3" }, h(FactorCluster, { scores: p.factor_scores || {} })),
+      h("td", { className: cx("px-3 py-3 font-mono", p.dcf && p.dcf.margin_of_safety_pct != null ? deltaTone(p.dcf.margin_of_safety_pct) : "") }, p.dcf && p.dcf.margin_of_safety_pct != null ? fmtPct(p.dcf.margin_of_safety_pct, 0) : "—"),
       h("td", { className: "px-3 py-3 font-mono" }, fmtPct(p.predicted_3m_pct, 1)),
       h("td", { className: "px-3 py-3 font-mono" }, fmtPct(p.predicted_6m_pct, 1)),
       h("td", { className: "px-3 py-3 font-mono" }, fmtPct(p.predicted_12m_pct, 1)),
@@ -1074,6 +1082,9 @@
         h(Metric, { label: "6M", value: fmtPct(p.predicted_6m_pct, 1) }),
         h(Metric, { label: "12M", value: fmtPct(p.predicted_12m_pct, 1) })
       ),
+      p.dcf && p.dcf.margin_of_safety_pct != null ? h("div", { className: "mt-3" },
+        h(Metric, { label: "MoS", value: fmtPct(p.dcf.margin_of_safety_pct, 0), tone: p.dcf.margin_of_safety_pct >= 0 ? "text-pulse-green" : "text-pulse-red" })
+      ) : null,
       h(Button, { onClick: onOpen, className: "mt-4 w-full" }, "View thesis")
     );
   }
