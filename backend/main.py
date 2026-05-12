@@ -175,7 +175,7 @@ SEARCH_INFO_TIMEOUT_SEC = max(0.5, float(os.getenv("SEARCH_INFO_TIMEOUT_SEC", "2
 # Universe build (prewarm + cache-miss screen) is batched/concurrent and is
 # allowed to wait longer per ticker, so each Index returns close to its full
 # constituent list rather than the ~40-50% that survived a 2.5s timeout.
-UNIVERSE_INFO_TIMEOUT_SEC = max(2.0, float(os.getenv("UNIVERSE_INFO_TIMEOUT_SEC", "8.0")))
+UNIVERSE_INFO_TIMEOUT_SEC = max(2.0, float(os.getenv("UNIVERSE_INFO_TIMEOUT_SEC", "18.0")))
 RECOMMENDATION_INFO_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_INFO_TIMEOUT_SEC", "4.0")))
 RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HISTORY_TIMEOUT_SEC", "4.0")))
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
