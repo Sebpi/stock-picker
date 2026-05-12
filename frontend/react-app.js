@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.0")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.2")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1156,8 +1156,141 @@
       panel ? h(SlideOver, { title: panel === "ops" ? "Operations" : panel === "health" ? "Agent Health" : "Evaluation", kicker: "Agent infrastructure", onClose: () => { setPanel(null); setPanelData(null); } },
         panelData == null ? h(Empty, null, "Loading...") :
         panelData.error ? h(Empty, null, panelData.error) :
-        h(Card, { className: "p-4" }, h("pre", { className: "whitespace-pre-wrap break-words text-xs text-pulse-muted" }, JSON.stringify(panelData, null, 2)))
+        h(PanelView, { kind: panel, data: panelData })
       ) : null
+    );
+  }
+
+  function PanelView({ kind, data }) {
+    if (kind === "ops") return h(OperationsPanel, { data });
+    if (kind === "health") return h(AgentHealthPanel, { data });
+    if (kind === "evaluate") return h(EvaluatePanel, { data });
+    return h(Card, { className: "p-4 text-sm text-pulse-muted" }, "No panel renderer.");
+  }
+
+  function OperationsPanel({ data }) {
+    const th = data && data.thesis_scheduler ? data.thesis_scheduler : {};
+    const ev = data && data.evaluation_scheduler ? data.evaluation_scheduler : {};
+    const pr = data && data.prediction_scheduler ? data.prediction_scheduler : {};
+    const mon = data && data.monitor_scheduler ? data.monitor_scheduler : {};
+    const fail = data && data.background_failures ? data.background_failures : {};
+    const generated = data && data.generated_at ? data.generated_at : null;
+    return h("div", { className: "grid gap-4" },
+      generated ? h(Status, { message: `Updated ${fmtDate(generated)}` }) : null,
+      h("div", { className: "grid gap-3 sm:grid-cols-2" },
+        h(OpsCard, { title: "Thesis Scheduler", status: th.enabled ? "ENABLED" : "DISABLED", rows: [
+          ["Active", th.active ? "yes" : "no"],
+          ["Runs", th.runs_started == null ? "-" : String(th.runs_started)],
+          ["Last Run", th.last_run ? fmtDate(th.last_run) : "never"],
+          ["Last Error", th.last_error || "none"],
+        ] }),
+        h(OpsCard, { title: "Evaluation Scheduler", status: ev.enabled ? "ENABLED" : "DISABLED", rows: [
+          ["Active", ev.active ? "yes" : "no"],
+          ["Runs", ev.runs_started == null ? "-" : String(ev.runs_started)],
+          ["Last Run", ev.last_run ? fmtDate(ev.last_run) : "never"],
+          ["Last Error", ev.last_error || "none"],
+        ] }),
+        h(OpsCard, { title: "Prediction Scheduler", status: pr.enabled ? "ENABLED" : "DISABLED", rows: [
+          ["Active", pr.active ? "yes" : "no"],
+          ["Runs", pr.runs_started == null ? "-" : String(pr.runs_started)],
+          ["Last Run", pr.last_run ? fmtDate(pr.last_run) : "never"],
+          ["Last Error", pr.last_error || "none"],
+        ] }),
+        h(OpsCard, { title: "Monitor Scheduler", status: mon.enabled ? "ENABLED" : "DISABLED", rows: [
+          ["Active", mon.active ? "yes" : "no"],
+          ["Runs", mon.runs_started == null ? "-" : String(mon.runs_started)],
+          ["Last Run", mon.last_run ? fmtDate(mon.last_run) : "never"],
+          ["Last Error", mon.last_error || "none"],
+        ] }),
+      ),
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim" }, "Background Failures"),
+        h("div", { className: "mt-3 grid gap-2 sm:grid-cols-2" },
+          ["thesis", "evaluation", "prediction", "monitor"].map((k) => h(Metric, {
+            key: k,
+            label: k,
+            value: fail[k] && fail[k].count != null ? String(fail[k].count) : "0",
+            hint: fail[k] && fail[k].last_error ? String(fail[k].last_error) : "no recent failures",
+            tone: fail[k] && fail[k].count > 0 ? "text-pulse-red" : "text-pulse-green",
+          }))
+        )
+      )
+    );
+  }
+
+  function OpsCard({ title, status, rows }) {
+    return h(Card, { className: "p-4" },
+      h("div", { className: "flex items-center justify-between gap-2" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim" }, title),
+        h(Pill, { className: status === "ENABLED" ? "border-pulse-green/40 bg-pulse-green/10 text-pulse-green" : "border-pulse-line bg-pulse-panel text-pulse-dim" }, status)
+      ),
+      h("div", { className: "mt-3 grid gap-2" },
+        rows.map(([k, v]) => h("div", { key: k, className: "flex items-center justify-between text-sm" },
+          h("span", { className: "text-pulse-muted" }, k),
+          h("span", { className: "font-mono text-pulse-ink text-right" }, v)
+        ))
+      )
+    );
+  }
+
+  function AgentHealthPanel({ data }) {
+    const generated = data && data.generated_at ? data.generated_at : null;
+    const agents = data && Array.isArray(data.agents) ? data.agents : [];
+    return h("div", { className: "grid gap-4" },
+      generated ? h(Status, { message: `Updated ${fmtDate(generated)}` }) : null,
+      agents.length ? h("div", { className: "grid gap-3" },
+        agents.map((a, i) => {
+          const stale = !!a.stale;
+          const tone = stale ? "text-pulse-red" : "text-pulse-green";
+          return h(Card, { key: a.agent_id || i, className: "p-4" },
+            h("div", { className: "flex items-start justify-between gap-3" },
+              h("div", null,
+                h("div", { className: "font-semibold text-sm" }, a.agent_id || "unknown agent"),
+                h("div", { className: "text-xs text-pulse-muted mt-1" }, a.last_run ? `Last run ${fmtDate(a.last_run)}` : "No run recorded")
+              ),
+              h(Pill, { className: stale ? "border-pulse-red/40 bg-pulse-red/10 text-pulse-red" : "border-pulse-green/40 bg-pulse-green/10 text-pulse-green" }, stale ? "STALE" : "FRESH")
+            ),
+            h("div", { className: `mt-3 text-xs ${tone}` }, a.last_error ? `Error: ${a.last_error}` : "No errors recorded")
+          );
+        })
+      ) : h(Empty, null, "No agent health records returned.")
+    );
+  }
+
+  function EvaluatePanel({ data }) {
+    const summary = data && data.summary ? data.summary : {};
+    const backtest = data && data.backtest ? data.backtest : {};
+    const rows = Object.entries(summary);
+    const cals = Object.entries(backtest.calibration || {});
+    return h("div", { className: "grid gap-4" },
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim" }, "Evaluation Summary"),
+        rows.length ? h("div", { className: "mt-3 grid gap-2 sm:grid-cols-3" },
+          rows.map(([horizon, r]) => h(Metric, {
+            key: horizon,
+            label: horizon,
+            value: `${Math.round(Number((r && r.directional_hit_rate) || 0) * 100)}% hit`,
+            hint: `MAE ${Number((r && r.mean_absolute_error) || 0).toFixed(2)} (${(r && r.total) || 0} samples)`,
+          }))
+        ) : h("p", { className: "mt-2 text-sm text-pulse-muted" }, "No matured forecasts available yet.")
+      ),
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim" }, "Calibration"),
+        cals.length ? h("div", { className: "mt-3 overflow-x-auto" },
+          h("table", { className: "min-w-full text-sm" },
+            h("thead", { className: "font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
+              h("tr", null, ["Bucket", "Hit Rate", "Total"].map((x) => h("th", { key: x, className: "px-2 py-2 text-left" }, x)))
+            ),
+            h("tbody", null,
+              cals.map(([bucket, row]) => h("tr", { key: bucket, className: "border-t border-pulse-line/60" },
+                h("td", { className: "px-2 py-2 text-pulse-muted" }, bucket),
+                h("td", { className: "px-2 py-2 font-mono" }, `${Math.round(Number((row && row.hit_rate) || 0) * 100)}%`),
+                h("td", { className: "px-2 py-2 font-mono" }, String((row && row.total) || 0))
+              ))
+            )
+          )
+        ) : h("p", { className: "mt-2 text-sm text-pulse-muted" }, "Calibration metrics are not available yet.")
+      )
     );
   }
 
