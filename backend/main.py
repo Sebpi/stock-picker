@@ -176,6 +176,12 @@ SEARCH_INFO_TIMEOUT_SEC = max(0.5, float(os.getenv("SEARCH_INFO_TIMEOUT_SEC", "2
 # allowed to wait longer per ticker, so each Index returns close to its full
 # constituent list rather than the ~40-50% that survived a 2.5s timeout.
 UNIVERSE_INFO_TIMEOUT_SEC = max(2.0, float(os.getenv("UNIVERSE_INFO_TIMEOUT_SEC", "18.0")))
+# Screener universe data provider. 'yfinance' = the original per-ticker .info
+# fan-out (rate-limited under load). 'yahooquery' = bulk multi-ticker calls
+# that pull every ticker's modules in 3-5 HTTP requests per chunk, which
+# avoids the per-call throttling pressure. Set to 'yfinance' on Fly to roll
+# back instantly without redeploy.
+UNIVERSE_PROVIDER = os.getenv("UNIVERSE_PROVIDER", "yahooquery").strip().lower()
 RECOMMENDATION_INFO_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_INFO_TIMEOUT_SEC", "4.0")))
 RECOMMENDATION_HISTORY_TIMEOUT_SEC = max(1.0, float(os.getenv("RECOMMENDATION_HISTORY_TIMEOUT_SEC", "4.0")))
 PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEARCH", "false").lower() in {"1", "true", "yes", "on"}
@@ -1001,7 +1007,95 @@ def _build_universe_row(ticker: str, info: dict) -> dict | None:
         return None
 
 
-async def _build_universe_rows(pool: list[str]) -> list[dict]:
+# ── yahooquery bulk provider (alternative to per-ticker yfinance.info) ───────
+# Pull every ticker's modules in a handful of HTTP calls instead of one per
+# ticker, which sidesteps Yahoo's per-call throttling.
+
+_YQ_CHUNK = 50   # symbols per yahooquery request
+
+
+def _yq_pick(d: dict | None, key: str):
+    """yahooquery returns either raw numbers or {raw, fmt} dicts depending on
+    field/version. Unwrap both shapes."""
+    if not isinstance(d, dict):
+        return None
+    v = d.get(key)
+    if isinstance(v, dict) and "raw" in v:
+        return v.get("raw")
+    return v
+
+
+def _yq_build_row(ticker: str, modules: dict) -> dict | None:
+    if not isinstance(modules, dict):
+        return None
+    try:
+        price_m = modules.get("price") or {}
+        sd      = modules.get("summaryDetail") or {}
+        ks      = modules.get("defaultKeyStatistics") or {}
+        fd      = modules.get("financialData") or {}
+        ap      = modules.get("assetProfile") or modules.get("summaryProfile") or {}
+
+        price       = _yq_pick(price_m, "regularMarketPrice") or _yq_pick(sd, "regularMarketPrice") or _yq_pick(fd, "currentPrice")
+        market_cap  = _yq_pick(price_m, "marketCap") or _yq_pick(sd, "marketCap")
+        fcf         = _yq_pick(fd, "freeCashflow")
+        rev_growth  = _yq_pick(fd, "revenueGrowth")
+        pe          = _yq_pick(sd, "trailingPE")
+        peg         = _yq_pick(ks, "pegRatio") or _yq_pick(sd, "pegRatio")
+        pb          = _yq_pick(ks, "priceToBook") or _yq_pick(sd, "priceToBook")
+        ev_ebitda   = _yq_pick(ks, "enterpriseToEbitda")
+        volume      = _yq_pick(sd, "averageVolume") or _yq_pick(sd, "averageVolume10days")
+        name        = price_m.get("shortName") or price_m.get("longName") or ticker
+        sector      = ap.get("sector", "") if isinstance(ap, dict) else ""
+
+        return {
+            "ticker":     ticker,
+            "name":       name,
+            "sector":     sector,
+            "price":      round(price, 2) if isinstance(price, (int, float)) else None,
+            "pe":         round(pe, 2) if isinstance(pe, (int, float)) else None,
+            "peg":        round(peg, 2) if isinstance(peg, (int, float)) else None,
+            "pb":         round(pb, 2) if isinstance(pb, (int, float)) else None,
+            "ev_ebitda":  round(ev_ebitda, 2) if isinstance(ev_ebitda, (int, float)) else None,
+            "fcf_yield":  calc_fcf_yield(fcf, market_cap),
+            "rev_growth": round(rev_growth * 100, 1) if isinstance(rev_growth, (int, float)) else None,
+            "market_cap": market_cap,
+            "volume":     volume,
+        }
+    except Exception:
+        return None
+
+
+def _yq_fetch_chunk_sync(symbols: list[str]) -> dict:
+    """Blocking yahooquery call. Returns {ticker: {module: data}}. Errors are
+    swallowed so a chunk failure doesn't poison the whole pool."""
+    try:
+        from yahooquery import Ticker  # local import keeps cold-start light
+        t = Ticker(symbols, asynchronous=True, max_workers=8, validate=False)
+        data = t.get_modules([
+            "price", "summaryDetail", "defaultKeyStatistics",
+            "financialData", "assetProfile",
+        ])
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning(f"yahooquery chunk failed ({len(symbols)} symbols): {exc}")
+        return {}
+
+
+async def _build_universe_rows_yahooquery(pool: list[str]) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(0, len(pool), _YQ_CHUNK):
+        chunk = pool[i: i + _YQ_CHUNK]
+        data = await asyncio.to_thread(_yq_fetch_chunk_sync, chunk)
+        for sym in chunk:
+            row = _yq_build_row(sym, data.get(sym) if isinstance(data, dict) else None)
+            if row:
+                rows.append(row)
+        if i + _YQ_CHUNK < len(pool):
+            await asyncio.sleep(_PREWARM_DELAY)
+    return rows
+
+
+async def _build_universe_rows_yfinance(pool: list[str]) -> list[dict]:
     """Fetch yfinance info for every ticker in `pool` in small concurrent
     batches and return the screener rows. Batching + the inter-batch delay
     are what keep the screener inside Yahoo's rate-limit envelope — fanning
@@ -1024,6 +1118,13 @@ async def _build_universe_rows(pool: list[str]) -> list[dict]:
         if i + _PREWARM_BATCH < len(pool):
             await asyncio.sleep(_PREWARM_DELAY)
     return rows
+
+
+async def _build_universe_rows(pool: list[str]) -> list[dict]:
+    """Dispatch to whichever upstream provider is configured."""
+    if UNIVERSE_PROVIDER == "yahooquery":
+        return await _build_universe_rows_yahooquery(pool)
+    return await _build_universe_rows_yfinance(pool)
 
 
 async def _prewarm_universe_cache():
