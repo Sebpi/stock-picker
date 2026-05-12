@@ -361,7 +361,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.4")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.0.5")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1221,6 +1221,46 @@
     const mon = data && data.monitor_scheduler ? data.monitor_scheduler : {};
     const fail = data && data.background_failures ? data.background_failures : {};
     const generated = data && data.generated_at ? data.generated_at : null;
+    const [cfg, setCfg] = useState(null);
+    const [cfgBusy, setCfgBusy] = useState(false);
+    const [cfgStatus, setCfgStatus] = useState("");
+
+    useEffect(() => {
+      let alive = true;
+      (async () => {
+        try {
+          const settings = await api("/v1/settings/scheduler");
+          if (alive) setCfg(settings || {});
+        } catch (err) {
+          if (alive) setCfgStatus(`Could not load scheduler settings: ${err.message}`);
+        }
+      })();
+      return () => { alive = false; };
+    }, []);
+
+    async function saveSchedulerSettings() {
+      if (!cfg) return;
+      setCfgBusy(true);
+      setCfgStatus("Saving...");
+      try {
+        await api("/v1/settings/scheduler", {
+          method: "PATCH",
+          body: JSON.stringify({
+            thesis_auto_run_enabled: !!cfg.thesis_auto_run_enabled,
+            thesis_auto_run_interval_minutes: Math.max(15, Number(cfg.thesis_auto_run_interval_minutes || 1440)),
+            thesis_auto_run_max_tickers: Math.max(1, Math.min(50, Number(cfg.thesis_auto_run_max_tickers || 8))),
+            evaluation_auto_run_enabled: !!cfg.evaluation_auto_run_enabled,
+            evaluation_auto_run_interval_minutes: Math.max(60, Number(cfg.evaluation_auto_run_interval_minutes || 1440)),
+          }),
+        });
+        setCfgStatus(`Saved and applied at ${new Date().toLocaleTimeString()}`);
+      } catch (err) {
+        setCfgStatus(`Error: ${err.message}`);
+      } finally {
+        setCfgBusy(false);
+      }
+    }
+
     return h("div", { className: "grid gap-4" },
       generated ? h(Status, { message: `Updated ${fmtDate(generated)}` }) : null,
       h("div", { className: "grid gap-3 sm:grid-cols-2" },
@@ -1259,6 +1299,70 @@
             hint: fail[k] && fail[k].last_error ? String(fail[k].last_error) : "no recent failures",
             tone: fail[k] && fail[k].count > 0 ? "text-pulse-red" : "text-pulse-green",
           }))
+        )
+      ),
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim" }, "Scheduler Settings"),
+        cfg ? h("div", { className: "mt-3 grid gap-3 sm:grid-cols-2" },
+          h("div", { className: "grid gap-2 rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+            h("div", { className: "text-sm font-semibold" }, "Thesis Auto-Run"),
+            h("label", { className: "flex items-center justify-between text-sm" },
+              h("span", { className: "text-pulse-muted" }, "Enabled"),
+              h("input", {
+                type: "checkbox",
+                checked: !!cfg.thesis_auto_run_enabled,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { thesis_auto_run_enabled: e.target.checked }))
+              })
+            ),
+            h("label", { className: "flex items-center justify-between text-sm gap-2" },
+              h("span", { className: "text-pulse-muted" }, "Interval (minutes)"),
+              h(TextInput, {
+                type: "number",
+                min: 15,
+                step: 60,
+                className: "max-w-[120px]",
+                value: cfg.thesis_auto_run_interval_minutes ?? 1440,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { thesis_auto_run_interval_minutes: e.target.value }))
+              })
+            ),
+            h("label", { className: "flex items-center justify-between text-sm gap-2" },
+              h("span", { className: "text-pulse-muted" }, "Max tickers per run"),
+              h(TextInput, {
+                type: "number",
+                min: 1,
+                max: 50,
+                className: "max-w-[120px]",
+                value: cfg.thesis_auto_run_max_tickers ?? 8,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { thesis_auto_run_max_tickers: e.target.value }))
+              })
+            )
+          ),
+          h("div", { className: "grid gap-2 rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+            h("div", { className: "text-sm font-semibold" }, "Evaluation Auto-Run"),
+            h("label", { className: "flex items-center justify-between text-sm" },
+              h("span", { className: "text-pulse-muted" }, "Enabled"),
+              h("input", {
+                type: "checkbox",
+                checked: !!cfg.evaluation_auto_run_enabled,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { evaluation_auto_run_enabled: e.target.checked }))
+              })
+            ),
+            h("label", { className: "flex items-center justify-between text-sm gap-2" },
+              h("span", { className: "text-pulse-muted" }, "Interval (minutes)"),
+              h(TextInput, {
+                type: "number",
+                min: 60,
+                step: 60,
+                className: "max-w-[120px]",
+                value: cfg.evaluation_auto_run_interval_minutes ?? 1440,
+                onChange: (e) => setCfg(prev => Object.assign({}, prev, { evaluation_auto_run_interval_minutes: e.target.value }))
+              })
+            )
+          )
+        ) : h("p", { className: "mt-2 text-sm text-pulse-muted" }, "Loading scheduler settings..."),
+        h("div", { className: "mt-3 flex flex-wrap items-center gap-3" },
+          h(Button, { kind: "primary", onClick: saveSchedulerSettings, disabled: cfgBusy || !cfg }, cfgBusy ? "Saving..." : "Save & Apply"),
+          cfgStatus ? h("span", { className: "text-xs text-pulse-muted" }, cfgStatus) : null
         )
       )
     );
