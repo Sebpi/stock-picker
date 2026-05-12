@@ -200,12 +200,12 @@
 
   function SectionHead(props) {
     return h("div", { className: "mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between" },
-      h("div", null,
+      h("div", { className: "min-w-0" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, props.kicker || "StockLens"),
         h("h2", { className: "mt-1 text-2xl font-semibold tracking-tight" }, props.title),
         props.subtitle ? h("p", { className: "mt-1 max-w-2xl text-sm text-pulse-muted" }, props.subtitle) : null
       ),
-      props.actions ? h("div", { className: "flex flex-wrap gap-2" }, props.actions) : null
+      props.actions ? h("div", { className: "grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end" }, props.actions) : null
     );
   }
 
@@ -368,7 +368,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.3.0")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.3.1")
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
@@ -1002,10 +1002,10 @@
           h("p", { className: "mt-3" }, h("strong", { className: "text-pulse-ink" }, "Reading:"), " Start with C as the headline (≥65 solid). Check pillars — high V + low Q = cheap-but-risky. The best setups combine V≥65, M≥60, Q≥60.")
         ) : null
       ),
-      h("div", { className: "grid gap-3 md:hidden" },
+      h("div", { className: "grid gap-3 lg:hidden" },
         filtered.length ? filtered.map((p, i) => h(PredictionCard, { key: i, p, onOpen: () => setSelected(p) })) : h(Empty, null, busy ? "Loading..." : "No predictions for this period.")
       ),
-      h("div", { className: "hidden overflow-x-auto rounded-xl border border-pulse-line bg-pulse-card md:block" },
+      h("div", { className: "hidden overflow-x-auto rounded-xl border border-pulse-line bg-pulse-card lg:block" },
         h("table", { className: "min-w-[1200px] text-sm" },
           h("thead", { className: "bg-pulse-panel font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
             h("tr", null, ["Date", "Ticker", "Current", "Signal", "Factors", "MoS", "3M", "6M", "12M", "Actual", "Variance", "Result", "Confidence", ""].map((x, i) => h("th", { className: "px-3 py-3 text-left", key: i }, x)))
@@ -1016,7 +1016,7 @@
       ),
       selected ? h(SlideOver, { title: `${selected.ticker} prediction`, kicker: "Prediction thesis", onClose: () => setSelected(null) },
         h("div", { className: "grid gap-4" },
-          h("div", { className: "grid grid-cols-3 gap-2" },
+          h("div", { className: "grid grid-cols-2 gap-2 sm:grid-cols-3" },
             h(Metric, { label: "Score", value: selected.score == null ? "—" : `${selected.score}/100`, tone: scoreTone(selected.score) }),
             h(Metric, { label: "3M", value: fmtPct(selected.predicted_3m_pct, 1) }),
             h(Metric, { label: "12M", value: fmtPct(selected.predicted_12m_pct, 1) })
@@ -1025,7 +1025,7 @@
           selected.dcf && selected.dcf.margin_of_safety_pct != null ? h(Metric, { label: "DCF Margin of Safety", value: fmtPct(selected.dcf.margin_of_safety_pct, 0), tone: selected.dcf.margin_of_safety_pct >= 0 ? "text-pulse-green" : "text-pulse-red" }) : null,
           selected.learning_adjustment ? h(Card, { className: "p-4" },
             h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-cyan" }, "Learning adjustment"),
-            h("div", { className: "mt-3 grid grid-cols-3 gap-2" },
+            h("div", { className: "mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3" },
               h(Metric, { label: "Total", value: fmtPct(selected.learning_adjustment.total_adjustment, 2) }),
               h(Metric, { label: "Bias", value: fmtPct(selected.learning_adjustment.bias_adjustment, 2) }),
               h(Metric, { label: "Factors", value: fmtPct(selected.learning_adjustment.factor_adjustment, 2) })
@@ -1217,13 +1217,13 @@
   }
 
   function PredictionCard({ p, onOpen }) {
-    return h(Card, { className: "p-4" },
+    return h(Card, { className: "overflow-hidden p-4" },
       h("div", { className: "flex items-start justify-between gap-3" },
         h("div", { className: "min-w-0" }, h("div", { className: "font-mono text-xl text-pulse-cyan" }, p.ticker), h("div", { className: "truncate text-sm text-pulse-muted" }, p.name || "—")),
         h("div", { className: cx("font-mono text-xl", scoreTone(p.score)) }, p.score == null ? "—" : Math.round(p.score))
       ),
       h("div", { className: "mt-3" }, h(FactorCluster, { scores: p.factor_scores || {} })),
-      h("div", { className: "mt-4 grid grid-cols-3 gap-2" },
+      h("div", { className: "mt-4 grid grid-cols-2 gap-2 min-[420px]:grid-cols-3" },
         h(Metric, { label: "3M", value: fmtPct(p.predicted_3m_pct, 1) }),
         h(Metric, { label: "6M", value: fmtPct(p.predicted_6m_pct, 1) }),
         h(Metric, { label: "12M", value: fmtPct(p.predicted_12m_pct, 1) })
