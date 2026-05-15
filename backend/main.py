@@ -461,6 +461,12 @@ def load_settings() -> dict:
         "alert_top_sells": 3,
         "alert_buy_min_score": 72,
         "alert_sell_max_score": 42,
+        # Phase 2: regime gate — block BUYs when broad market is risk-off
+        "regime_gate_enabled": True,
+        "regime_spy_dma_period": 200,
+        "regime_vix_max": 25.0,
+        # Phase 2: require this many of 9 agents to be net-positive before BUY
+        "alert_min_positive_agents": 5,
     }
     if SETTINGS_FILE.exists():
         try:
@@ -471,6 +477,90 @@ def load_settings() -> dict:
 
 def save_settings(s: dict):
     _atomic_write(SETTINGS_FILE, json.dumps(s, indent=2))
+
+
+# Phase 2: market-regime gate. Block BUYs when SPY is below its long-term DMA
+# (trend-following filter) OR VIX is elevated (stress filter). Cached for an
+# hour because regime doesn't change minute-by-minute and the yfinance call is
+# the slowest part of the recommendation pipeline.
+_regime_cache: dict = {"ts": 0.0, "data": None}
+_REGIME_TTL_SEC = 3600
+
+def _fetch_regime_data_sync(dma_period: int) -> dict:
+    """Synchronous yfinance fetch — run inside asyncio.to_thread."""
+    days_needed = max(220, dma_period + 20)
+    spy_hist = yf.Ticker("SPY").history(period=f"{days_needed}d")
+    vix_hist = yf.Ticker("^VIX").history(period="5d")
+    if spy_hist.empty or len(spy_hist) < dma_period:
+        raise RuntimeError(f"SPY history too short ({len(spy_hist)} bars, need {dma_period})")
+    spy_close = float(spy_hist["Close"].iloc[-1])
+    spy_dma   = float(spy_hist["Close"].iloc[-dma_period:].mean())
+    vix_close = float(vix_hist["Close"].iloc[-1]) if not vix_hist.empty else float("nan")
+    return {"spy_close": spy_close, "spy_dma": spy_dma, "vix": vix_close, "dma_period": dma_period}
+
+async def get_market_regime() -> dict:
+    """
+    Return regime status used by both recommendation engines to gate BUYs.
+
+    Output keys:
+      ok:              True if regime is risk-on enough to allow BUYs.
+      reason:          Human-readable explanation (used in BUY-blocked messaging).
+      spy_close, spy_dma, vix, dma_period: raw inputs for telemetry.
+      gate_enabled:    False if the gate is disabled in settings (ok=True always).
+      stale/error:     True on yfinance failure — fails OPEN so a data outage
+                       doesn't freeze trading; this is intentional, the gate is
+                       a quality filter not a safety lock.
+    """
+    settings = load_settings()
+    if not settings.get("regime_gate_enabled", True):
+        return {"ok": True, "reason": "regime gate disabled in settings", "gate_enabled": False}
+
+    now = time_mod.time()
+    if _regime_cache["data"] and (now - _regime_cache["ts"]) < _REGIME_TTL_SEC:
+        return _regime_cache["data"]
+
+    dma_period = int(settings.get("regime_spy_dma_period", 200))
+    vix_max    = float(settings.get("regime_vix_max", 25.0))
+    try:
+        raw = await asyncio.to_thread(_fetch_regime_data_sync, dma_period)
+    except Exception as exc:
+        logger.warning("Regime fetch failed (%s) — failing open", exc)
+        # Fail open: don't block trading on a data outage, but flag it.
+        result = {"ok": True, "reason": f"regime data unavailable ({exc})", "stale": True, "error": str(exc), "gate_enabled": True}
+        # Don't cache failures — retry on next call
+        return result
+
+    spy_above = raw["spy_close"] >= raw["spy_dma"]
+    vix_ok    = raw["vix"] <= vix_max if raw["vix"] == raw["vix"] else True  # NaN guard
+    ok        = spy_above and vix_ok
+
+    if ok:
+        reason = (f"SPY {raw['spy_close']:.2f} ≥ {dma_period}-DMA {raw['spy_dma']:.2f}, "
+                  f"VIX {raw['vix']:.1f} ≤ {vix_max:.0f}")
+    else:
+        parts = []
+        if not spy_above:
+            parts.append(f"SPY {raw['spy_close']:.2f} below {dma_period}-DMA {raw['spy_dma']:.2f}")
+        if not vix_ok:
+            parts.append(f"VIX {raw['vix']:.1f} above {vix_max:.0f} threshold")
+        reason = "Market regime risk-off: " + "; ".join(parts)
+
+    result = {
+        "ok": ok,
+        "reason": reason,
+        "spy_close": raw["spy_close"],
+        "spy_dma": raw["spy_dma"],
+        "vix": raw["vix"],
+        "dma_period": dma_period,
+        "vix_max": vix_max,
+        "spy_above_dma": spy_above,
+        "vix_below_max": vix_ok,
+        "gate_enabled": True,
+    }
+    _regime_cache["ts"]   = now
+    _regime_cache["data"] = result
+    return result
+
 
 SP500_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "JNJ",
@@ -1732,13 +1822,29 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
     results = await asyncio.gather(*[_run_thesis(t) for t in all_tickers])
     thesis_map = {ticker: thesis for ticker, thesis in results if thesis is not None}
 
+    # Phase 2: regime gate. Same rule as Signals tab — risk-off market kills new BUYs.
+    regime = await get_market_regime()
+    allow_buys = regime.get("ok", True)
+    min_positive_agents = int(_s.get("alert_min_positive_agents", 5))
+
     # ── BUY candidates — watchlist tickers not already owned ──────────────────
     strong_buys = []
     for ticker in buy_tickers:
+        if not allow_buys:
+            break  # regime risk-off, no new BUYs
         if ticker in owned_positions or ticker in paper_held_alert:
             continue  # already held in real or paper portfolio — skip buy signal
         thesis = thesis_map.get(ticker)
         if not thesis:
+            continue
+
+        # Phase 2: require ≥ N of 9 agents to be net-positive. A 3-of-9 thesis
+        # that scrapes a passing composite is fragile — demand consensus.
+        positive_agents = sum(
+            1 for meta in (thesis.agent_meta or {}).values()
+            if meta.get("direction") == "positive" and meta.get("usable", True)
+        )
+        if positive_agents < min_positive_agents:
             continue
 
         composite    = float(thesis.composite_score)
@@ -1870,6 +1976,8 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
         "buys":  strong_buys[:buy_limit],
         "sells": strong_sells[:sell_limit],
         "scored_by": "multi-agent",
+        "regime": regime,
+        "min_positive_agents": min_positive_agents,
     }
 
 
@@ -5386,7 +5494,17 @@ async def _build_recommendations(progress: Optional[callable] = None):
     _tick("build_recommendations", "Ranking buy and sell opportunities…", build_done, build_total)
     buys = []
     remaining_cash = paper_cash
+
+    # Phase 2: regime gate. SPY below 200-DMA or VIX > 25 → no new BUYs.
+    # SELL recommendations still produced — risk-off is a reason to trim, not freeze.
+    regime = await get_market_regime()
+    allow_buys = regime.get("ok", True)
+    if not allow_buys:
+        logger.info("[recommendations] BUYs suppressed by regime gate: %s", regime.get("reason"))
+
     for pred in latest_preds:
+        if not allow_buys:
+            break
         ticker      = pred["ticker"]
         predicted   = pred.get("predicted_pct") or 0
         direction   = pred.get("direction") or prediction_direction(predicted)
@@ -5717,7 +5835,10 @@ async def _build_recommendations(progress: Optional[callable] = None):
     stage_started = datetime.now(timezone.utc)
     _tick("finalize", "Finalizing recommendation set…", 1, 1)
     explanation = None
-    if not buys and not sells:
+    if not allow_buys and not buys:
+        # Regime-blocked: explain why even if sells are present
+        explanation = f"BUYs blocked — {regime.get('reason', 'market regime risk-off')}"
+    elif not buys and not sells:
         if remaining_cash < 500:
             explanation = "No buy signals: available paper cash is below £500 minimum allocation."
         elif latest_preds:
@@ -5730,6 +5851,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
         "sells":           sells,
         "prediction_date": latest_date,
         "explanation":     explanation,
+        "regime":          regime,
         "summary": {
             "initial_float":         PAPER_INITIAL_FLOAT,
             "target":                target,
