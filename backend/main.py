@@ -1702,11 +1702,14 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
     sell_max_score       = min(50, int(_s.get("alert_sell_max_score") or os.getenv("ALERT_SELL_MAX_SCORE", "42")))
     initial_float        = float(_s.get("initial_float") or 100_000.0)
 
-    # Load watchlist (buy candidates) and owned positions (sell candidates)
-    watchlist       = load_watchlist()  # list of ticker strings
-    buy_tickers     = [t for t in watchlist if isinstance(t, str) and t]
-    owned_positions = {t: pos for t, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0}
-    sell_tickers    = list(owned_positions.keys())
+    # Load watchlist (buy candidates) and owned positions (sell candidates).
+    # Phase 1: unify with paper portfolio so the same ticker cannot appear as
+    # BUY here (watchlist-driven) and SELL in the Signals tab (paper-driven).
+    watchlist        = load_watchlist()  # list of ticker strings
+    buy_tickers      = [t for t in watchlist if isinstance(t, str) and t]
+    owned_positions  = {t: pos for t, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0}
+    paper_held_alert = {t for t, p in compute_positions(load_paper_portfolio()).items() if p.get("shares", 0) > 0}
+    sell_tickers     = list(owned_positions.keys())
 
     all_tickers = list(dict.fromkeys(buy_tickers + sell_tickers))  # deduplicated, order preserved
     if not all_tickers:
@@ -1732,8 +1735,8 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
     # ── BUY candidates — watchlist tickers not already owned ──────────────────
     strong_buys = []
     for ticker in buy_tickers:
-        if ticker in owned_positions:
-            continue  # already held — skip buy signal
+        if ticker in owned_positions or ticker in paper_held_alert:
+            continue  # already held in real or paper portfolio — skip buy signal
         thesis = thesis_map.get(ticker)
         if not thesis:
             continue
@@ -1748,8 +1751,8 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
 
         if composite < strong_buy_min_score:
             continue
-        if projected_12m < 8 and projected_6m < 5:
-            continue  # agents agree but upside is too thin
+        if projected_12m < 12 and projected_6m < 7:
+            continue  # Phase 1: tighten upside floor — agents agree but reward too thin
 
         # Position sizing: scale allocation 5-15% of float by composite score
         alloc_pct   = 0.05 + (composite - strong_buy_min_score) / (100 - strong_buy_min_score) * 0.10
@@ -5398,17 +5401,18 @@ async def _build_recommendations(progress: Optional[callable] = None):
         if ticker in paper_held:
             continue
 
-        # Skip if recently sold (7-day cooldown) to prevent immediate re-buy churn
+        # Phase 1: 21-day cooldown after a sell to prevent buy/sell churn.
+        # Fail closed — any timestamp parse error keeps the cooldown active.
         last_sell_ts = last_sell_timestamp.get(ticker)
         if last_sell_ts:
             try:
-                if (datetime.utcnow() - datetime.fromisoformat(last_sell_ts)).days < 7:
+                if (datetime.utcnow() - datetime.fromisoformat(last_sell_ts)).days < 21:
                     continue
-            except ValueError:
-                pass
+            except Exception:
+                continue
 
-        allow_low_conf_buy = confidence == "low" and signal_score >= 68
-        if direction != "bullish" or signal_score < 60 or (confidence == "low" and not allow_low_conf_buy) or remaining_cash < 500:
+        # Phase 1: raise BUY floor — composite ≥ 70, drop low-confidence back-door
+        if direction != "bullish" or signal_score < 70 or confidence == "low" or remaining_cash < 500:
             continue
 
         current_price = price_map.get(ticker, 0)
@@ -5489,64 +5493,9 @@ async def _build_recommendations(progress: Optional[callable] = None):
 
     buys.sort(key=lambda x: x["score"], reverse=True)
 
-    if not buys and remaining_cash >= 500:
-        fallback_candidates = []
-        for pred in latest_preds:
-            if pred["ticker"] in paper_held:
-                continue
-            last_sell_ts = last_sell_timestamp.get(pred["ticker"])
-            if last_sell_ts:
-                try:
-                    if (datetime.utcnow() - datetime.fromisoformat(last_sell_ts)).days < 7:
-                        continue
-                except ValueError:
-                    pass
-            if pred.get("direction") != "bullish":
-                continue
-            signal_score = pred.get("score") or 50
-            if signal_score < 57:
-                continue
-            current_price = (
-                price_map.get(pred["ticker"], 0)
-                or pred.get("price_at_prediction")
-                or _price_from_info(info_map.get(pred["ticker"]))
-                or 0
-            )
-            if not current_price:
-                continue
-            fallback_candidates.append((signal_score, pred, current_price))
-
-        for _, pred, current_price in sorted(
-            fallback_candidates,
-            key=lambda item: (item[0], item[1].get("predicted_pct") or 0),
-            reverse=True,
-        )[:5]:
-            qty = int(min(remaining_cash * 0.04, PAPER_INITIAL_FLOAT * 0.08) / current_price)
-            if qty < 1:
-                continue
-            estimated_cost = round(qty * current_price, 2)
-            if estimated_cost > remaining_cash or estimated_cost <= 0:
-                continue
-            buys.append({
-                "ticker":         pred["ticker"],
-                "name":           pred.get("name", pred["ticker"]),
-                "action":         "BUY",
-                "trigger":        "TOP PICK",
-                "current_price":  round(current_price, 2),
-                "qty":            qty,
-                "estimated_cost": estimated_cost,
-                "direction":      pred.get("direction"),
-                "score_value":    pred.get("score"),
-                "predicted_pct":  pred.get("predicted_pct"),
-                "confidence":     pred.get("confidence", "low"),
-                "accuracy_pct":   calibration.get(pred["ticker"], {}).get("accuracy_pct"),
-                "reasoning":      pred.get("reasoning") or "Best available bullish candidate from the latest model snapshot.",
-                "score":          round((pred.get("score") or 50) * 0.85, 4),
-            })
-            remaining_cash = max(0.0, remaining_cash - estimated_cost)
-            if remaining_cash < 500:
-                break
-        buys.sort(key=lambda x: x["score"], reverse=True)
+    # Phase 1: TOP PICK fallback removed. Sitting in cash when no signal passes
+    # the floor is the correct action, not a failure mode to paper over with a
+    # relaxed-threshold candidate.
 
     # ── SELL recommendations (from paper portfolio holdings) ────────────────
     sells = []
@@ -5581,15 +5530,42 @@ async def _build_recommendations(progress: Optional[callable] = None):
         )
 
         # ── Priority 1: hard risk controls ──────────────────────────────────
-        if unrealised_pct <= -5.0:
+        # Phase 1: vol-scaled stop replaces fixed -5%. Daily-vol-driven so high-vol
+        # names aren't shaken out by normal noise; floored at -8%, capped at -15%.
+        ann_vol_pos = float((pred.get("annualised_vol_pct") if pred else None) or 30.0)
+        daily_vol   = ann_vol_pos / math.sqrt(252)
+        stop_pct    = max(-15.0, min(-8.0, -2.5 * daily_vol))
+        if unrealised_pct <= stop_pct:
             trigger   = "STOP LOSS"
-            reasoning = f"Position down {unrealised_pct:.1f}% — stop loss triggered to protect capital."
-        elif unrealised_pct >= 8.0:
-            trigger   = "TAKE PROFIT"
-            reasoning = f"Position up {unrealised_pct:.1f}% — take profit target reached."
+            reasoning = (f"Position down {unrealised_pct:.1f}% — vol-scaled stop at "
+                         f"{stop_pct:.1f}% (daily vol {daily_vol:.1f}%) hit.")
+        # Phase 1: fixed +8% TAKE PROFIT removed. Replaced by THESIS FLIPPED + TRAIL
+        # STOP below — winners are held until the thesis turns or price falls 8%
+        # off the recent peak, aligning sell timing with the 12-month forecast.
         elif pred and (pred.get("direction") or prediction_direction(pred.get("predicted_pct"))) == "bearish" and (pred.get("score") or prediction_score(pred.get("predicted_pct"), pred.get("confidence", "medium")) or 50) <= 45 and pred.get("confidence") in ("high", "medium"):
             trigger   = "PREDICTION"
             reasoning = pred.get("reasoning", "")
+
+        # Phase 1: THESIS FLIPPED — composite signal turned weak even though price
+        # hasn't broken the stop yet. Catches deteriorating fundamentals early.
+        if not trigger and pred:
+            composite_now = float((pred.get("factor_scores") or {}).get("composite") or 50.0)
+            if composite_now < 55 and unrealised_pct > stop_pct:
+                trigger   = "THESIS FLIPPED"
+                reasoning = (f"Composite factor score dropped to {composite_now:.0f}/100 — "
+                             f"the thesis that supported entry has weakened.")
+
+        # Phase 1: TRAIL STOP — protect gains without capping them at +8%. Uses
+        # the 30-day high already fetched into hist_map for held positions.
+        if not trigger:
+            hist = hist_map.get(ticker)
+            if hist is not None and len(hist) >= 5 and unrealised_pct > 2.0:
+                peak_30d = float(hist["High"].max())
+                if peak_30d > 0 and current_price < peak_30d * 0.92:
+                    drawdown_pct = (current_price / peak_30d - 1) * 100
+                    trigger   = "TRAIL STOP"
+                    reasoning = (f"Price {drawdown_pct:.1f}% off 30-day peak £{peak_30d:.2f} — "
+                                 f"trailing stop locks in {unrealised_pct:+.1f}% gain.")
 
         # ── Priority 2: technical & fundamental signals ──────────────────────
         if not trigger and recent_buy_cooldown and latest_bullish:
