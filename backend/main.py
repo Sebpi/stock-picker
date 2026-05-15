@@ -467,6 +467,11 @@ def load_settings() -> dict:
         "regime_vix_max": 25.0,
         # Phase 2: require this many of 9 agents to be net-positive before BUY
         "alert_min_positive_agents": 5,
+        # Phase 3: portfolio-relative sizing + risk budget caps
+        "target_positions_count": 10,      # ~1/N_target base weight per name
+        "position_max_pct": 0.12,          # max 12% of portfolio in any one name
+        "sector_max_pct": 0.30,            # max 30% of portfolio in any one sector
+        "portfolio_var_max_pct": 0.08,     # max 8% portfolio 95% 1-month VaR
     }
     if SETTINGS_FILE.exists():
         try:
@@ -5502,6 +5507,40 @@ async def _build_recommendations(progress: Optional[callable] = None):
     if not allow_buys:
         logger.info("[recommendations] BUYs suppressed by regime gate: %s", regime.get("reason"))
 
+    # ── Phase 3: portfolio-relative sizing context ──────────────────────────
+    # Computed once before the loop, then mutated as buys are approved so each
+    # candidate sees the running sector/VaR state, not just the starting state.
+    N_target          = max(4, int(settings.get("target_positions_count", 10)))
+    position_max_pct  = float(settings.get("position_max_pct", 0.12))
+    sector_max_pct    = float(settings.get("sector_max_pct", 0.30))
+    portfolio_var_max = float(settings.get("portfolio_var_max_pct", 0.08))
+    # Use max(paper_total_value, PAPER_INITIAL_FLOAT) so an empty portfolio
+    # still gets meaningfully-sized buys (not starved by tiny initial value).
+    base_portfolio_value = max(paper_total_value, PAPER_INITIAL_FLOAT)
+
+    # 95% one-tailed normal; convert annual vol → monthly via /sqrt(12)
+    VAR_Z_95          = 1.645
+    MONTH_VOL_FACTOR  = 1.0 / math.sqrt(12.0)
+
+    # Sector exposure of currently-held paper positions (running tally)
+    sector_exposure: dict[str, float] = {}
+    existing_var_sq = 0.0  # sum of squared individual VaRs (uncorrelated assumption)
+    for t in paper_held:
+        pos = paper_positions.get(t, {})
+        shares = float(pos.get("shares", 0))
+        px = float(price_map.get(t) or pos.get("avg_cost") or 0)
+        value = shares * px
+        if value <= 0:
+            continue
+        sec = ((info_map.get(t) or {}).get("sector")) or "Unknown"
+        sector_exposure[sec] = sector_exposure.get(sec, 0.0) + value
+        held_pred = next((p for p in latest_preds if p["ticker"] == t), None)
+        held_vol = float((held_pred or {}).get("annualised_vol_pct") or 30.0)
+        ind_var = VAR_Z_95 * (held_vol / 100.0) * MONTH_VOL_FACTOR * value
+        existing_var_sq += ind_var ** 2
+
+    var_budget = portfolio_var_max * base_portfolio_value
+
     for pred in latest_preds:
         if not allow_buys:
             break
@@ -5557,27 +5596,58 @@ async def _build_recommendations(progress: Optional[callable] = None):
         if mos_pct is not None and mos_pct < -30:
             continue  # DCF says massively overvalued
 
-        alloc_pct = 0.15 if confidence == "high" else 0.08
-        if confidence == "low":
-            alloc_pct = 0.05
-        accuracy_bonus = max(0, (accuracy - 0.5) * 0.4)
-        alloc_pct = min(alloc_pct * (1 + accuracy_bonus), 0.20)
+        # ── Phase 3: portfolio-relative sizing with sector + VaR caps ──────
+        # Replaces cash-relative allocation (which starved late buys). Target
+        # weight ≈ 1/N_target × conviction × confidence × vol_adj, clipped by
+        # per-position, per-sector, and portfolio-VaR limits in that order.
+        sec = ((info_map.get(ticker) or {}).get("sector")) or "Unknown"
 
-        # Risk-adjust position size: high-volatility stocks get smaller allocations
-        vol_adj = 30.0 / max(30.0, float(vol_pct))
-        alloc_pct = alloc_pct * vol_adj
+        # Conviction factor 0.7–1.0 based on signal_score above the BUY floor (70).
+        edge       = max(0.0, min(1.0, (signal_score - 70) / 30.0))
+        conviction = 0.7 + 0.3 * edge
+        conf_factor = 1.0 if confidence == "high" else 0.75
+        # Vol-adjust: bidirectional. Low-vol names earn up to +30%, high-vol cut to -50%.
+        vol_pct_clipped = max(15.0, min(60.0, float(vol_pct)))
+        vol_adj = max(0.5, min(1.3, 30.0 / vol_pct_clipped))
 
-        position_value = min(remaining_cash * alloc_pct, PAPER_INITIAL_FLOAT * 0.15)
+        target_weight = (1.0 / N_target) * conviction * conf_factor * vol_adj
+        target_weight = min(target_weight, position_max_pct)
+        position_value = target_weight * base_portfolio_value
+
+        # Sector cap — running tally including buys approved earlier in this loop.
+        sector_headroom = max(0.0, sector_max_pct * base_portfolio_value - sector_exposure.get(sec, 0.0))
+        if sector_headroom <= 0:
+            continue
+        position_value = min(position_value, sector_headroom)
+
+        # Portfolio VaR cap (95% 1-month parametric, uncorrelated assumption).
+        monthly_vol = (float(vol_pct) / 100.0) * MONTH_VOL_FACTOR
+        if monthly_vol > 0:
+            new_var = VAR_Z_95 * monthly_vol * position_value
+            projected_var = math.sqrt(existing_var_sq + new_var ** 2)
+            if projected_var > var_budget:
+                headroom_var_sq = max(0.0, var_budget ** 2 - existing_var_sq)
+                if headroom_var_sq <= 0:
+                    continue  # no VaR budget left
+                max_ind_var    = math.sqrt(headroom_var_sq)
+                position_value = max_ind_var / (VAR_Z_95 * monthly_vol)
+
+        # Cash cap (always last)
+        position_value = min(position_value, remaining_cash)
         qty = int(position_value / current_price)
         if qty < 1:
             continue
-
         estimated_cost = round(qty * current_price, 2)
         if estimated_cost > remaining_cash:
             qty = int(remaining_cash / current_price)
             if qty < 1:
                 continue
             estimated_cost = round(qty * current_price, 2)
+
+        # Update running trackers AFTER size is finalised
+        sector_exposure[sec] = sector_exposure.get(sec, 0.0) + estimated_cost
+        actual_var = VAR_Z_95 * monthly_vol * estimated_cost if monthly_vol > 0 else 0.0
+        existing_var_sq += actual_var ** 2
 
         # Factor-boosted score: composite 70 → +35%, composite 30 → -35%
         factor_boost = 1 + (composite - 50) / 200
@@ -5601,6 +5671,11 @@ async def _build_recommendations(progress: Optional[callable] = None):
             "factor_scores":  factors,
             "dcf":            dcf_data if dcf_data else None,
             "annualised_vol_pct": round(vol_pct, 1),
+            # Phase 3: sizing metadata for the UI to surface
+            "sector":              sec,
+            "target_weight_pct":   round(target_weight * 100, 2),
+            "actual_weight_pct":   round((estimated_cost / base_portfolio_value) * 100, 2) if base_portfolio_value > 0 else 0.0,
+            "var_contribution_pct": round((actual_var / base_portfolio_value) * 100, 3) if base_portfolio_value > 0 else 0.0,
         })
         remaining_cash = max(0.0, remaining_cash - estimated_cost)
         build_done += 1
@@ -5846,12 +5921,29 @@ async def _build_recommendations(progress: Optional[callable] = None):
         else:
             explanation = "No actionable signals available."
 
+    # Phase 3: aggregate risk view for the UI
+    total_portfolio_var = math.sqrt(existing_var_sq) if existing_var_sq > 0 else 0.0
+    sector_breakdown = {
+        s: round(v / base_portfolio_value * 100, 2)
+        for s, v in sorted(sector_exposure.items(), key=lambda x: -x[1])
+    } if base_portfolio_value > 0 else {}
+
     result = {
         "buys":            buys,
         "sells":           sells,
         "prediction_date": latest_date,
         "explanation":     explanation,
         "regime":          regime,
+        "portfolio_risk": {
+            "base_portfolio_value":      round(base_portfolio_value, 2),
+            "target_positions_count":    N_target,
+            "position_max_pct":          round(position_max_pct * 100, 1),
+            "sector_max_pct":            round(sector_max_pct * 100, 1),
+            "portfolio_var_max_pct":     round(portfolio_var_max * 100, 2),
+            "projected_portfolio_var":   round(total_portfolio_var, 2),
+            "projected_var_pct":         round(total_portfolio_var / base_portfolio_value * 100, 2) if base_portfolio_value > 0 else 0.0,
+            "sector_exposure_pct":       sector_breakdown,
+        },
         "summary": {
             "initial_float":         PAPER_INITIAL_FLOAT,
             "target":                target,
