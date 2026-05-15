@@ -567,6 +567,64 @@ async def get_market_regime() -> dict:
     return result
 
 
+# Phase 5: portfolio trajectory math. Probability the portfolio hits target
+# value by the deadline, under a normal-return approximation. Inputs:
+#   v0       — current portfolio value (£)
+#   target   — target value (£)
+#   months   — months to deadline
+#   weights  — list of (weight, annual_return_pct, annual_vol_pct) tuples for
+#              each position currently held (or proposed). Weights are relative
+#              to v0; sum need not equal 1 (the remainder is treated as cash:
+#              zero return, zero vol).
+# Output: probability in [0, 1]. Uses lognormal-ish drift on linear returns.
+def _p_hit_target(v0: float, target: float, months: float,
+                  weights: list[tuple[float, float, float]]) -> float:
+    if v0 <= 0 or months <= 0:
+        return 0.0
+    if target <= v0:
+        return 1.0  # already there
+    horizon_yrs = months / 12.0
+
+    # Portfolio drift = sum(w_i × r_i) over the horizon (linear approx).
+    invested_weight = sum(w for w, _, _ in weights)
+    mu = sum(w * (r / 100.0) for w, r, _ in weights) * horizon_yrs
+
+    # Portfolio variance (uncorrelated assumption — consistent with Phase 3 VaR).
+    var_total = sum((w ** 2) * ((v / 100.0) ** 2) for w, _, v in weights) * horizon_yrs
+    sigma = math.sqrt(max(var_total, 1e-9))
+
+    if sigma <= 0:
+        # Pure cash — P depends only on whether μ alone gets there
+        return 1.0 if (1.0 + mu) * v0 >= target else 0.0
+
+    # P(final/v0 ≥ target/v0) under Normal(1+μ, σ)
+    z = (target / v0 - (1.0 + mu)) / sigma
+    # 1 - Φ(z) using erf
+    return float(0.5 * (1.0 - math.erf(z / math.sqrt(2.0))))
+
+
+# Convert a prediction's signal_score + horizon into an annualised expected
+# return estimate suitable for _p_hit_target. Mirrors orchestrator's
+# SCORE_TO_12M_RETURN anchors but is purely a Signals-tab approximation since
+# this engine doesn't call the orchestrator.
+def _expected_return_from_score(signal_score: float, confidence: str) -> float:
+    """Annualised expected return % given a signal score and confidence."""
+    if signal_score is None:
+        return 0.0
+    # Anchor table (same intent as orchestrator.SCORE_TO_12M_RETURN, simplified)
+    anchors = [(0, -30.0), (50, -2.0), (60, 4.0), (70, 10.0), (80, 18.0), (100, 28.0)]
+    s = max(0.0, min(100.0, float(signal_score)))
+    base = anchors[-1][1]
+    for (s0, r0), (s1, r1) in zip(anchors, anchors[1:]):
+        if s0 <= s <= s1:
+            frac = (s - s0) / (s1 - s0) if s1 > s0 else 0.0
+            base = r0 + frac * (r1 - r0)
+            break
+    # Confidence multiplier: low=0.6, medium=0.8, high=1.0 (matches calibration logic)
+    conf_mult = {"high": 1.0, "medium": 0.8, "low": 0.6}.get(confidence, 0.8)
+    return base * conf_mult
+
+
 SP500_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "JNJ",
     "V", "PG", "UNH", "HD", "MA", "MRK", "ABBV", "CVX", "LLY", "PEP",
@@ -5507,6 +5565,51 @@ async def _build_recommendations(progress: Optional[callable] = None):
     if not allow_buys:
         logger.info("[recommendations] BUYs suppressed by regime gate: %s", regime.get("reason"))
 
+    # Phase 5: portfolio trajectory baseline (current holdings, no new buys).
+    # Used for the "current trajectory" banner and as the floor against which
+    # each candidate buy's P(hit) improvement is shown.
+    current_weights: list[tuple[float, float, float]] = []
+    portfolio_value_for_traj = max(paper_total_value, PAPER_INITIAL_FLOAT)
+    for t in paper_held:
+        pos = paper_positions.get(t, {})
+        px  = float(price_map.get(t) or pos.get("avg_cost") or 0)
+        val = float(pos.get("shares", 0)) * px
+        if val <= 0:
+            continue
+        held_pred = next((p for p in latest_preds if p["ticker"] == t), None)
+        h_score = (held_pred or {}).get("score") or 50
+        h_conf  = (held_pred or {}).get("confidence") or "medium"
+        h_vol   = float((held_pred or {}).get("annualised_vol_pct") or 30.0)
+        current_weights.append((
+            val / portfolio_value_for_traj,
+            _expected_return_from_score(h_score, h_conf),
+            h_vol,
+        ))
+    p_hit_current = _p_hit_target(
+        portfolio_value_for_traj, target, target_months, current_weights
+    )
+
+    # Phase 5: cross-engine consistency. Use the cached alert snapshot to
+    # decide whether the multi-agent thesis agrees with the Signals-engine
+    # recommendation. Avoids paying per-Signals-call Claude cost.
+    alert_data       = recommendation_alert_snapshot.get("data") or {}
+    alert_generated  = recommendation_alert_snapshot.get("generated_at")
+    alert_buy_tickers  = {b.get("ticker") for b in (alert_data.get("buys")  or [])}
+    alert_sell_tickers = {s.get("ticker") for s in (alert_data.get("sells") or [])}
+    snapshot_age_hr = None
+    if isinstance(alert_generated, datetime):
+        snapshot_age_hr = (datetime.now(timezone.utc) - alert_generated).total_seconds() / 3600
+
+    def _consistency_for(ticker: str) -> dict:
+        # No snapshot, or it's stale (>24h) — can't make a claim
+        if not alert_data or snapshot_age_hr is None or snapshot_age_hr > 24:
+            return {"badge": "stale", "label": "Cross-check stale"}
+        if ticker in alert_sell_tickers:
+            return {"badge": "contradiction", "label": "Agents say SELL"}
+        if ticker in alert_buy_tickers:
+            return {"badge": "agree", "label": "Agents agree BUY"}
+        return {"badge": "no_thesis", "label": "No agent thesis"}
+
     # ── Phase 3: portfolio-relative sizing context ──────────────────────────
     # Computed once before the loop, then mutated as buys are approved so each
     # candidate sees the running sector/VaR state, not just the starting state.
@@ -5653,6 +5756,23 @@ async def _build_recommendations(progress: Optional[callable] = None):
         factor_boost = 1 + (composite - 50) / 200
         score = signal_score * accuracy * (1.15 if confidence == "high" else 1.0) * factor_boost
 
+        # Phase 5: incremental impact of accepting THIS buy.
+        # Expected £ contribution = position × expected_annualised_return × (months/12).
+        annual_r = _expected_return_from_score(signal_score, confidence)
+        delta_to_target_gbp = estimated_cost * (annual_r / 100.0) * (target_months / 12.0)
+        target_gap = max(1.0, target - portfolio_value_for_traj)
+        delta_to_target_pct_of_gap = (delta_to_target_gbp / target_gap) * 100.0
+
+        # P(hit target) if this buy is accepted (existing holdings + this one)
+        weights_with_buy = list(current_weights) + [(
+            estimated_cost / portfolio_value_for_traj,
+            annual_r,
+            vol_pct,
+        )]
+        p_hit_with_this = _p_hit_target(
+            portfolio_value_for_traj, target, target_months, weights_with_buy
+        )
+
         buys.append({
             "ticker":         ticker,
             "name":           pred.get("name", ticker),
@@ -5676,6 +5796,13 @@ async def _build_recommendations(progress: Optional[callable] = None):
             "target_weight_pct":   round(target_weight * 100, 2),
             "actual_weight_pct":   round((estimated_cost / base_portfolio_value) * 100, 2) if base_portfolio_value > 0 else 0.0,
             "var_contribution_pct": round((actual_var / base_portfolio_value) * 100, 3) if base_portfolio_value > 0 else 0.0,
+            # Phase 5: target-impact and cross-check
+            "expected_annual_return_pct": round(annual_r, 1),
+            "delta_to_target_gbp":        round(delta_to_target_gbp, 2),
+            "delta_to_target_pct_of_gap": round(delta_to_target_pct_of_gap, 1),
+            "p_hit_target_with_this":     round(p_hit_with_this, 4),
+            "p_hit_target_delta":         round(p_hit_with_this - p_hit_current, 4),
+            "consistency":                _consistency_for(ticker),
         })
         remaining_cash = max(0.0, remaining_cash - estimated_cost)
         build_done += 1
@@ -5921,6 +6048,28 @@ async def _build_recommendations(progress: Optional[callable] = None):
         else:
             explanation = "No actionable signals available."
 
+    # Phase 5: portfolio-wide trajectory snapshot.
+    # p_hit_target_if_all_buys = probability the portfolio reaches target if
+    # every BUY in this response is accepted. p_hit_target_current is the
+    # baseline before any new buys.
+    weights_after_all_buys = list(current_weights) + [(
+        b["estimated_cost"] / portfolio_value_for_traj,
+        b["expected_annual_return_pct"],
+        b["annualised_vol_pct"],
+    ) for b in buys]
+    p_hit_with_all_buys = _p_hit_target(
+        portfolio_value_for_traj, target, target_months, weights_after_all_buys
+    )
+    trajectory = {
+        "p_hit_target_current":      round(p_hit_current, 4),
+        "p_hit_target_if_all_buys":  round(p_hit_with_all_buys, 4),
+        "p_hit_target_delta":        round(p_hit_with_all_buys - p_hit_current, 4),
+        "portfolio_value_for_calc":  round(portfolio_value_for_traj, 2),
+        "target":                    target,
+        "target_months":             target_months,
+        "alert_snapshot_age_hours":  round(snapshot_age_hr, 1) if snapshot_age_hr is not None else None,
+    }
+
     # Phase 3: aggregate risk view for the UI
     total_portfolio_var = math.sqrt(existing_var_sq) if existing_var_sq > 0 else 0.0
     sector_breakdown = {
@@ -5934,6 +6083,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
         "prediction_date": latest_date,
         "explanation":     explanation,
         "regime":          regime,
+        "trajectory":      trajectory,
         "portfolio_risk": {
             "base_portfolio_value":      round(base_portfolio_value, 2),
             "target_positions_count":    N_target,

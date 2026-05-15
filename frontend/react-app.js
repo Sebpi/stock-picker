@@ -2117,6 +2117,31 @@
           h(ProgressBar, { value: s.progress_pct || 0, color: s.progress_pct >= 100 ? "bg-pulse-green" : "bg-pulse-cyan" })
         )
       ) : null,
+      // Phase 5: portfolio trajectory banner — honest answer to "will this plan hit target?"
+      data?.trajectory ? h(Card, { className: "mb-4 p-4 border-pulse-cyan/20" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Trajectory to target"),
+        h("div", { className: "mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3" },
+          h(Metric, {
+            label: "P(hit target) now",
+            value: `${Math.round((data.trajectory.p_hit_target_current || 0) * 100)}%`,
+            tone: (data.trajectory.p_hit_target_current || 0) >= 0.5 ? "positive" : "negative",
+          }),
+          h(Metric, {
+            label: "If all buys accepted",
+            value: `${Math.round((data.trajectory.p_hit_target_if_all_buys || 0) * 100)}%`,
+            tone: (data.trajectory.p_hit_target_if_all_buys || 0) >= 0.5 ? "positive" : "negative",
+          }),
+          h(Metric, {
+            label: "Δ from buys",
+            value: `${(data.trajectory.p_hit_target_delta || 0) >= 0 ? "+" : ""}${Math.round((data.trajectory.p_hit_target_delta || 0) * 100)}pp`,
+            tone: deltaTone(data.trajectory.p_hit_target_delta || 0),
+          })
+        ),
+        h("div", { className: "mt-2 text-[11px] text-pulse-muted" },
+          data.trajectory.alert_snapshot_age_hours != null
+            ? `Cross-check snapshot ${data.trajectory.alert_snapshot_age_hours.toFixed(1)}h old`
+            : "Cross-check snapshot unavailable — run Alerts to populate")
+      ) : null,
       sells.length ? h(Card, { className: "mb-4 p-4 border-pulse-red/30" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-red" }, "⚠ Sell signals"),
         h("div", { className: "mt-3 overflow-x-auto" },
@@ -2143,20 +2168,38 @@
         h("div", { className: "mt-3 overflow-x-auto" },
           h("table", { className: "min-w-full text-sm" },
             h("thead", { className: "bg-pulse-panel font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
-              h("tr", null, ["#","Ticker","Confidence","Accuracy","Predicted","Price","Qty","Est. Cost","",""].map(x => h("th", { key: x, className: "px-3 py-2 text-left" }, x)))
+              h("tr", null, ["#","Ticker","Confidence","Cross-check","Δ Target","P(hit) Δ","Price","Qty","Est. Cost","",""].map(x => h("th", { key: x, className: "px-3 py-2 text-left" }, x)))
             ),
-            h("tbody", null, buys.map((b, i) => h("tr", { key: i, className: "border-t border-pulse-line/60" },
-              h("td", { className: "px-3 py-2 text-pulse-muted" }, "#" + (i + 1)),
-              h("td", { className: "px-3 py-2" }, h("strong", { className: "font-mono text-pulse-cyan" }, b.ticker), h("div", { className: "text-xs text-pulse-muted" }, b.name), h("div", { className: "mt-1" }, h(FactorCluster, { scores: b.factor_scores || {} }))),
-              h("td", { className: "px-3 py-2" }, h(ConfidencePill, { value: b.confidence })),
-              h("td", { className: "px-3 py-2 font-mono" }, b.accuracy_pct != null ? `${b.accuracy_pct}%` : "—"),
-              h("td", { className: "px-3 py-2 font-mono" }, b.score_value != null ? `${b.score_value}/100` : "—"),
-              h("td", { className: "px-3 py-2 font-mono" }, fmtGbp(b.current_price, 2)),
-              h("td", { className: "px-3 py-2 font-mono" }, b.qty),
-              h("td", { className: "px-3 py-2 font-mono" }, fmtGbp(b.estimated_cost, 0)),
-              h("td", { className: "px-3 py-2" }, h(Button, { onClick: () => setReasoning(Object.assign({ type: "Buy" }, b)), className: "min-h-8 px-2 text-xs" }, "View")),
-              h("td", { className: "px-3 py-2" }, h(Button, { onClick: () => paperTrade("buy", b), className: "min-h-8 px-2 text-xs", kind: "primary" }, "+ Paper Buy"))
-            )))
+            h("tbody", null, buys.map((b, i) => {
+              // Phase 5: consistency badge tone
+              const cc = b.consistency || { badge: "stale", label: "—" };
+              const ccClass = cc.badge === "agree"        ? "border-pulse-green/30 bg-pulse-green/10 text-pulse-green"
+                            : cc.badge === "contradiction" ? "border-pulse-red/30 bg-pulse-red/10 text-pulse-red"
+                            : cc.badge === "no_thesis"     ? "border-pulse-amber/30 bg-pulse-amber/10 text-pulse-amber"
+                            :                                "border-pulse-line/40 bg-pulse-panel text-pulse-dim";
+              const dGbp = b.delta_to_target_gbp;
+              const dPct = b.delta_to_target_pct_of_gap;
+              const pDelta = b.p_hit_target_delta || 0;
+              return h("tr", { key: i, className: "border-t border-pulse-line/60" },
+                h("td", { className: "px-3 py-2 text-pulse-muted" }, "#" + (i + 1)),
+                h("td", { className: "px-3 py-2" }, h("strong", { className: "font-mono text-pulse-cyan" }, b.ticker), h("div", { className: "text-xs text-pulse-muted" }, b.name), h("div", { className: "mt-1" }, h(FactorCluster, { scores: b.factor_scores || {} }))),
+                h("td", { className: "px-3 py-2" }, h(ConfidencePill, { value: b.confidence })),
+                h("td", { className: "px-3 py-2" }, h(Pill, { className: ccClass }, cc.label)),
+                h("td", { className: cx("px-3 py-2 font-mono", deltaTone(dGbp)) },
+                  dGbp != null ? fmtGbp(dGbp, 0) : "—",
+                  dPct != null ? h("div", { className: "text-[10px] text-pulse-muted" }, `${dPct >= 0 ? "+" : ""}${dPct.toFixed(1)}% of gap`) : null
+                ),
+                h("td", { className: cx("px-3 py-2 font-mono", deltaTone(pDelta)) },
+                  `${pDelta >= 0 ? "+" : ""}${Math.round(pDelta * 100)}pp`,
+                  h("div", { className: "text-[10px] text-pulse-muted" }, `→ ${Math.round((b.p_hit_target_with_this || 0) * 100)}%`)
+                ),
+                h("td", { className: "px-3 py-2 font-mono" }, fmtGbp(b.current_price, 2)),
+                h("td", { className: "px-3 py-2 font-mono" }, b.qty),
+                h("td", { className: "px-3 py-2 font-mono" }, fmtGbp(b.estimated_cost, 0)),
+                h("td", { className: "px-3 py-2" }, h(Button, { onClick: () => setReasoning(Object.assign({ type: "Buy" }, b)), className: "min-h-8 px-2 text-xs" }, "View")),
+                h("td", { className: "px-3 py-2" }, h(Button, { onClick: () => paperTrade("buy", b), className: "min-h-8 px-2 text-xs", kind: "primary" }, "+ Paper Buy"))
+              );
+            }))
           )
         )
       ) : null,
