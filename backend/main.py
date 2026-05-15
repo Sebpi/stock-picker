@@ -6000,6 +6000,69 @@ async def start_recommendations(request: Request):
     return {"job_id": job_id}
 
 
+# Phase 4: backtest harness for Phase 1-3 BUY/SELL rules. See backtest_phase4.py
+# for the simulation; this endpoint is a thin wrapper that wires in current
+# settings and exposes the threshold-sweep + score-curve-refit options.
+@app.get("/api/recommendations/backtest")
+@limiter.limit("10/hour")
+async def recommendations_backtest(
+    request: Request,
+    lookback_days: int = 90,
+    sensitivity: bool = False,
+    refit_curve: bool = False,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Replay Phase 1-3 recommendation rules against historical predictions +
+    yfinance prices. Returns trade ledger, aggregate metrics, and optionally
+    a threshold sweep and refitted SCORE_TO_12M_RETURN suggestion.
+
+    Query params:
+      lookback_days  How far back to start (default 90, max 365).
+      sensitivity    If true, also run a 4×3×3 grid over BUY floor /
+                     stop multiplier / N_target_positions.
+      refit_curve    If true, include a SCORE_TO_12M_RETURN refit suggestion
+                     bucketed by entry_score.
+    """
+    from backtest_phase4 import (
+        refit_score_to_12m_return,
+        run_phase4_backtest,
+        threshold_sensitivity_sweep,
+    )
+
+    lookback_days = max(7, min(365, int(lookback_days)))
+    settings      = load_settings()
+    predictions   = load_predictions()
+
+    result = await run_phase4_backtest(
+        predictions,
+        lookback_days=lookback_days,
+        initial_float=float(settings.get("initial_float", 200_000.0)),
+        buy_floor_score=70,  # current Phase 1 floor
+        stop_multiplier=2.5,
+        n_target_positions=int(settings.get("target_positions_count", 10)),
+        position_max_pct=float(settings.get("position_max_pct", 0.12)),
+        sector_max_pct=float(settings.get("sector_max_pct", 0.30)),
+        portfolio_var_max_pct=float(settings.get("portfolio_var_max_pct", 0.08)),
+        regime_dma_period=int(settings.get("regime_spy_dma_period", 200)),
+        regime_vix_max=float(settings.get("regime_vix_max", 25.0)),
+        regime_check=bool(settings.get("regime_gate_enabled", True)),
+    )
+
+    if sensitivity:
+        result["sensitivity"] = await threshold_sensitivity_sweep(
+            predictions,
+            lookback_days=lookback_days,
+            initial_float=float(settings.get("initial_float", 200_000.0)),
+        )
+
+    if refit_curve:
+        result["score_curve_refit"] = refit_score_to_12m_return(result["trades"])
+
+    logger.info("BACKTEST_PHASE4 user=%s trades=%d", current_user, len(result.get("trades", [])))
+    return result
+
+
 @app.get("/api/recommendations/progress/{job_id}")
 async def get_recommendations_progress(job_id: str):
     job = _recommendation_jobs.get(job_id)
