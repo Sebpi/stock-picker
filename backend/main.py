@@ -2456,8 +2456,11 @@ async def startup():
 
     if _mon_enabled:
         scheduler.add_job(monitor_stocks, "interval", minutes=_mon_interval, id="monitor")
+    # Pass the coroutine function directly — AsyncIOScheduler awaits it on the
+    # app's event loop. Wrapping in a lambda + asyncio.ensure_future fails
+    # because APScheduler's ThreadPoolExecutor has no current event loop.
     scheduler.add_job(
-        lambda: asyncio.ensure_future(_prewarm_universe_cache()),
+        _prewarm_universe_cache,
         "interval", hours=6, id="screener_prewarm", max_instances=1, coalesce=True,
     )
     if _pred_enabled:
