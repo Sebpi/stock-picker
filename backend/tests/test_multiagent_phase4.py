@@ -209,7 +209,7 @@ def test_get_thesis_history_limit_clamp():
         db.get_thesis_history("AAPL", limit=999)
         call_args = mock_cursor.execute.call_args
         # second positional arg tuple should have limit <= 50
-        assert call_args[0][1][1] <= 50
+        assert call_args[0][1][2] <= 50
 
 
 # ---------------------------------------------------------------------------

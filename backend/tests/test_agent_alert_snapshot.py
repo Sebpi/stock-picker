@@ -52,7 +52,11 @@ def _make_thesis(ticker: str, composite: float, base_12m: float, base_6m: float 
         drivers=["Strong revenue growth", "Expanding margins"],
         risks=["Macro headwinds", "Competition"],
         agent_scores={},
-        agent_meta={},
+        agent_meta={
+            a: {"direction": "positive", "usable": True}
+            for a in ("fundamentals", "valuation", "macro_liquidity",
+                      "sentiment_news", "technical_risk", "growth_revisions")
+        },
         weighted_scores={"3m": composite, "6m": composite, "12m": composite},
         narrative=narrative or {"summary": f"{ticker} looks good.", "bear": f"{ticker} has risks."},
         quality_flags=[],
