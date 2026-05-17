@@ -1292,7 +1292,7 @@ def update_thesis_run(run_id: str, status: str | None = None,
     params.append(run_id)
     with get_conn() as conn:
         conn.execute(
-            f"UPDATE thesis_run SET {', '.join(updates)} WHERE run_id = ?",
+            f"UPDATE thesis_run SET {', '.join(updates)} WHERE run_id = ?",  # nosec B608 — column names are internal literals, values parameterised
             params,
         )
 
@@ -1520,7 +1520,7 @@ def get_forecast_outcome_status(ticker: str | None = None) -> dict[str, Any]:
                    evaluated_at, thesis_generated_at
             FROM forecast_outcome
             {where}
-            """,
+            """,  # nosec B608 — where is "" or "WHERE ticker = ?", values parameterised
             params,
         ).fetchall()
 

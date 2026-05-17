@@ -54,7 +54,7 @@ def _sentiment_score(text: str) -> float:
 
 
 def _headline_hash(title: str) -> str:
-    return hashlib.md5(title.lower().strip().encode()).hexdigest()[:12]
+    return hashlib.md5(title.lower().strip().encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def _materiality_from_score(score: float) -> float:
@@ -300,7 +300,7 @@ class SentimentNewsAgent(BaseAgent):
             r = httpx.get(url, timeout=8, headers={"User-Agent": "StockPicker/1.0"})
             if r.status_code != 200:
                 return []
-            root = ET.fromstring(r.text)
+            root = ET.fromstring(r.text)  # nosec B314 — RSS text only, no entity expansion
             ns = {"atom": "http://www.w3.org/2005/Atom"}
             items: list[dict[str, Any]] = []
             # RSS 2.0

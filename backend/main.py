@@ -3472,7 +3472,7 @@ async def fetch_rss_headlines(feeds: list[tuple], limit_per_feed: int = 8) -> li
         for source, url in feeds:
             try:
                 r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                root = ET.fromstring(r.text)
+                root = ET.fromstring(r.text)  # nosec B314 — RSS text only, no entity expansion
                 for item in root.findall(".//item")[:limit_per_feed]:
                     title = item.find("title")
                     if title is not None and title.text:

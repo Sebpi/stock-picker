@@ -131,7 +131,7 @@ def confidence_calibration(ticker: str | None = None) -> dict[str, Any]:
               ON fo.thesis_id = it.thesis_id
             WHERE fo.realised_return_pct IS NOT NULL
             {where}
-            """,
+            """,  # nosec B608 — where is "" or "AND fo.ticker = ?", values parameterised
             params,
         ).fetchall()
 
