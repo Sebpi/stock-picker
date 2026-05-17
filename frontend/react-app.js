@@ -959,7 +959,7 @@
     const accuracy = useMemo(() => computeAccuracy(filtered), [filtered]);
 
     return h("div", null,
-      h(SectionHead, { title: "Predictions", kicker: "Daily ranking", subtitle: "Multi-horizon forecasts with factor scores. Claude analyses macro trends, news and fundamentals.", actions: [
+      h(SectionHead, { title: "Predictions", kicker: "Short-term signals", subtitle: "Short-term signal rankings with factor scores. Claude analyses macro trends, news and fundamentals. For long-term conviction, see the Thesis tab.", actions: [
         h(Button, { key: "refresh", onClick: async () => { await load(); loadLearning(false); }, disabled: busy }, "Refresh actuals"),
         h(Button, { key: "back", onClick: backfill, disabled: busy, title: "Retry factor scores for today's predictions" }, "Backfill factors"),
         h(Button, { key: "rebuild", onClick: rebuildCalibration, disabled: busy || rebuilding, title: "Rebuild the adaptive calibration model" }, rebuilding ? "Rebuilding..." : "Rebuild model"),
@@ -1014,7 +1014,7 @@
             h("tr", null, h("td", { className: "px-3 py-4 text-pulse-muted", colSpan: 14 }, busy ? "Loading..." : "No predictions for this period.")))
         )
       ),
-      selected ? h(SlideOver, { title: `${selected.ticker} prediction`, kicker: "Prediction thesis", onClose: () => setSelected(null) },
+      selected ? h(SlideOver, { title: `${selected.ticker} prediction`, kicker: "Short-term signal", onClose: () => setSelected(null) },
         h("div", { className: "grid gap-4" },
           h("div", { className: "grid grid-cols-2 gap-2 sm:grid-cols-3" },
             h(Metric, { label: "Score", value: selected.score == null ? "—" : `${selected.score}/100`, tone: scoreTone(selected.score) }),
@@ -1332,7 +1332,7 @@
     }
 
     return h("div", null,
-      h(SectionHead, { title: "Agent Thesis", kicker: "8-agent deep dive", subtitle: "Run fresh agents, view dated cached results, compare tickers, and inspect agent operations.", actions: [
+      h(SectionHead, { title: "Agent Thesis", kicker: "Long-term conviction", subtitle: "Long-term conviction analysis from 8 specialist agents — fundamentals, valuation, macro, sentiment, technicals and more. For short-term signal rankings, see the Predictions tab.", actions: [
         h(Button, { key: "ops", onClick: () => openPanel("ops") }, "Operations"),
         h(Button, { key: "eval", onClick: () => openPanel("evaluate") }, "Evaluate"),
         h(Button, { key: "health", onClick: () => openPanel("health") }, "Agent Health"),
