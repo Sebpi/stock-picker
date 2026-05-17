@@ -224,12 +224,21 @@ def _simulate_exit(
 
 # ── Aggregate metrics ────────────────────────────────────────────────────────
 def _aggregate_metrics(trades: list[dict], initial_float: float) -> dict:
-    """Win rate, expectancy, Sharpe, max drawdown — and a sector heatmap."""
+    """Win rate, expectancy, Sharpe, max drawdown — and a sector heatmap.
+
+    The empty-trades branch must populate every key the caller might read —
+    threshold_sensitivity_sweep reads total_return_pct + final_equity directly,
+    and a config that produces zero trades is normal (e.g. buy_floor=80
+    with a thin window). Missing keys → KeyError crash on the whole sweep.
+    """
     if not trades:
         return {
             "trade_count": 0,
             "win_rate": None, "expectancy_pct": None, "expectancy_per_day": None,
+            "avg_hold_days": None,
             "sharpe_annualised": None, "max_drawdown_pct": None,
+            "final_equity": float(initial_float),
+            "total_return_pct": 0.0,
             "by_exit_trigger": {}, "by_sector": {},
         }
 
@@ -296,6 +305,36 @@ def _aggregate_metrics(trades: list[dict], initial_float: float) -> dict:
 
 
 # ── Main harness ─────────────────────────────────────────────────────────────
+async def _prefetch_market_data(
+    in_window: list[dict],
+    start_date: date,
+    window_end: date,
+    regime_dma_period: int,
+) -> tuple[Any, Any, dict, dict]:
+    """Fetch SPY + VIX + every ticker's history & sector once. Returned dicts
+    are safe to pass to multiple run_phase4_backtest calls (sweep reuse).
+    """
+    unique_tickers = sorted({p["ticker"] for p in in_window if p.get("ticker")})
+    logger.info("backtest: fetching history for %d tickers", len(unique_tickers))
+
+    async def _fetch_pack(ticker: str) -> tuple[str, Any, str]:
+        hist, sector = await asyncio.gather(
+            _fetch_ticker_history(ticker, start_date, window_end),
+            _fetch_ticker_sector(ticker),
+        )
+        return ticker, hist, sector
+
+    spy_task = _fetch_ticker_history("SPY", start_date - timedelta(days=regime_dma_period + 30), window_end)
+    vix_task = _fetch_ticker_history("^VIX", start_date - timedelta(days=10), window_end)
+    spy_hist, vix_hist, *packs = await asyncio.gather(
+        spy_task, vix_task, *[_fetch_pack(t) for t in unique_tickers]
+    )
+
+    hist_map:   dict[str, Any] = {t: h for t, h, _ in packs if h is not None}
+    sector_map: dict[str, str] = {t: s for t, _, s in packs}
+    return spy_hist, vix_hist, hist_map, sector_map
+
+
 async def run_phase4_backtest(
     predictions: list[dict],
     *,
@@ -314,6 +353,9 @@ async def run_phase4_backtest(
     regime_dma_period:    int   = 200,
     regime_vix_max:       float = 25.0,
     cooldown_days:        int   = 21,
+    # Prefetched market data — pass these to skip yfinance fetches (used by
+    # the sensitivity sweep so we don't hit the rate-limiter 36× per ticker).
+    _market_cache:        Optional[dict] = None,
 ) -> dict:
     """
     Replay Phase 1-3 BUY/SELL rules over the provided prediction stream.
@@ -343,25 +385,15 @@ async def run_phase4_backtest(
             in_window.append({**p, "_pd": pd_})
     in_window.sort(key=lambda x: x["_pd"])
 
-    # Pre-fetch SPY, VIX, and every ticker's history in parallel
-    unique_tickers = sorted({p["ticker"] for p in in_window if p.get("ticker")})
-    logger.info("backtest: fetching history for %d tickers over %d days", len(unique_tickers), lookback_days)
-
-    async def _fetch_pack(ticker: str) -> tuple[str, Any, str]:
-        hist, sector = await asyncio.gather(
-            _fetch_ticker_history(ticker, start_date, window_end),
-            _fetch_ticker_sector(ticker),
+    if _market_cache:
+        spy_hist   = _market_cache.get("spy_hist")
+        vix_hist   = _market_cache.get("vix_hist")
+        hist_map   = _market_cache.get("hist_map", {})
+        sector_map = _market_cache.get("sector_map", {})
+    else:
+        spy_hist, vix_hist, hist_map, sector_map = await _prefetch_market_data(
+            in_window, start_date, window_end, regime_dma_period
         )
-        return ticker, hist, sector
-
-    spy_task = _fetch_ticker_history("SPY", start_date - timedelta(days=regime_dma_period + 30), window_end)
-    vix_task = _fetch_ticker_history("^VIX", start_date - timedelta(days=10), window_end)
-    spy_hist, vix_hist, *packs = await asyncio.gather(
-        spy_task, vix_task, *[_fetch_pack(t) for t in unique_tickers]
-    )
-
-    hist_map:   dict[str, Any] = {t: h for t, h, _ in packs if h is not None}
-    sector_map: dict[str, str] = {t: s for t, _, s in packs}
 
     # ── Simulation state ─────────────────────────────────────────────────────
     base_portfolio_value = initial_float  # held constant for backtest reproducibility
@@ -576,7 +608,13 @@ async def threshold_sensitivity_sweep(
     stop_multipliers:  Optional[list[float]] = None,
     n_targets:         Optional[list[int]]   = None,
 ) -> dict:
-    """Run the harness across a parameter grid. Returns one summary row per config."""
+    """Run the harness across a parameter grid. Returns one summary row per config.
+
+    Prefetches yfinance once (SPY + VIX + all unique tickers) and reuses the
+    cache across every config — running 36 configs × N tickers in parallel
+    against yfinance trips its rate limiter (HTTP 429) and was the cause of
+    earlier crashes.
+    """
     buy_floors       = buy_floors       or [65, 70, 75, 80]
     stop_multipliers = stop_multipliers or [2.0, 2.5, 3.0]
     n_targets        = n_targets        or [8, 10, 12]
@@ -586,9 +624,37 @@ async def threshold_sensitivity_sweep(
         for bf in buy_floors for sm in stop_multipliers for nt in n_targets
     ]
 
+    # Prefetch market data once. We need the same date-windowed slice every
+    # config will use — replicate the windowing logic from run_phase4_backtest.
+    end_date   = date.today()
+    start_date = end_date - timedelta(days=lookback_days)
+    window_end = end_date + timedelta(days=5)
+    in_window = []
+    for p in predictions:
+        d = p.get("date")
+        if not isinstance(d, str):
+            continue
+        try:
+            pd_ = date.fromisoformat(d)
+        except ValueError:
+            continue
+        if start_date <= pd_ <= end_date:
+            in_window.append({**p, "_pd": pd_})
+
+    spy_hist, vix_hist, hist_map, sector_map = await _prefetch_market_data(
+        in_window, start_date, window_end, regime_dma_period=200
+    )
+    market_cache = {
+        "spy_hist":   spy_hist,
+        "vix_hist":   vix_hist,
+        "hist_map":   hist_map,
+        "sector_map": sector_map,
+    }
+
     async def _one(cfg: dict) -> dict:
         result = await run_phase4_backtest(
-            predictions, lookback_days=lookback_days, initial_float=initial_float, **cfg
+            predictions, lookback_days=lookback_days, initial_float=initial_float,
+            _market_cache=market_cache, **cfg
         )
         m = result["metrics"]
         return {
