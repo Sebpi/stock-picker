@@ -2,6 +2,11 @@
   const { useEffect, useMemo, useRef, useState } = React;
   const h = React.createElement;
   const API = "";
+  const APP_VERSION = "__APP_VERSION__";
+  const APP_GIT_SHA = "__GIT_SHA__";
+  const VERSION_LABEL = APP_GIT_SHA && APP_GIT_SHA !== "unknown"
+    ? `v${APP_VERSION} · ${APP_GIT_SHA}`
+    : `v${APP_VERSION}`;
   const PICK_SHOVELS_API = "https://pick-shovels-wistful-morning-252.fly.dev";
   const TOKEN_KEY = "stocklens_token";
 
@@ -368,7 +373,7 @@
           h("img", { src: "/static/logo.svg", className: "h-8 w-8 shrink-0", alt: "" }),
           h("div", { className: "min-w-0" },
             h("div", { className: "text-base font-semibold leading-tight" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · v3.5.0")
+            h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · ", VERSION_LABEL)
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")

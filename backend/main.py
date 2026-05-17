@@ -31,7 +31,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -166,7 +166,7 @@ if _legacy_users.exists() and not USERS_FILE.exists():
 _reset_tokens: dict[str, tuple[str, datetime]] = {}
 
 # Auth public routes — no JWT required
-_AUTH_PUBLIC = {"/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password", "/api/health"}
+_AUTH_PUBLIC = {"/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password", "/api/health", "/api/version"}
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001").strip() or "claude-haiku-4-5-20251001"
 STOCK_RESEARCH_MAX_TOKENS = max(256, int(os.getenv("STOCK_RESEARCH_MAX_TOKENS", "6000")))
 RECOMMEND_MAX_TOKENS = max(256, int(os.getenv("RECOMMEND_MAX_TOKENS", "800")))
@@ -345,6 +345,25 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+PACKAGE_FILE = Path(__file__).parent.parent / "package.json"
+
+def _package_version() -> str:
+    try:
+        return json.loads(PACKAGE_FILE.read_text(encoding="utf-8")).get("version") or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+APP_VERSION = os.getenv("APP_VERSION") or _package_version()
+GIT_SHA = (os.getenv("GIT_SHA") or os.getenv("FLY_IMAGE_REF", "")[-7:] or "unknown")[:12]
+BUILD_TIME = os.getenv("BUILD_TIME") or "unknown"
+
+def _stamp_frontend(text: str) -> str:
+    return (
+        text
+        .replace("__APP_VERSION__", APP_VERSION)
+        .replace("__GIT_SHA__", GIT_SHA)
+        .replace("__BUILD_TIME__", BUILD_TIME)
+    )
 
 @app.get("/api/health", include_in_schema=False)
 async def health_check():
@@ -378,10 +397,19 @@ async def health_check():
         "scheduler_running": bool(getattr(scheduler, "running", False)),
     }
 
+@app.get("/api/version", include_in_schema=False)
+async def version_check():
+    return {
+        "app": "stock-picker",
+        "version": APP_VERSION,
+        "git_sha": GIT_SHA,
+        "build_time": BUILD_TIME,
+    }
+
 @app.get("/", include_in_schema=False)
 def serve_index():
-    return FileResponse(
-        FRONTEND_DIR / "index.html",
+    return HTMLResponse(
+        _stamp_frontend((FRONTEND_DIR / "index.html").read_text(encoding="utf-8")),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
@@ -397,6 +425,12 @@ def serve_static(filename: str):
     file_path = FRONTEND_DIR / filename
     if not file_path.exists():
         raise HTTPException(status_code=404)
+    if filename == "react-app.js":
+        return Response(
+            _stamp_frontend(file_path.read_text(encoding="utf-8")),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
     return FileResponse(
         file_path,
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
