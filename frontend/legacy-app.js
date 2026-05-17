@@ -1642,7 +1642,7 @@ function openPredictionReasoning(rowKey) {
   if (!item) return;
 
   const overlay = document.getElementById("pred-reasoning-overlay");
-  document.getElementById("pred-reasoning-title").textContent = `${item.ticker} thesis`;
+  document.getElementById("pred-reasoning-title").textContent = `${item.ticker} short-term signal`;
   document.getElementById("pred-reasoning-company").textContent = item.name || item.ticker;
   document.getElementById("pred-reasoning-meta").innerHTML = `
     <span>${safe(item.date)}</span>
