@@ -139,19 +139,33 @@ def _list_form4_filings(cik: str, limit: int = 40) -> list[dict]:
 
 
 def _fetch_form4_xml(cik: str, filing: dict) -> str | None:
-    """Form 4 XML lives at the accession folder root. Try common filenames."""
+    """Form 4 XML lives at the accession folder root.
+
+    Subtlety: SEC's submissions JSON returns primary_doc as
+    `xslF345X06/wk-form4_NNN.xml` — that path is the **XSL-rendered HTML view**
+    of the form, not the raw XML. The raw XML lives at the accession root
+    with the same filename minus the xsl/ prefix.
+    """
     base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{filing['accession_no_dash']}"
-    # 1. Try the primary document directly — usually wf-form4_*.xml.
-    if filing.get("primary_doc") and filing["primary_doc"].endswith(".xml"):
-        body = _http_get(f"{base}/{filing['primary_doc']}", accept_404=True)
-        if body:
+
+    # 1. Primary document — strip any xsl/ prefix so we hit raw XML, not HTML.
+    doc = filing.get("primary_doc") or ""
+    if doc.endswith(".xml"):
+        if "/" in doc and doc.lower().startswith("xsl"):
+            doc = doc.split("/", 1)[1]
+        body = _http_get(f"{base}/{doc}", accept_404=True)
+        if body and "<ownershipDocument" in body:
             return body
-    # 2. Index page lists files in the filing. Parse it for any *.xml.
+
+    # 2. Walk the accession's index page for any non-xsl *.xml — same defence.
     index = _http_get(f"{base}/", accept_404=True)
     if index:
         import re
         for m in re.finditer(r'href="([^"]+\.xml)"', index, flags=re.IGNORECASE):
             xml_url = m.group(1)
+            # Skip the rendered-view URLs; only fetch raw XML.
+            if "/xsl" in xml_url.lower():
+                continue
             if xml_url.startswith("/"):
                 xml_url = "https://www.sec.gov" + xml_url
             elif not xml_url.startswith("http"):
