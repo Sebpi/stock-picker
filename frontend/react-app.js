@@ -881,7 +881,16 @@
     const [period, setPeriod] = useState("all");
     const [showFactorGuide, setShowFactorGuide] = useState(false);
     const [learning, setLearning] = useState(null);
+    const [calibration, setCalibration] = useState(null);
     const [rebuilding, setRebuilding] = useState(false);
+
+    async function loadCalibration() {
+      try {
+        setCalibration(await api("/api/predictions/calibration"));
+      } catch (err) {
+        console.warn("Calibration unavailable", err);
+      }
+    }
 
     async function load() {
       setBusy(true); setError("");
@@ -958,7 +967,7 @@
         setRebuilding(false);
       }
     }
-    useEffect(() => { load(); loadLearning(true); }, []);
+    useEffect(() => { load(); loadLearning(true); loadCalibration(); }, []);
 
     const filtered = useMemo(() => filterByPeriod(rows, period), [rows, period]);
     const accuracy = useMemo(() => computeAccuracy(filtered), [filtered]);
@@ -986,6 +995,7 @@
           h(Metric, { label: "Avg Actual", value: fmtPct(accuracy.avg_actual, 1) })
         )
       ) : null,
+      calibration?.buckets ? h(ConfidenceCalibrationTile, { buckets: calibration.buckets }) : null,
       learning ? h(PredictionLearningPanel, { learning }) : null,
       h(Card, { className: "mb-4" },
         h("button", {
@@ -1078,6 +1088,63 @@
       avg_pred: sumPred / scored.length,
       avg_actual: sumActual / scored.length,
     };
+  }
+
+  // Calibration tile — answers "does HIGH confidence actually hit more often
+  // than MEDIUM?" by comparing realised hit rate to the prior implied by each
+  // confidence label. ECE summarises the gap across all three buckets.
+  function ConfidenceCalibrationTile({ buckets }) {
+    if (!buckets || buckets.sample_count === 0) return null;
+    const labels = ["high", "medium", "low"];
+    const tone = (delta) =>
+      delta == null ? "text-pulse-muted"
+        : delta >= 0.05 ? "text-pulse-green"
+        : delta <= -0.05 ? "text-pulse-red"
+        : "text-pulse-amber";
+    const ece = buckets.ece;
+    const eceTone = ece == null ? "text-pulse-muted"
+        : ece <= 0.05 ? "text-pulse-green"
+        : ece <= 0.10 ? "text-pulse-amber"
+        : "text-pulse-red";
+    const fmtRate = (v) => v == null ? "—" : `${Math.round(v * 100)}%`;
+    const fmtDelta = (v) => v == null ? "—" : `${v >= 0 ? "+" : ""}${Math.round(v * 100)}pp`;
+    return h(Card, { className: "mb-4 p-4" },
+      h("div", { className: "flex flex-wrap items-baseline justify-between gap-2 mb-3" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "↳ Confidence calibration"),
+        h("div", { className: "font-mono text-[10px] tracking-[0.12em] text-pulse-muted" },
+          `ECE `,
+          h("span", { className: cx("font-tnum", eceTone) }, ece == null ? "—" : ece.toFixed(3)),
+          ` · ${buckets.sample_count} evaluated`
+        )
+      ),
+      h("div", { className: "grid grid-cols-3 gap-3" },
+        labels.map(label => {
+          const m = buckets.by_confidence[label] || {};
+          const lbl = label.toUpperCase();
+          return h("div", { key: label, className: "rounded-lg border border-pulse-line bg-pulse-panel p-3" },
+            h("div", { className: "flex items-baseline justify-between mb-1" },
+              h("div", { className: "font-mono text-[10px] tracking-[0.18em] text-pulse-dim" }, lbl),
+              h("div", { className: "font-mono text-[9px] text-pulse-muted" }, `n=${m.count || 0}`)
+            ),
+            h("div", { className: "flex items-baseline gap-2" },
+              h("div", { className: "font-mono text-xl font-semibold font-tnum text-pulse-ink" }, fmtRate(m.win_rate)),
+              h("div", { className: cx("font-mono text-[10px] font-tnum", tone(m.delta_vs_prior)) }, fmtDelta(m.delta_vs_prior))
+            ),
+            h("div", { className: "font-mono text-[9px] text-pulse-muted mt-1" },
+              `prior ${fmtRate(m.prior_hit_rate)}`,
+              m.mean_abs_error_pct != null ? ` · MAE ${m.mean_abs_error_pct.toFixed(2)}%` : ""
+            )
+          );
+        })
+      ),
+      h("p", { className: "mt-3 text-[11px] text-pulse-muted" },
+        "Realised directional hit rate vs the prior we're implicitly claiming per confidence label. ",
+        h("strong", { className: "text-pulse-ink" }, "Δ"),
+        " = realised − prior (positive = under-confident, negative = over-confident). ",
+        h("strong", { className: "text-pulse-ink" }, "ECE"),
+        " is the size-weighted miscalibration across buckets; lower is better."
+      )
+    );
   }
 
   function PredictionLearningPanel({ learning }) {
