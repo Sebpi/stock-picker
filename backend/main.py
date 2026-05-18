@@ -4233,6 +4233,34 @@ async def get_predictions_learning(request: Request, evaluate: bool = True):
         raise HTTPException(status_code=500, detail=f"Prediction learning summary failed: {exc}")
 
 
+@app.get("/api/insider/{ticker}")
+@limiter.limit("60/hour")
+async def get_insider_activity(request: Request, ticker: str, days: int = 30, refresh: bool = False):
+    """SEC Form 4 insider transactions for a ticker.
+
+    Returns:
+      summary: 30-day rollup (net $, purchase/sale counts, unique insiders,
+               director/officer breakdown, cluster_buying flag).
+      transactions: most recent transactions (signed shares + total_value).
+
+    Pass ?refresh=true to pull fresh filings from SEC EDGAR before reading
+    (rate-limited; first call for a ticker can take 10-20s as it walks the
+    last N filings). Subsequent calls hit the SQLite cache instantly.
+    """
+    from insider_transactions import refresh_ticker, summarize_ticker, list_transactions
+    ticker = _validate_ticker(ticker)
+    days = max(1, min(365, int(days)))
+    refresh_info = None
+    if refresh:
+        # Run sync (httpx is sync). Wrap in to_thread so we don't block the loop.
+        refresh_info = await asyncio.to_thread(refresh_ticker, ticker)
+    return {
+        "summary":      summarize_ticker(ticker, days=days),
+        "transactions": list_transactions(ticker, days=days, limit=200),
+        "refresh":      refresh_info,
+    }
+
+
 @app.get("/api/predictions/calibration")
 @limiter.limit("20/hour")
 async def get_predictions_calibration(request: Request, store: bool = False):
