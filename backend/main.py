@@ -3533,6 +3533,107 @@ async def fetch_macro_data() -> dict:
     return {label: data for label, data in results if data is not None}
 
 
+# ── Confidence- and score-bucket calibration (Phase: accuracy ops) ──────────
+# Answers "does 'high confidence' actually hit more often than 'medium'?" and
+# "do score=80 predictions outperform score=70?". Both questions go through
+# `compute_calibration` per-ticker; this is the cross-ticker breakdown.
+#
+# Probability priors per confidence label (used for the Brier-style score):
+# directional hit rate we'd implicitly be claiming when we label a call.
+# Tuned to match _expected_return_from_score's confidence multipliers.
+CONFIDENCE_PRIOR_HIT_RATE = {"high": 0.75, "medium": 0.62, "low": 0.55}
+SCORE_BUCKETS = [(0, 50), (50, 60), (60, 70), (70, 80), (80, 90), (90, 101)]
+
+def _bucket_calibration_metrics(rows: list[dict]) -> dict:
+    """Return {count, win_rate, mean_signed_error, mean_abs_error, brier} for rows.
+    Each row must have predicted_pct + actual_pct + confidence."""
+    if not rows:
+        return {
+            "count": 0, "win_rate": None,
+            "mean_signed_error_pct": None, "mean_abs_error_pct": None,
+            "brier": None,
+        }
+    errors  = [r["actual_pct"] - r["predicted_pct"] for r in rows]
+    correct = [1 if (r["predicted_pct"] > 0) == (r["actual_pct"] > 0) else 0 for r in rows]
+    win_rate = sum(correct) / len(correct)
+    # Brier-like score: mean((prior_prob - outcome)^2). Lower = better calibrated.
+    # Compares each row's implicit prior (from its confidence label) to the realised
+    # 0/1 directional hit. Perfect calibration → mirrors the prior, brier ≈ prior(1−prior).
+    brier_terms = [
+        (CONFIDENCE_PRIOR_HIT_RATE.get((r.get("confidence") or "medium").lower(), 0.62) - outcome) ** 2
+        for r, outcome in zip(rows, correct)
+    ]
+    return {
+        "count": len(rows),
+        "win_rate":                round(win_rate, 3),
+        "mean_signed_error_pct":   round(sum(errors) / len(errors), 3),
+        "mean_abs_error_pct":      round(sum(abs(e) for e in errors) / len(errors), 3),
+        "brier":                   round(sum(brier_terms) / len(brier_terms), 4),
+    }
+
+
+def compute_confidence_calibration(predictions: list[dict]) -> dict:
+    """Cross-ticker calibration broken down by confidence label and score bucket.
+
+    Returns:
+      by_confidence: {high|medium|low: bucket_metrics, plus prior_hit_rate +
+                      delta_vs_prior so the UI can flag mis-calibration}.
+      by_score:      {0-50, 50-60, ..., 90-100: bucket_metrics}
+      overall:       single bucket_metrics across all eligible predictions.
+      ece:           expected calibration error across confidence buckets —
+                     sum(|win_rate - prior| × bucket_weight). Lower = better.
+    """
+    completed = [
+        p for p in predictions
+        if p.get("actual_pct") is not None and p.get("predicted_pct") is not None
+    ]
+
+    # By confidence
+    by_conf: dict[str, list] = {"high": [], "medium": [], "low": []}
+    for p in completed:
+        label = (p.get("confidence") or "medium").lower()
+        if label in by_conf:
+            by_conf[label].append(p)
+    by_confidence = {}
+    for label, rows in by_conf.items():
+        m = _bucket_calibration_metrics(rows)
+        m["prior_hit_rate"]  = CONFIDENCE_PRIOR_HIT_RATE[label]
+        m["delta_vs_prior"]  = (
+            round(m["win_rate"] - m["prior_hit_rate"], 3) if m["win_rate"] is not None else None
+        )
+        by_confidence[label] = m
+
+    # By score bucket
+    by_score = {}
+    for lo, hi in SCORE_BUCKETS:
+        bucket_label = f"{lo}-{hi if hi != 101 else 100}"
+        rows = [p for p in completed if lo <= (p.get("score") or 0) < hi]
+        by_score[bucket_label] = _bucket_calibration_metrics(rows)
+
+    overall = _bucket_calibration_metrics(completed)
+
+    # Expected calibration error — how far is each bucket's realised hit rate
+    # from the prior we were implicitly claiming, weighted by bucket size.
+    total = sum(m["count"] for m in by_confidence.values())
+    if total > 0:
+        ece = sum(
+            (m["count"] / total) * abs(m["delta_vs_prior"])
+            for m in by_confidence.values()
+            if m["count"] > 0 and m["delta_vs_prior"] is not None
+        )
+        ece = round(ece, 3)
+    else:
+        ece = None
+
+    return {
+        "by_confidence": by_confidence,
+        "by_score":      by_score,
+        "overall":       overall,
+        "ece":           ece,
+        "sample_count":  len(completed),
+    }
+
+
 def compute_calibration(predictions: list[dict]) -> dict:
     """
     Per-stock calibration from completed predictions.
@@ -4135,13 +4236,19 @@ async def get_predictions_learning(request: Request, evaluate: bool = True):
 @app.get("/api/predictions/calibration")
 @limiter.limit("20/hour")
 async def get_predictions_calibration(request: Request, store: bool = False):
-    """Return the adaptive calibration model used by future prediction runs."""
+    """Return the adaptive calibration model used by future prediction runs.
+
+    Also includes confidence-bucket + score-bucket realised hit rates so the
+    UI can show "X% of high-confidence calls hit" / "Y ECE across buckets".
+    """
     model = _build_prediction_calibration_model(store=store)
     model.update({
         "model_version": PREDICTION_MODEL_VERSION,
         "prompt_version": PREDICTION_PROMPT_VERSION,
         "learning_enabled": PREDICTION_LEARNING_ENABLED,
         "governance": _prediction_governance_status(model),
+        # New breakdowns — by confidence label and signal-score bucket.
+        "buckets": compute_confidence_calibration(load_predictions()),
     })
     return model
 
