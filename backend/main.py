@@ -142,6 +142,12 @@ if not _SECRET_KEY:
     logger.warning("SECRET_KEY is not set; using an ephemeral key. Sessions will be invalidated on restart.")
     _SECRET_KEY = secrets.token_hex(32)
 _SERVICE_KEY = (os.getenv("STOCK_PICKER_SERVICE_KEY") or os.getenv("INTERNAL_SERVICE_KEY") or "").strip()
+
+# Portal-shared JWT (LENS → engines). Same value set on seb-portal +
+# pick-shovels + LENS so a portal-minted JWT verifies here without a
+# round-trip. Optional — when unset, only the local SECRET_KEY chain works.
+_PORTAL_JWT_SECRET = (os.getenv("PORTAL_JWT_SECRET") or "").strip()
+_PORTAL_JWT_ISSUER = "seb-portal"
 _ALGORITHM  = "HS256"
 _TOKEN_HOURS = 24
 
@@ -242,19 +248,44 @@ def create_access_token(username: str) -> str:
     return jwt.encode({"sub": username, "exp": expire}, _SECRET_KEY, algorithm=_ALGORITHM)
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(http_bearer)) -> str:
+    """Verify the bearer token against (in order):
+      1. _SERVICE_KEY  — service-account literal match.
+      2. _SECRET_KEY   — local app JWT (existing login flow).
+      3. _PORTAL_JWT_SECRET — portal-issued JWT from seb-portal /api/auth/jwt.
+         Validated by signature + iss claim. The user does NOT need a local
+         users.json entry — portal is the source of truth for cross-app calls.
+
+    Returns the resolved identity string (username for local, "portal:<sub>"
+    for portal-routed). Raises 401 on any failure.
+    """
     exc = HTTPException(status_code=401, detail="Not authenticated")
     if not credentials:
         raise exc
     if _SERVICE_KEY and secrets.compare_digest(credentials.credentials, _SERVICE_KEY):
         return "service:pick-shovels"
+    # 1. Local JWT first — existing login flow.
     try:
         payload = jwt.decode(credentials.credentials, _SECRET_KEY, algorithms=[_ALGORITHM])
         username: str = payload.get("sub", "")
-        if not username or username not in load_users():
-            raise exc
-        return username
+        if username and username in load_users():
+            return username
+        # Local JWT decoded but user vanished — fall through to portal check
+        # rather than raising, to keep portal-only users working.
     except JWTError:
-        raise exc
+        pass
+    # 2. Portal-issued JWT — shared-session via seb-portal.
+    if _PORTAL_JWT_SECRET:
+        try:
+            payload = jwt.decode(
+                credentials.credentials,
+                _PORTAL_JWT_SECRET,
+                algorithms=[_ALGORITHM],
+            )
+            if payload.get("iss") == _PORTAL_JWT_ISSUER and payload.get("sub"):
+                return f"portal:{payload['sub']}"
+        except JWTError:
+            pass
+    raise exc
 
 app = FastAPI(title="StockLens API")
 app.state.limiter = limiter
