@@ -88,36 +88,44 @@ CREDIBILITY: dict[str, float] = {
 }
 
 # Horizon-specific agent weights (spec §5.2)
+# Horizon-specific agent weights (spec §5.2)
+# Note: orchestrator normalises by sum of *usable* weights, so these
+# don't have to total 1.0. Insider activity weighted heaviest at 3m
+# (Form 4 cluster buying is a classic 30-90 day signal) and decays
+# toward 12m where fundamentals dominate.
 HORIZON_WEIGHTS: dict[str, dict[str, float]] = {
     "3m": {
-        "agent.technical_risk": 0.25,
-        "agent.sentiment_news": 0.25,
-        "agent.growth_revisions": 0.15,
-        "agent.fundamentals": 0.10,
-        "agent.valuation": 0.10,
-        "agent.macro_liquidity": 0.10,
+        "agent.technical_risk": 0.22,
+        "agent.sentiment_news": 0.22,
+        "agent.growth_revisions": 0.13,
+        "agent.fundamentals": 0.09,
+        "agent.valuation": 0.09,
+        "agent.macro_liquidity": 0.09,
+        "agent.insider_activity": 0.10,
         "agent.industry_competition": 0.03,
-        "agent.portfolio_risk": 0.02,
+        "agent.portfolio_risk": 0.03,
     },
     "6m": {
-        "agent.technical_risk": 0.15,
-        "agent.sentiment_news": 0.15,
-        "agent.growth_revisions": 0.20,
-        "agent.fundamentals": 0.15,
-        "agent.valuation": 0.15,
-        "agent.macro_liquidity": 0.12,
+        "agent.technical_risk": 0.14,
+        "agent.sentiment_news": 0.14,
+        "agent.growth_revisions": 0.18,
+        "agent.fundamentals": 0.14,
+        "agent.valuation": 0.14,
+        "agent.macro_liquidity": 0.11,
+        "agent.insider_activity": 0.07,
         "agent.industry_competition": 0.05,
         "agent.portfolio_risk": 0.03,
     },
     "12m": {
         "agent.technical_risk": 0.07,
         "agent.sentiment_news": 0.08,
-        "agent.growth_revisions": 0.20,
-        "agent.fundamentals": 0.22,
-        "agent.valuation": 0.18,
-        "agent.macro_liquidity": 0.12,
-        "agent.industry_competition": 0.10,
-        "agent.portfolio_risk": 0.03,
+        "agent.growth_revisions": 0.19,
+        "agent.fundamentals": 0.20,
+        "agent.valuation": 0.17,
+        "agent.macro_liquidity": 0.11,
+        "agent.insider_activity": 0.04,
+        "agent.industry_competition": 0.09,
+        "agent.portfolio_risk": 0.05,
     },
 }
 
