@@ -366,14 +366,26 @@ async def auth_middleware(request: Request, call_next):
     if not auth_header.startswith("Bearer "):
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
     token = auth_header[7:]
+    # Try local SECRET_KEY first (existing login flow).
     try:
         payload = jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
         username = payload.get("sub", "")
-        if not username or username not in load_users():
-            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+        if username and username in load_users():
+            return await call_next(request)
+        # Decoded but user vanished — fall through to portal check.
     except JWTError:
-        return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
-    return await call_next(request)
+        pass
+    # Portal-issued JWT (shared-session via seb-portal). Same logic as
+    # get_current_user — we only accept iss="seb-portal" so a random JWT
+    # signed with the same secret elsewhere can't pass.
+    if _PORTAL_JWT_SECRET:
+        try:
+            payload = jwt.decode(token, _PORTAL_JWT_SECRET, algorithms=[_ALGORITHM])
+            if payload.get("iss") == _PORTAL_JWT_ISSUER and payload.get("sub"):
+                return await call_next(request)
+        except JWTError:
+            pass
+    return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 PACKAGE_FILE = Path(__file__).parent.parent / "package.json"
