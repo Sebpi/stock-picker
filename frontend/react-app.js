@@ -1949,20 +1949,28 @@
     const [bt, setBt] = useState(null);
     const [sim, setSim] = useState(null);
     const [goal, setGoal] = useState(null);
+    const [llmCal, setLlmCal] = useState(null);
     const [btBusy, setBtBusy] = useState(false);
     const [simBusy, setSimBusy] = useState(false);
     const [btStatus, setBtStatus] = useState("");
     const [simStatus, setSimStatus] = useState("");
 
+    useEffect(() => {
+      api("/api/predictions/calibration").then(setLlmCal).catch(() => null);
+      api("/api/predictions/goal").then(setGoal).catch(() => null);
+    }, []);
+
     async function runBacktest() {
       setBtBusy(true); setBtStatus("Running backtest... fetching 4 weeks of historical data (30-60s)..."); setBt(null);
       try {
-        const [data, goalData] = await Promise.all([
+        const [data, goalData, calData] = await Promise.all([
           api("/api/predictions/backtest"),
           api("/api/predictions/goal").catch(() => null),
+          api("/api/predictions/calibration").catch(() => null),
         ]);
         setBt(data);
         setGoal(goalData);
+        setLlmCal(calData);
         setBtStatus("");
       }
       catch (err) { setBtStatus("Error: " + err.message); }
@@ -1996,6 +2004,7 @@
           h("div", null, h("strong", { className: "text-pulse-ink" }, "⚪ 50-60%"), " — Marginal, close to random. Watch for improvement.")
         )
       ),
+      llmCal && h(LLMAccuracyCard, { cal: llmCal, goal }),
       h(Status, { message: btStatus, className: "mb-3" }),
       bt && bt.summary ? h(BacktestSummary, { data: bt, goal, onGoalChange: updateGoal }) : null,
       h("div", { className: "mt-6 border-t border-pulse-line pt-6" },
@@ -2003,6 +2012,65 @@
         h(Status, { message: simStatus, className: "mb-3" }),
         sim && sim.stats ? h(SimulatorResults, { data: sim }) : null
       )
+    );
+  }
+
+  function LLMAccuracyCard({ cal, goal }) {
+    if (!cal) return null;
+    const overall = cal.buckets && cal.buckets.overall;
+    const byConf  = cal.buckets && cal.buckets.by_confidence;
+    const target  = (goal && goal.goal_target_pct) || 55.0;
+    const sampleCount = cal.buckets && cal.buckets.sample_count;
+    const gov = cal.governance || {};
+
+    if (!overall || overall.count === 0) return h(Card, { className: "p-4" },
+      h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "LLM Prediction Accuracy — Resolved 4-week calls"),
+      h("div", { className: "mt-3 text-sm text-pulse-muted" }, "No resolved LLM predictions yet. Predictions mature after 4 weeks — check back once they have resolved.")
+    );
+
+    const winPct = overall.win_rate != null ? Math.round(overall.win_rate * 100) : null;
+    const winTone = winPct >= target ? "text-pulse-green" : winPct >= 50 ? "text-pulse-amber" : "text-pulse-red";
+
+    const confRows = [
+      { key: "high",   label: "High confidence",   prior: 75 },
+      { key: "medium", label: "Medium confidence",  prior: 62 },
+      { key: "low",    label: "Low confidence",     prior: 55 },
+    ];
+
+    return h(Card, { className: "p-4 border border-pulse-cyan/20" },
+      h("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "LLM Prediction Accuracy — Resolved 4-week calls"),
+        h(Pill, { className: gov.tone === "green" ? "border-pulse-green/40 bg-pulse-green/10 text-pulse-green" : gov.tone === "red" ? "border-pulse-red/40 bg-pulse-red/10 text-pulse-red" : "border-pulse-amber/40 bg-pulse-amber/10 text-pulse-amber" }, gov.status || "warming")
+      ),
+      h("p", { className: "mt-1 text-xs text-pulse-muted" }, "This is the accuracy metric that matters: real LLM predictions resolved after 4 weeks vs. actual price movement."),
+
+      h("div", { className: "mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4" },
+        h(Metric, { label: "Overall accuracy", value: winPct != null ? winPct + "%" : "—", tone: winTone, hint: `${overall.count} resolved predictions` }),
+        h(Metric, { label: "Mean bias", value: overall.mean_signed_error_pct != null ? fmtPct(overall.mean_signed_error_pct, 1) : "—", hint: "actual − predicted avg" }),
+        h(Metric, { label: "Mean abs error", value: overall.mean_abs_error_pct != null ? "±" + overall.mean_abs_error_pct + "%" : "—" }),
+        h(Metric, { label: "Goal", value: target + "%", tone: winPct >= target ? "text-pulse-green" : "text-pulse-red", hint: winPct != null ? (winPct >= target ? "On track" : `${round1(target - winPct)}pp to go`) : "awaiting data" })
+      ),
+
+      byConf && h("div", { className: "mt-4" },
+        h("div", { className: "text-[10px] font-mono uppercase tracking-[0.16em] text-pulse-dim mb-2" }, "Accuracy by confidence tier — act on the tiers that consistently outperform"),
+        h("div", { className: "grid grid-cols-3 gap-2" },
+          confRows.map(({ key, label, prior }) => {
+            const m = byConf[key] || {};
+            const wp = m.win_rate != null ? Math.round(m.win_rate * 100) : null;
+            const tone = wp == null ? "text-pulse-dim" : wp >= target ? "text-pulse-green" : wp >= 50 ? "text-pulse-amber" : "text-pulse-red";
+            const bg   = wp == null ? "border-pulse-line/40 bg-pulse-panel/40" : wp >= target ? "border-pulse-green/30 bg-pulse-green/10" : wp >= 50 ? "border-pulse-amber/20 bg-pulse-amber/5" : "border-pulse-red/30 bg-pulse-red/10";
+            const delta = m.delta_vs_prior != null ? (m.delta_vs_prior >= 0 ? "+" : "") + Math.round(m.delta_vs_prior * 100) + "pp vs prior" : "";
+            return h("div", { key, className: `rounded-lg border p-3 ${bg}` },
+              h("div", { className: "text-[10px] text-pulse-muted" }, label),
+              h("div", { className: `font-mono text-lg font-bold mt-1 ${tone}` }, wp != null ? wp + "%" : "—"),
+              h("div", { className: "text-[11px] text-pulse-dim" }, m.count ? `${m.count} signals` : "no data"),
+              delta ? h("div", { className: `text-[10px] ${m.delta_vs_prior >= 0 ? "text-pulse-green" : "text-pulse-red"}` }, delta) : null
+            );
+          })
+        )
+      ),
+
+      gov.message && h("div", { className: "mt-3 text-xs text-pulse-muted border-t border-pulse-line/40 pt-3" }, gov.message)
     );
   }
 
@@ -2121,6 +2189,15 @@
     const total = s.total || 0;
     const reliability = total >= 100 ? "Statistically meaningful" : total >= 30 ? "Indicative — needs more data" : "Too few signals — treat as noise";
     const reliabilityTone = total >= 100 ? "text-pulse-green" : total >= 30 ? "text-pulse-amber" : "text-pulse-red";
+    const [removing, setRemoving] = useState({});
+
+    async function removeTicker(ticker) {
+      setRemoving(r => ({ ...r, [ticker]: true }));
+      try {
+        await api("/api/watchlist/" + ticker, { method: "DELETE" });
+      } catch (e) { /* silent — stale UI is fine */ }
+      setRemoving(r => ({ ...r, [ticker]: false }));
+    }
     return h("div", { className: "grid gap-4" },
       h("div", { className: "grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6" },
         h(Metric, { label: "Accuracy", value: s.accuracy_pct + "%", hint: `${s.correct} correct / ${total - s.correct} wrong`, tone: s.accuracy_pct >= 60 ? "text-pulse-green" : s.accuracy_pct >= 50 ? "text-pulse-amber" : "text-pulse-red" }),
@@ -2137,10 +2214,19 @@
       tickerStats.length ? h(Card, { className: "p-4" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "By ticker"),
         h("div", { className: "mt-3 grid grid-cols-2 gap-2 md:grid-cols-4 lg:grid-cols-6" },
-          tickerStats.map(([t, st]) => h("div", { key: t, className: "rounded-lg border border-pulse-line bg-pulse-panel p-3" },
-            h("div", { className: "font-mono text-pulse-cyan" }, t),
+          tickerStats.map(([t, st]) => h("div", { key: t, className: cx("rounded-lg border bg-pulse-panel p-3", st.accuracy_pct < 45 ? "border-pulse-red/40" : "border-pulse-line") },
+            h("div", { className: "flex items-center justify-between gap-1" },
+              h("div", { className: "font-mono text-pulse-cyan" }, t),
+              st.accuracy_pct < 45 && h("button", {
+                title: "Remove from watchlist (poor accuracy)",
+                disabled: removing[t],
+                onClick: () => removeTicker(t),
+                className: "text-pulse-red/60 hover:text-pulse-red text-xs leading-none"
+              }, removing[t] ? "…" : "✕")
+            ),
             h("div", { className: cx("font-mono text-lg", st.accuracy_pct >= 60 ? "text-pulse-green" : st.accuracy_pct >= 50 ? "text-pulse-amber" : "text-pulse-red") }, st.accuracy_pct + "%"),
-            h("div", { className: "text-xs text-pulse-muted" }, `${st.correct}/${st.total} · ±${st.avg_abs_variance}%`)
+            h("div", { className: "text-xs text-pulse-muted" }, `${st.correct}/${st.total} · ±${st.avg_abs_variance}%`),
+            st.accuracy_pct < 45 && h("div", { className: "text-[10px] text-pulse-red/70 mt-1" }, "Below coin-flip")
           ))
         )
       ) : null,
