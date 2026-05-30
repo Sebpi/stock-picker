@@ -2455,6 +2455,19 @@ async def run_evaluation_job(source: str = "manual") -> int:
             thesis_count,
             prediction_count,
         )
+        # Auto-rebuild calibration whenever new prediction outcomes matured so
+        # the next prediction run gets fresh bias-correction data.
+        if prediction_count > 0:
+            try:
+                _sync_prediction_history(load_predictions())
+                cal = _build_prediction_calibration_model(store=True)
+                logger.info(
+                    "[Evaluation] Auto-rebuilt calibration model: samples=%s status=%s",
+                    cal.get("sample_count"),
+                    _prediction_governance_status(cal).get("status"),
+                )
+            except Exception as _cal_exc:
+                logger.warning("[Evaluation] Calibration auto-rebuild failed: %s", _cal_exc)
         _reset_bg_failures("evaluation")
         return thesis_count + prediction_count
     except Exception as exc:
