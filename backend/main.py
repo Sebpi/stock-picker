@@ -1995,6 +1995,9 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
         confidence_f  = float(forecast_12m.confidence)       if forecast_12m else 0.5
         confidence_s  = "high" if confidence_f >= 0.7 else "medium" if confidence_f >= 0.45 else "low"
 
+        if confidence_s == "low":
+            continue  # low-confidence thesis excluded from alert BUYs
+
         if composite < strong_buy_min_score:
             continue
         if projected_12m < 12 and projected_6m < 7:
@@ -2010,7 +2013,7 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
             narrative.get("summary")
             or narrative.get("base")
             or ("; ".join(thesis.drivers[:2]) if thesis.drivers else "")
-            or f"9-agent composite score {composite:.0f}/100 across fundamentals, valuation, growth, macro, sentiment and more."
+            or f"10-agent composite score {composite:.0f}/100 across fundamentals, valuation, growth, macro, sentiment and more."
         )
 
         strong_buys.append({
@@ -2019,7 +2022,7 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
             "action":           "BUY",
             "type":             "buy_opportunity",
             "trigger":          "AGENT CONSENSUS",
-            "signal":           f"9-agent composite score {composite:.0f}/100 — BUY signal confirmed.",
+            "signal":           f"10-agent composite score {composite:.0f}/100 — BUY signal confirmed.",
             "price":            float(thesis.current_price or 0.0),
             "score_value":      int(round(composite)),
             "confidence":       confidence_s,
@@ -5842,7 +5845,15 @@ async def _build_recommendations(progress: Optional[callable] = None):
 
     # Sector exposure of currently-held paper positions (running tally)
     sector_exposure: dict[str, float] = {}
-    existing_var_sq = 0.0  # sum of squared individual VaRs (uncorrelated assumption)
+    # Pairwise-correlated portfolio VaR. Use the correlation matrix from the
+    # risk matrix cache (populated when the Risk tab is viewed, TTL 30 min).
+    # Falls back to uncorrelated (rho=0 between positions) when cache is cold —
+    # that's identical to the prior uncorrelated behaviour.
+    corr_matrix: dict[str, dict[str, float]] = (
+        (_risk_cache.get("data") or {}).get("correlation") or {}
+    )
+    held_var_terms: dict[str, float] = {}  # ticker -> individual dollar VaR
+    existing_cov_sq = 0.0  # portfolio_var², updated incrementally
     for t in paper_held:
         pos = paper_positions.get(t, {})
         shares = float(pos.get("shares", 0))
@@ -5855,7 +5866,13 @@ async def _build_recommendations(progress: Optional[callable] = None):
         held_pred = next((p for p in latest_preds if p["ticker"] == t), None)
         held_vol = float((held_pred or {}).get("annualised_vol_pct") or 30.0)
         ind_var = VAR_Z_95 * (held_vol / 100.0) * MONTH_VOL_FACTOR * value
-        existing_var_sq += ind_var ** 2
+        # cov_sq += 2 * Σⱼ∈held ρ_{t,j} * var_t * var_j + var_t²
+        cross = sum(
+            corr_matrix.get(t, {}).get(t2, 0.0) * ind_var * v2
+            for t2, v2 in held_var_terms.items()
+        )
+        existing_cov_sq += 2.0 * cross + ind_var ** 2
+        held_var_terms[t] = ind_var
 
     var_budget = portfolio_var_max * base_portfolio_value
 
@@ -5938,16 +5955,32 @@ async def _build_recommendations(progress: Optional[callable] = None):
             continue
         position_value = min(position_value, sector_headroom)
 
-        # Portfolio VaR cap (95% 1-month parametric, uncorrelated assumption).
+        # Portfolio VaR cap (95% 1-month parametric). Uses pairwise correlations
+        # from the risk matrix cache when available; uncorrelated otherwise.
         monthly_vol = (float(vol_pct) / 100.0) * MONTH_VOL_FACTOR
         if monthly_vol > 0:
             new_var = VAR_Z_95 * monthly_vol * position_value
-            projected_var = math.sqrt(existing_var_sq + new_var ** 2)
+            # Cross terms: Σⱼ∈held ρ_{ticker,j} * new_var * var_j
+            cross_sum = sum(
+                corr_matrix.get(ticker, {}).get(t2, 0.0) * new_var * v2
+                for t2, v2 in held_var_terms.items()
+            )
+            projected_cov_sq = existing_cov_sq + 2.0 * cross_sum + new_var ** 2
+            projected_var = math.sqrt(max(0.0, projected_cov_sq))
             if projected_var > var_budget:
-                headroom_var_sq = max(0.0, var_budget ** 2 - existing_var_sq)
-                if headroom_var_sq <= 0:
+                # Solve for max position size s.t. projected_var == var_budget.
+                # existing_cov_sq + 2*rho_sum*x + x² = var_budget²
+                # where rho_sum = Σⱼ ρ_{ticker,j}*var_j, x = new_var
+                rho_sum = sum(
+                    corr_matrix.get(ticker, {}).get(t2, 0.0) * v2
+                    for t2, v2 in held_var_terms.items()
+                )
+                discriminant = rho_sum ** 2 - existing_cov_sq + var_budget ** 2
+                if discriminant <= 0:
                     continue  # no VaR budget left
-                max_ind_var    = math.sqrt(headroom_var_sq)
+                max_ind_var = -rho_sum + math.sqrt(discriminant)
+                if max_ind_var <= 0:
+                    continue
                 position_value = max_ind_var / (VAR_Z_95 * monthly_vol)
 
         # Cash cap (always last)
@@ -5965,7 +5998,12 @@ async def _build_recommendations(progress: Optional[callable] = None):
         # Update running trackers AFTER size is finalised
         sector_exposure[sec] = sector_exposure.get(sec, 0.0) + estimated_cost
         actual_var = VAR_Z_95 * monthly_vol * estimated_cost if monthly_vol > 0 else 0.0
-        existing_var_sq += actual_var ** 2
+        cross = sum(
+            corr_matrix.get(ticker, {}).get(t2, 0.0) * actual_var * v2
+            for t2, v2 in held_var_terms.items()
+        )
+        existing_cov_sq += 2.0 * cross + actual_var ** 2
+        held_var_terms[ticker] = actual_var
 
         # Factor-boosted score: composite 70 → +35%, composite 30 → -35%
         factor_boost = 1 + (composite - 50) / 200
@@ -6286,7 +6324,7 @@ async def _build_recommendations(progress: Optional[callable] = None):
     }
 
     # Phase 3: aggregate risk view for the UI
-    total_portfolio_var = math.sqrt(existing_var_sq) if existing_var_sq > 0 else 0.0
+    total_portfolio_var = math.sqrt(max(0.0, existing_cov_sq)) if existing_cov_sq > 0 else 0.0
     sector_breakdown = {
         s: round(v / base_portfolio_value * 100, 2)
         for s, v in sorted(sector_exposure.items(), key=lambda x: -x[1])
