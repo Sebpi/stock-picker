@@ -9,6 +9,7 @@
     : `v${APP_VERSION}`;
   const PICK_SHOVELS_API = "https://pick-shovels-wistful-morning-252.fly.dev";
   const TOKEN_KEY = "stocklens_token";
+  const THEME_KEY = "stocklens_theme";
 
   const TABS = [
     ["screener", "Screener"],
@@ -109,6 +110,30 @@
     const n = Number(value);
     if (!Number.isFinite(n)) return "text-pulse-muted";
     return n >= 0 ? "text-pulse-green" : "text-pulse-red";
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Theme icons
+  // ──────────────────────────────────────────────────────────────
+
+  function SunIcon() {
+    return h("svg", { width: 15, height: 15, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" },
+      h("circle", { cx: 12, cy: 12, r: 5 }),
+      h("line", { x1: 12, y1: 1, x2: 12, y2: 3 }),
+      h("line", { x1: 12, y1: 21, x2: 12, y2: 23 }),
+      h("line", { x1: 1, y1: 12, x2: 3, y2: 12 }),
+      h("line", { x1: 21, y1: 12, x2: 23, y2: 12 }),
+      h("line", { x1: 4.22, y1: 4.22, x2: 5.64, y2: 5.64 }),
+      h("line", { x1: 18.36, y1: 5.64, x2: 19.78, y2: 4.22 }),
+      h("line", { x1: 4.22, y1: 19.78, x2: 5.64, y2: 18.36 }),
+      h("line", { x1: 18.36, y1: 18.36, x2: 19.78, y2: 19.78 })
+    );
+  }
+
+  function MoonIcon() {
+    return h("svg", { width: 15, height: 15, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" },
+      h("path", { d: "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" })
+    );
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -366,7 +391,7 @@
   // Shell
   // ──────────────────────────────────────────────────────────────
 
-  function Shell({ user, active, setActive, logout, children }) {
+  function Shell({ user, active, setActive, logout, theme, toggleTheme, children }) {
     return h("div", { className: "min-h-screen pb-20 md:pb-0" },
       h("header", { className: "sticky top-0 z-30 border-b border-pulse-line bg-pulse-bg/86 px-3 pt-[max(.75rem,env(safe-area-inset-top))] backdrop-blur md:px-5" },
         h("div", { className: "mx-auto flex max-w-7xl items-center gap-3 py-3" },
@@ -376,6 +401,11 @@
             h("div", { className: "truncate text-[11px] text-pulse-dim" }, user || "signed in", " · ", VERSION_LABEL)
           ),
           h("a", { href: "/legacy", className: "ml-auto hidden rounded-lg border border-pulse-line px-3 py-2 text-xs text-pulse-muted hover:text-pulse-cyan sm:inline-flex" }, "Legacy"),
+          h("button", {
+            onClick: toggleTheme,
+            title: theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+            className: "rounded-lg border border-pulse-line p-2 text-pulse-muted hover:text-pulse-cyan transition"
+          }, theme === "dark" ? h(SunIcon) : h(MoonIcon)),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
         ),
         h("nav", { className: "scrollbar-none mx-auto flex max-w-7xl gap-1 overflow-x-auto pb-2" },
@@ -2628,6 +2658,16 @@
     const [user, setUser] = useState("");
     const [active, setActive] = useState("screener");
     const [detail, setDetail] = useState(null);
+    const [theme, setTheme] = useState(
+      () => document.documentElement.classList.contains("light") ? "light" : "dark"
+    );
+
+    function toggleTheme() {
+      const next = theme === "dark" ? "light" : "dark";
+      setTheme(next);
+      document.documentElement.classList.toggle("light", next === "light");
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    }
 
     async function check() {
       if (!token()) { setReady(true); return; }
@@ -2657,7 +2697,7 @@
     };
 
     return h(React.Fragment, null,
-      h(Shell, { user, active, setActive, logout: () => { setToken(""); setUser(""); } }, tabs[active] || tabs.screener),
+      h(Shell, { user, active, setActive, logout: () => { setToken(""); setUser(""); }, theme, toggleTheme }, tabs[active] || tabs.screener),
       detail ? h(StockDetail, { ticker: detail, onClose: () => setDetail(null) }) : null
     );
   }
