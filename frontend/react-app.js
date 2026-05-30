@@ -518,7 +518,7 @@
   // ──────────────────────────────────────────────────────────────
 
   const SECTORS = ["Technology","Healthcare","Financial Services","Consumer Cyclical","Consumer Defensive","Energy","Industrials","Communication Services","Basic Materials","Utilities","Real Estate"];
-  const INDEXES = [["", "All universes"], ["sp500", "S&P 500"], ["nasdaq100", "NASDAQ 100"], ["ftse250", "FTSE 250"]];
+  const INDEXES = [["", "All universes"], ["sp500", "S&P 500"], ["nasdaq100", "NASDAQ 100"], ["ftse100", "FTSE 100"], ["ftse250", "FTSE 250"]];
 
   const SCREEN_FILTERS = [
     { id: "pe",         label: "P/E",            backend: "pe",          scale: 1,     defaultOp: "max", hint: "Share price ÷ EPS · <15 cheap, 15-25 fair, >30 expensive" },
