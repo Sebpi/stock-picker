@@ -688,8 +688,8 @@ def _expected_return_from_score(signal_score: float, confidence: str) -> float:
     """Annualised expected return % given a signal score and confidence."""
     if signal_score is None:
         return 0.0
-    # Anchor table (same intent as orchestrator.SCORE_TO_12M_RETURN, simplified)
-    anchors = [(0, -30.0), (50, -2.0), (60, 4.0), (70, 10.0), (80, 18.0), (100, 28.0)]
+    # Anchor table — must stay in sync with orchestrator.SCORE_TO_12M_RETURN
+    anchors = [(0, -30.0), (30, -15.0), (50, -2.0), (60, 4.0), (70, 10.0), (80, 18.0), (100, 28.0)]
     s = max(0.0, min(100.0, float(signal_score)))
     base = anchors[-1][1]
     for (s0, r0), (s1, r1) in zip(anchors, anchors[1:]):
