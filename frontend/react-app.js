@@ -2469,29 +2469,42 @@
       } catch (err) { setStatus("Error: " + err.message); }
     }
 
+    function chooseImportMode(onChosen) {
+      const replace = window.confirm(
+        "Replace portfolio?\n\nOK = Replace all existing transactions with this file (use this to fix a doubled import)\nCancel = Append only new transactions (skips duplicates)"
+      );
+      onChosen(replace);
+    }
+
     async function uploadCsv(e) {
       const file = e.target.files[0]; if (!file) return;
-      setStatus("Importing CSV...");
-      const form = new FormData(); form.append("file", file);
-      try {
-        const data = await api("/api/portfolio/import", { method: "POST", body: form });
-        setStatus(`Imported ${data.imported || 0} trade${data.imported === 1 ? "" : "s"}.`);
-        load();
-      } catch (err) { setStatus("CSV import failed: " + err.message); }
-      finally { e.target.value = ""; }
+      e.target.value = "";
+      chooseImportMode(async (replace) => {
+        setStatus(replace ? "Replacing portfolio from CSV..." : "Importing CSV (skipping duplicates)...");
+        const form = new FormData(); form.append("file", file);
+        try {
+          const data = await api(`/api/portfolio/import?replace=${replace}`, { method: "POST", body: form });
+          const imp = data.imported || 0;
+          const skp = data.skipped || 0;
+          setStatus(`Imported ${imp} trade${imp === 1 ? "" : "s"}${skp > 0 ? ` · ${skp} skipped` : ""}.`);
+          load();
+        } catch (err) { setStatus("CSV import failed: " + err.message); }
+      });
     }
 
     async function uploadPdf(e) {
       const file = e.target.files[0]; if (!file) return;
-      setStatus("Importing PDF... Claude is parsing (15-30s)...");
-      const form = new FormData(); form.append("file", file);
-      try {
-        const data = await api("/api/portfolio/import-pdf", { method: "POST", body: form });
-        if (data.imported === 0 && data.skipped === 0) { setStatus(data.message || "No transactions found."); }
-        else { setStatus(`Imported ${data.imported || 0} · skipped ${data.skipped || 0}.`); }
-        load();
-      } catch (err) { setStatus("PDF import failed: " + err.message); }
-      finally { e.target.value = ""; }
+      e.target.value = "";
+      chooseImportMode(async (replace) => {
+        setStatus("Importing PDF... Claude is parsing (15-30s)...");
+        const form = new FormData(); form.append("file", file);
+        try {
+          const data = await api(`/api/portfolio/import-pdf?replace=${replace}`, { method: "POST", body: form });
+          if (data.imported === 0 && data.skipped === 0) { setStatus(data.message || "No transactions found."); }
+          else { setStatus(`Imported ${data.imported || 0} · skipped ${data.skipped || 0}.`); }
+          load();
+        } catch (err) { setStatus("PDF import failed: " + err.message); }
+      });
     }
 
     const positions = data?.positions || [];
@@ -2503,6 +2516,14 @@
         h(Button, { key: "csv", onClick: () => fileRef.current?.click() }, "⇪ Import CSV"),
         h(Button, { key: "pdf", onClick: () => pdfRef.current?.click() }, "⇪ Import Saxo PDF"),
         h(Button, { key: "refresh", onClick: load, disabled: busy }, "↻ Refresh"),
+        h(Button, { key: "reset", kind: "danger", onClick: async () => {
+          if (!window.confirm("Clear ALL portfolio transactions? This cannot be undone.")) return;
+          try {
+            await api("/api/portfolio/reset", { method: "DELETE" });
+            setStatus("Portfolio cleared. Re-import your CSV to start fresh.");
+            load();
+          } catch (err) { setStatus("Reset failed: " + err.message); }
+        }}, "Reset"),
         h("input", { key: "csvf", ref: fileRef, type: "file", accept: ".csv", className: "hidden", onChange: uploadCsv }),
         h("input", { key: "pdff", ref: pdfRef, type: "file", accept: ".pdf", className: "hidden", onChange: uploadPdf }),
       ] }),
