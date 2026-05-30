@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-_FILE = Path(__file__).parent / "scheduler_settings.json"
+_FILE = Path(os.getenv("DATA_DIR", str(Path(__file__).parent))) / "scheduler_settings.json"
 
 _DEFAULTS: dict[str, Any] = {
     "thesis_auto_run_enabled": os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
