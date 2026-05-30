@@ -23,6 +23,7 @@
     ["alerts", "Alerts"],
     ["portfolio", "Portfolio"],
     ["paper", "Paper P&L"],
+    ["help", "Help"],
   ];
 
   // ──────────────────────────────────────────────────────────────
@@ -2935,11 +2936,248 @@
       alerts: h(Alerts),
       portfolio: h(Portfolio, { openDetail }),
       paper: h(PaperPnL),
+      help: h(Help),
     };
 
     return h(React.Fragment, null,
       h(Shell, { user, active, setActive, logout: () => { setToken(""); setUser(""); }, theme, toggleTheme }, tabs[active] || tabs.screener),
       detail ? h(StockDetail, { ticker: detail, onClose: () => setDetail(null) }) : null
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Help
+  // ──────────────────────────────────────────────────────────────
+
+  const AGENTS = [
+    {
+      name: "Fundamentals",
+      icon: "📊",
+      tagline: "Business quality & financial health",
+      description: "Analyses revenue growth, profit margins, free cash flow generation, balance sheet strength, and share dilution trends. A high score indicates a financially healthy, growing business with durable earnings.",
+      sources: ["yfinance (income statement, balance sheet, cash flow)"],
+      weight: "High — core quality gate for BUY signals",
+    },
+    {
+      name: "Valuation",
+      icon: "💰",
+      tagline: "Price vs intrinsic value",
+      description: "Assesses whether the stock is cheap or expensive relative to its history, peers, and a DCF-derived intrinsic value. Uses P/E, P/B, EV/EBITDA, FCF yield, and margin of safety. A high score means the stock is attractively priced.",
+      sources: ["yfinance (pricing multiples, earnings, book value)"],
+      weight: "High — used directly in DCF margin-of-safety filter",
+    },
+    {
+      name: "Technical Risk",
+      icon: "📈",
+      tagline: "Price action & momentum",
+      description: "Evaluates RSI, 52-week range position, distance from 50-day and 200-day moving averages, recent 5-day return, and short interest. High score = strong technical setup with positive momentum and limited downside risk.",
+      sources: ["yfinance (historical prices, volume)"],
+      weight: "Medium — used for timing, not fundamental quality",
+    },
+    {
+      name: "Growth Revisions",
+      icon: "🔭",
+      tagline: "Analyst estimate momentum",
+      description: "Tracks analyst revision momentum — whether forward EPS and revenue estimates are being upgraded or cut, guidance beats/misses, and the catalyst calendar. Rising estimates signal improving business momentum.",
+      sources: ["yfinance (analyst estimates, earnings history)"],
+      weight: "Medium — forward-looking signal",
+    },
+    {
+      name: "Sentiment & News",
+      icon: "📰",
+      tagline: "News tone & market narrative",
+      description: "Scans recent news headlines for positive and negative keywords, applies VIX and S&P 500 momentum adjustments, and factors in beta-adjusted market sensitivity. Captures short-term narrative shifts that may not yet be priced in.",
+      sources: ["Finnhub (live news headlines)", "yfinance (VIX, SPY prices)"],
+      weight: "Medium — noisy but captures near-term catalysts",
+    },
+    {
+      name: "Macro & Liquidity",
+      icon: "🌐",
+      tagline: "Interest rates, inflation & credit",
+      description: "Assesses the macro regime — rates, inflation, credit spreads, and liquidity conditions — and how they affect equity risk premiums. Uses proxy tickers (TLT, HYG, DXY) and optionally FRED for higher-quality macro data.",
+      sources: ["yfinance (TLT, HYG, DXY, GLD proxies)", "FRED API (optional, higher quality)"],
+      weight: "Medium — regime filter, affects all stocks simultaneously",
+    },
+    {
+      name: "Industry & Competition",
+      icon: "🏭",
+      tagline: "Competitive position & peer read-across",
+      description: "Evaluates the stock's competitive moat, sector tailwinds/headwinds, and how peers are performing. Thematic exposure (AI, energy transition, etc.) is factored in. High score = dominant position in a growing industry.",
+      sources: ["yfinance (sector, peer data)"],
+      weight: "Medium — useful for sector rotation decisions",
+    },
+    {
+      name: "Insider Activity",
+      icon: "🔍",
+      tagline: "SEC Form 4 insider transactions",
+      description: "Analyses the past 60 days of Form 4 filings from SEC EDGAR. Cluster-buying (3+ insiders buying simultaneously) is the strongest signal. Net dollar flow, unique insider count, and sale patterns are all scored. Insiders know their business better than anyone.",
+      sources: ["SEC EDGAR (Form 4 XML filings, cached in SQLite)"],
+      weight: "High at 3-month horizon (0.10) where Form 4 cluster signals are strongest; lighter at 12m (0.04)",
+    },
+    {
+      name: "Portfolio Risk",
+      icon: "⚖️",
+      tagline: "Concentration, beta & correlation",
+      description: "Assesses how adding this stock would affect overall portfolio risk — concentration, sector overlap, beta exposure, and correlation with existing holdings. High score means the stock is a good portfolio fit (diversifying, manageable beta).",
+      sources: ["yfinance (historical prices for correlation)", "Current portfolio holdings"],
+      weight: "Medium — portfolio construction filter",
+    },
+    {
+      name: "Orchestrator",
+      icon: "🧠",
+      tagline: "Aggregates all 9 agents into an investment thesis",
+      description: "Runs all 9 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 9 agents above", "Claude Sonnet (thesis narrative generation)"],
+      weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
+    },
+  ];
+
+  const TABS_GUIDE = [
+    { tab: "Screener", icon: "🔎", desc: "Filter the full S&P 500 / NASDAQ 100 / FTSE 100 / FTSE 250 universe by valuation, growth, quality, momentum, and liquidity. Click any row to open a detailed stock card." },
+    { tab: "Watchlist", icon: "📌", desc: "Your pinned tickers with live prices and intraday change. Add stocks here to include them in predictions, thesis runs, and alerts." },
+    { tab: "Sentiment", icon: "🌡️", desc: "Real-time sentiment scoring for your watchlist using VIX, S&P momentum, beta, and news headline keywords. Provides a quick market-mood snapshot." },
+    { tab: "AI Advisor", icon: "💬", desc: "Free-form chat with Claude about any stock, sector, or portfolio question. Has context about your current watchlist and portfolio." },
+    { tab: "Predictions", icon: "🎯", desc: "Short-term directional signals for each watchlist ticker generated by Claude Haiku using factor scores, macro, and news. Refreshes on a schedule or manually. Confidence (high/medium/low) and score (0–100) drive the Signals tab." },
+    { tab: "Thesis", icon: "📋", desc: "Deep 10-agent investment thesis for any ticker — takes 60–90s to generate. Produces a structured bull/base/bear case with 3m, 6m, 12m return forecasts using Claude Sonnet." },
+    { tab: "Backtest", icon: "🔁", desc: "Replays the mechanical signal model against 4–6 weeks of historical data to measure directional accuracy. The Goal & Reward card breaks down accuracy by VIX regime, momentum regime, and prediction direction." },
+    { tab: "Signals", icon: "📡", desc: "BUY/SELL recommendations generated from the latest predictions using Phase 1–5 portfolio construction rules: score floor, cooldown, market regime gate, position sizing, sector caps, and VaR budget." },
+    { tab: "Alerts", icon: "🔔", desc: "Scheduled alert snapshots that fire WhatsApp/email notifications when a ticker crosses BUY/SELL thresholds. Requires ≥5 of 10 agents net-positive for a BUY alert." },
+    { tab: "Portfolio", icon: "💼", desc: "Tracks your real portfolio via CSV or PDF import. Shows cost basis, current value, unrealised P&L per position. Reset and re-import if positions double." },
+    { tab: "Paper P&L", icon: "📝", desc: "Simulated paper trading portfolio that auto-executes BUY/SELL signals from the Signals tab. Useful for tracking the model's hypothetical performance without real money." },
+    { tab: "Help", icon: "❓", desc: "This page." },
+  ];
+
+  const DATA_SOURCES = [
+    { name: "yfinance / Yahoo Finance", icon: "📉", desc: "Primary source for prices, fundamentals, analyst estimates, and historical data. Free, no API key required. Note: datacenter IPs are sometimes blocked by Yahoo — Finnhub is used for news as a fallback." },
+    { name: "Finnhub", icon: "📰", desc: "Cloud-friendly news headlines for watchlist tickers. Requires a free FINNHUB_API_KEY Fly secret. Used instead of Yahoo news which blocks datacenter IPs." },
+    { name: "SEC EDGAR", icon: "🏛️", desc: "Form 4 insider transaction filings. Fetched directly from data.sec.gov XML feeds, rate-limited to under 10 req/s. Cached in SQLite — first fetch per ticker takes 10–20s." },
+    { name: "FRED (Federal Reserve)", icon: "🏦", desc: "Optional higher-quality macro data (interest rates, inflation, credit spreads). Requires FRED_API_KEY. If not set, the Macro agent uses yfinance ETF proxies (TLT, HYG, DXY, GLD)." },
+    { name: "Wikipedia", icon: "📖", desc: "Index constituent lists (S&P 500, NASDAQ 100, FTSE 100, FTSE 250) refreshed on startup. Falls back to a hardcoded seed list if Wikipedia is unreachable." },
+    { name: "Anthropic Claude", icon: "🤖", desc: "Two models in use: Claude Haiku (fast, cheaper) for daily predictions and screener analysis; Claude Sonnet (higher quality, higher cost) for investment thesis narrative generation." },
+  ];
+
+  function Help() {
+    const [openAgent, setOpenAgent] = useState(null);
+
+    return h("div", { className: "grid gap-6 pb-10" },
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 10 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+
+      // Pipeline flow
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-3" }, "Analysis pipeline"),
+        h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
+          [
+            ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
+            ["10 Specialist agents", "Run in parallel"],
+            ["Orchestrator", "Aggregates + weights"],
+            ["Investment thesis", "Claude Sonnet narrative"],
+            ["Predictions", "Claude Haiku signals"],
+            ["Signals tab", "Phase 1–5 rules"],
+            ["Alerts", "WhatsApp · Email"],
+          ].map(([label, sub], i, arr) => [
+            h("div", { key: label, className: "rounded-lg border border-pulse-line bg-pulse-card px-3 py-2 text-center" },
+              h("div", { className: "font-medium text-pulse-ink text-xs" }, label),
+              h("div", { className: "text-[10px] text-pulse-muted mt-0.5" }, sub)
+            ),
+            i < arr.length - 1 && h("div", { key: `arr-${i}`, className: "text-pulse-dim text-lg" }, "→"),
+          ])
+        )
+      ),
+
+      // 10 Agents
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 10 AI agents"),
+        h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
+        h("div", { className: "grid gap-2" },
+          AGENTS.map(a => h("div", { key: a.name },
+            h("button", {
+              className: cx("w-full text-left rounded-lg border px-4 py-3 transition-colors",
+                openAgent === a.name
+                  ? "border-pulse-cyan/40 bg-pulse-cyan/5"
+                  : "border-pulse-line bg-pulse-panel hover:border-pulse-cyan/30"
+              ),
+              onClick: () => setOpenAgent(openAgent === a.name ? null : a.name),
+            },
+              h("div", { className: "flex items-center justify-between gap-2" },
+                h("div", { className: "flex items-center gap-3" },
+                  h("span", { className: "text-lg" }, a.icon),
+                  h("div", null,
+                    h("div", { className: "font-semibold text-sm text-pulse-ink" }, a.name),
+                    h("div", { className: "text-xs text-pulse-muted" }, a.tagline)
+                  )
+                ),
+                h("span", { className: "text-pulse-dim text-xs" }, openAgent === a.name ? "▲" : "▼")
+              )
+            ),
+            openAgent === a.name && h("div", { className: "mt-1 rounded-lg border border-pulse-cyan/20 bg-pulse-card px-4 py-3 grid gap-3 text-sm" },
+              h("p", { className: "text-pulse-muted leading-relaxed" }, a.description),
+              h("div", { className: "grid sm:grid-cols-2 gap-3" },
+                h("div", null,
+                  h("div", { className: "text-[10px] font-mono uppercase tracking-[0.16em] text-pulse-dim mb-1" }, "Data sources"),
+                  h("ul", { className: "space-y-0.5" },
+                    a.sources.map(s => h("li", { key: s, className: "text-xs text-pulse-muted flex gap-2" },
+                      h("span", { className: "text-pulse-cyan mt-0.5" }, "·"),
+                      s
+                    ))
+                  )
+                ),
+                h("div", null,
+                  h("div", { className: "text-[10px] font-mono uppercase tracking-[0.16em] text-pulse-dim mb-1" }, "Weight / role"),
+                  h("p", { className: "text-xs text-pulse-muted" }, a.weight)
+                )
+              )
+            )
+          ))
+        )
+      ),
+
+      // Tabs guide
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-3" }, "Tab reference"),
+        h("div", { className: "grid gap-2 sm:grid-cols-2" },
+          TABS_GUIDE.map(t => h("div", { key: t.tab, className: "rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2" },
+            h("div", { className: "flex items-center gap-2 mb-1" },
+              h("span", null, t.icon),
+              h("span", { className: "font-semibold text-sm text-pulse-ink" }, t.tab)
+            ),
+            h("p", { className: "text-xs text-pulse-muted leading-relaxed" }, t.desc)
+          ))
+        )
+      ),
+
+      // Data sources
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-3" }, "Data sources"),
+        h("div", { className: "grid gap-2 sm:grid-cols-2" },
+          DATA_SOURCES.map(d => h("div", { key: d.name, className: "rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2" },
+            h("div", { className: "flex items-center gap-2 mb-1" },
+              h("span", null, d.icon),
+              h("span", { className: "font-semibold text-sm text-pulse-ink" }, d.name)
+            ),
+            h("p", { className: "text-xs text-pulse-muted leading-relaxed" }, d.desc)
+          ))
+        )
+      ),
+
+      // Key concepts
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-3" }, "Key concepts"),
+        h("div", { className: "grid gap-3 sm:grid-cols-2" },
+          [
+            ["Score (0–100)", "Composite agent score. < 40 = bearish, 40–60 = neutral, > 60 = bullish. BUY signals require ≥ 70."],
+            ["Confidence", "High / Medium / Low — how certain the model is. HIGH requires multiple aligning signals and no major risk flags. Only HIGH and MEDIUM generate BUY signals by default."],
+            ["Thesis", "A structured bull/base/bear investment case with 3m, 6m, 12m return forecasts, generated by 10 specialist agents + Claude Sonnet narrative."],
+            ["Calibration", "Historical bias correction applied to future predictions. Computed from resolved 4-week predictions. Rebuilt automatically when new outcomes mature."],
+            ["Market regime gate", "BUYs are blocked when SPY is below its 200-day moving average OR VIX > 25 (configurable). Prevents buying into broad market downtrends."],
+            ["VaR cap", "Portfolio 95% 1-month Value-at-Risk is capped at 8% (configurable). Uses pairwise correlations between holdings. New positions that would breach this cap are rejected."],
+            ["Backtest accuracy", "The mechanical model (VIX + momentum + beta rules) accuracy on next-day direction. This is NOT the same as LLM prediction accuracy — check the LLM Accuracy card on the Backtest tab for the real figure."],
+            ["Prediction cooldown", "After a SELL signal, a 21-day cooldown prevents an immediate re-buy on the same ticker (avoids buy/sell churn)."],
+          ].map(([term, def]) => h("div", { key: term, className: "rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2" },
+            h("div", { className: "font-semibold text-xs text-pulse-cyan mb-1" }, term),
+            h("p", { className: "text-xs text-pulse-muted leading-relaxed" }, def)
+          ))
+        )
+      )
     );
   }
 
