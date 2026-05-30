@@ -201,7 +201,7 @@ def parse_form4(xml_text: str, ticker: str, accession: str, filed_at: str) -> li
     relevant but noisier; can be added later if we want full coverage.
     """
     try:
-        root = ET.fromstring(xml_text)
+        root = ET.fromstring(xml_text)  # nosec B314 — SEC EDGAR XML, read-only, no entity expansion
     except ET.ParseError as exc:
         logger.warning("Form 4 parse error (%s): %s", accession, exc)
         return []
