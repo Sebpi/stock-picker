@@ -6698,12 +6698,15 @@ _MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MB
 
 @app.post("/api/portfolio/import")
 @limiter.limit("10/hour")
-async def import_portfolio(request: Request, file: UploadFile = File(...)):
+async def import_portfolio(request: Request, file: UploadFile = File(...), replace: bool = False):
     """
     Import transactions from a CSV file.
     Required columns: type, ticker, qty, price, date
     type must be 'buy' or 'sell'
     date format: YYYY-MM-DD
+
+    replace=true  — clears all existing transactions before importing (idempotent full reload)
+    replace=false — appends, skipping rows that are exact duplicates of existing transactions
     """
     content = await file.read(_MAX_CSV_BYTES + 1)
     if len(content) > _MAX_CSV_BYTES:
@@ -6718,8 +6721,14 @@ async def import_portfolio(request: Request, file: UploadFile = File(...)):
     if not required.issubset({c.strip().lower() for c in (reader.fieldnames or [])}):
         raise HTTPException(status_code=400, detail=f"CSV must have columns: {', '.join(sorted(required))}")
 
-    transactions = load_portfolio()
+    transactions = [] if replace else load_portfolio()
     imported, skipped = 0, []
+
+    # Build dedup key set from whatever transactions we're starting with
+    existing_keys: set[tuple] = {
+        (t["type"], t["ticker"], float(t["qty"]), float(t["price"]), t["date"])
+        for t in transactions
+    }
 
     # Pre-build current positions for sell validation
     positions = compute_positions(transactions)
@@ -6743,6 +6752,12 @@ async def import_portfolio(request: Request, file: UploadFile = File(...)):
 
             # Validate date
             datetime.strptime(tx_date, "%Y-%m-%d")
+
+            # Skip exact duplicates (same type+ticker+qty+price+date already present)
+            dedup_key = (tx_type, ticker, qty, price, tx_date)
+            if dedup_key in existing_keys:
+                skipped.append(f"Row {i} ({ticker}): duplicate, skipped")
+                continue
 
             # For sells, check sufficient shares
             if tx_type == "sell":
@@ -6769,6 +6784,7 @@ async def import_portfolio(request: Request, file: UploadFile = File(...)):
                 "timestamp": datetime.utcnow().isoformat(),
             }
             transactions.append(tx)
+            existing_keys.add(dedup_key)
             # Update positions dict for subsequent sell validation in same file
             if ticker not in positions:
                 positions[ticker] = {"shares": 0, "avg_cost": 0, "realised_pnl": 0, "name": name}
@@ -6797,6 +6813,15 @@ async def import_portfolio(request: Request, file: UploadFile = File(...)):
     }
 
 
+@app.delete("/api/portfolio/reset")
+@limiter.limit("10/hour")
+async def reset_portfolio(request: Request, current_user: str = Depends(get_current_user)):
+    """Clear all portfolio transactions."""
+    save_portfolio([])
+    logger.info("PORTFOLIO_RESET user=%s", current_user)
+    return {"ok": True, "message": "Portfolio cleared."}
+
+
 @app.get("/api/portfolio/template")
 def portfolio_template():
     """Return a CSV template for portfolio import."""
@@ -6808,10 +6833,11 @@ def portfolio_template():
 
 @app.post("/api/portfolio/import-pdf")
 @limiter.limit("5/hour")
-async def import_portfolio_pdf(request: Request, file: UploadFile = File(...)):
+async def import_portfolio_pdf(request: Request, file: UploadFile = File(...), replace: bool = False):
     """
     Import transactions from a Saxo Bank PDF statement.
     Extracts text from the PDF and uses Claude AI to parse transactions.
+    replace=true clears all existing transactions before importing.
     """
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -6883,10 +6909,15 @@ PDF TEXT:
         return {"imported": 0, "skipped": 0, "errors": [], "preview": [], "message": "No transactions found in this PDF."}
 
     # Validate and import
-    transactions = load_portfolio()
+    transactions = [] if replace else load_portfolio()
     positions    = compute_positions(transactions)
     imported, skipped = 0, []
     preview = []
+
+    existing_keys: set[tuple] = {
+        (t["type"], t["ticker"], float(t["qty"]), float(t["price"]), t["date"])
+        for t in transactions
+    }
 
     for i, row in enumerate(parsed, start=1):
         try:
@@ -6905,6 +6936,10 @@ PDF TEXT:
 
             datetime.strptime(tx_date, "%Y-%m-%d")
 
+            dedup_key = (tx_type, ticker, qty, price, tx_date)
+            if dedup_key in existing_keys:
+                skipped.append(f"Row {i} ({ticker}): duplicate, skipped"); continue
+
             if tx_type == "sell":
                 held = positions.get(ticker, {}).get("shares", 0)
                 if qty > held:
@@ -6922,6 +6957,7 @@ PDF TEXT:
                 "date": tx_date, "timestamp": datetime.utcnow().isoformat(),
             }
             transactions.append(tx)
+            existing_keys.add(dedup_key)
             preview.append({"type": tx_type, "ticker": ticker, "name": name, "qty": qty, "price": price, "date": tx_date})
 
             if ticker not in positions:
