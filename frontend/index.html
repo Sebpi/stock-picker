@@ -5,12 +5,71 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>StockLens v__APP_VERSION__ - Mobile First</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
+  <!-- Apply saved theme before React loads to prevent flash of wrong theme -->
+  <script>try{if(localStorage.getItem("stocklens_theme")==="light")document.documentElement.classList.add("light")}catch(e){}</script>
+  <style>
+    /* ── Colour tokens ─────────────────────────────────────────────
+       Defined as raw RGB channels so Tailwind opacity modifiers
+       (bg-pulse-green/10 etc.) work without a build step.
+       Dark mode is the default; html.light overrides each token.  */
+    :root {
+      --c-pulse-bg:      6 7 10;
+      --c-pulse-panel:   12 14 20;
+      --c-pulse-card:    18 21 29;
+      --c-pulse-line:    36 42 58;
+      --c-pulse-ink:     232 236 245;
+      --c-pulse-muted:   168 176 194;
+      --c-pulse-dim:     94 102 120;
+      --c-pulse-cyan:    0 229 217;
+      --c-pulse-magenta: 255 77 202;
+      --c-pulse-lime:    196 255 61;
+      --c-pulse-amber:   255 200 87;
+      --c-pulse-red:     255 77 110;
+      --c-pulse-green:   63 222 126;
+    }
+    html.light {
+      --c-pulse-bg:      240 242 247;
+      --c-pulse-panel:   255 255 255;
+      --c-pulse-card:    248 249 252;
+      --c-pulse-line:    221 226 239;
+      --c-pulse-ink:     17 24 39;
+      --c-pulse-muted:   107 114 128;
+      --c-pulse-dim:     156 163 175;
+      --c-pulse-cyan:    8 145 178;
+      --c-pulse-magenta: 192 38 211;
+      --c-pulse-lime:    101 163 13;
+      --c-pulse-amber:   217 119 6;
+      --c-pulse-red:     220 38 38;
+      --c-pulse-green:   22 163 74;
+    }
+
+    html, body, #root { min-height: 100%; background: rgb(var(--c-pulse-bg)); }
+    body {
+      margin: 0;
+      color: rgb(var(--c-pulse-ink));
+      -webkit-text-size-adjust: 100%;
+      -webkit-tap-highlight-color: transparent;
+      background:
+        radial-gradient(900px 500px at 0% -10%, rgba(0,229,217,.12), transparent 60%),
+        radial-gradient(720px 460px at 100% 8%, rgba(255,77,202,.10), transparent 62%),
+        rgb(var(--c-pulse-bg));
+    }
+    html.light body {
+      background: rgb(var(--c-pulse-bg));
+    }
+    input, select, textarea { font-size: 16px; }
+    .scrollbar-none::-webkit-scrollbar { display: none; }
+    .scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
+  </style>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     // Play CDN reads tailwind.config from this script tag AFTER it has loaded.
     // Setting the config before the CDN script blanks it out, so bg-pulse-*,
     // border-pulse-*, and from-pulse-cyan utilities never get generated and
     // inputs render with a default white background.
+    //
+    // Colors use rgb(var(--c-pulse-*) / <alpha-value>) so all opacity modifiers
+    // (bg-pulse-green/10 etc.) keep working while CSS variables handle theming.
     tailwind.config = {
         theme: {
           extend: {
@@ -20,24 +79,24 @@
             },
             colors: {
               pulse: {
-                bg: "#06070a",
-                panel: "#0c0e14",
-                card: "#12151d",
-                line: "#242a3a",
-                ink: "#e8ecf5",
-                muted: "#a8b0c2",
-                dim: "#5e6678",
-                cyan: "#00e5d9",
-                magenta: "#ff4dca",
-                lime: "#c4ff3d",
-                amber: "#ffc857",
-                red: "#ff4d6e",
-                green: "#3fde7e",
+                bg:      "rgb(var(--c-pulse-bg) / <alpha-value>)",
+                panel:   "rgb(var(--c-pulse-panel) / <alpha-value>)",
+                card:    "rgb(var(--c-pulse-card) / <alpha-value>)",
+                line:    "rgb(var(--c-pulse-line) / <alpha-value>)",
+                ink:     "rgb(var(--c-pulse-ink) / <alpha-value>)",
+                muted:   "rgb(var(--c-pulse-muted) / <alpha-value>)",
+                dim:     "rgb(var(--c-pulse-dim) / <alpha-value>)",
+                cyan:    "rgb(var(--c-pulse-cyan) / <alpha-value>)",
+                magenta: "rgb(var(--c-pulse-magenta) / <alpha-value>)",
+                lime:    "rgb(var(--c-pulse-lime) / <alpha-value>)",
+                amber:   "rgb(var(--c-pulse-amber) / <alpha-value>)",
+                red:     "rgb(var(--c-pulse-red) / <alpha-value>)",
+                green:   "rgb(var(--c-pulse-green) / <alpha-value>)",
               }
             },
             boxShadow: {
-              glow: "0 0 28px rgba(0,229,217,.14)",
-              magenta: "0 0 28px rgba(255,77,202,.12)",
+              glow:    "0 0 28px rgb(var(--c-pulse-cyan) / .14)",
+              magenta: "0 0 28px rgb(var(--c-pulse-magenta) / .12)",
             }
           }
         }
@@ -45,22 +104,6 @@
   </script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <style>
-    html, body, #root { min-height: 100%; background: #06070a; }
-    body {
-      margin: 0;
-      color: #e8ecf5;
-      -webkit-text-size-adjust: 100%;
-      -webkit-tap-highlight-color: transparent;
-      background:
-        radial-gradient(900px 500px at 0% -10%, rgba(0,229,217,.12), transparent 60%),
-        radial-gradient(720px 460px at 100% 8%, rgba(255,77,202,.10), transparent 62%),
-        #06070a;
-    }
-    input, select, textarea { font-size: 16px; }
-    .scrollbar-none::-webkit-scrollbar { display: none; }
-    .scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
-  </style>
 </head>
 <body>
   <div id="root"></div>
