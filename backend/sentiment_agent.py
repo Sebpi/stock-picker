@@ -25,9 +25,48 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+import httpx
+
+_FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+
+
+def _fetch_finnhub_news(ticker: str, max_items: int = 10, days: int = 7) -> list[dict]:
+    """Fetch ticker news from Finnhub. Returns structured dicts matching fetch_ticker_news output."""
+    if not _FINNHUB_KEY:
+        return []
+    to_date = date.today().isoformat()
+    from_date = (date.today() - timedelta(days=days)).isoformat()
+    try:
+        r = httpx.get(
+            "https://finnhub.io/api/v1/company-news",
+            params={"symbol": ticker, "from": from_date, "to": to_date, "token": _FINNHUB_KEY},
+            timeout=10,
+        )
+        r.raise_for_status()
+        items = r.json() or []
+        result = []
+        for item in items[:max_items]:
+            title = item.get("headline", "")
+            if not title:
+                continue
+            ts = item.get("datetime", 0)
+            pub = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""
+            result.append({
+                "ticker": ticker,
+                "title": title,
+                "publisher": item.get("source", ""),
+                "published_at": pub,
+                "url": item.get("url", ""),
+                "summary": item.get("summary", ""),
+            })
+        return result
+    except Exception as exc:
+        log.warning("Finnhub news fetch failed for %s: %s", ticker, exc)
+        return []
 
 import anthropic
 import yfinance as yf
@@ -142,7 +181,15 @@ def load_watchlist_tickers() -> list[str]:
 # ── News fetching ──────────────────────────────────────────────────────────────
 
 def fetch_ticker_news(ticker: str, max_items: int = MAX_NEWS_PER_TICKER) -> list[dict]:
-    """Fetch recent news headlines + URLs for a ticker via yfinance."""
+    """Fetch recent news headlines + URLs for a ticker.
+
+    Tries Finnhub first (works from cloud IPs), falls back to yfinance.
+    """
+    items = _fetch_finnhub_news(ticker, max_items)
+    if items:
+        return items
+
+    # yfinance fallback (may be blocked from datacenter IPs)
     try:
         stock = yf.Ticker(ticker)
         raw = stock.news or []

@@ -1,9 +1,33 @@
 import argparse
+import datetime
 import json
+import os
 import time
 from pathlib import Path
 
+import httpx
 import yfinance as yf
+
+_FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+
+
+def _fetch_finnhub_headlines(ticker: str, days: int = 7) -> list[str]:
+    """Return up to 8 headline strings from Finnhub. Empty list if key unset or request fails."""
+    if not _FINNHUB_KEY:
+        return []
+    to_date = datetime.date.today().isoformat()
+    from_date = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    try:
+        r = httpx.get(
+            "https://finnhub.io/api/v1/company-news",
+            params={"symbol": ticker, "from": from_date, "to": to_date, "token": _FINNHUB_KEY},
+            timeout=10,
+        )
+        r.raise_for_status()
+        items = r.json() or []
+        return [item["headline"] for item in items[:8] if item.get("headline")]
+    except Exception:
+        return []
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -57,18 +81,18 @@ def classify_sentiment(score):
 def analyze_ticker(ticker):
     stock = yf.Ticker(ticker)
     info = stock.info or {}
-    headlines = []
-    news_items = []
 
-    try:
-        news_items = stock.news or []
-    except Exception:
-        news_items = []
-
-    for item in news_items[:8]:
-        title = item.get("title") or ""
-        if title:
-            headlines.append(title)
+    # Finnhub first (works from cloud IPs); yfinance fallback for local runs
+    headlines = _fetch_finnhub_headlines(ticker)
+    if not headlines:
+        try:
+            for item in (stock.news or [])[:8]:
+                content = item.get("content") if isinstance(item.get("content"), dict) else {}
+                title = content.get("title") or item.get("title") or ""
+                if title:
+                    headlines.append(title)
+        except Exception:
+            pass
 
     news_score = sum(headline_score(title) for title in headlines)
 
