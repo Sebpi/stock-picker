@@ -78,6 +78,8 @@
     return `${n >= 0 ? "+" : ""}${n.toFixed(digits == null ? 1 : digits)}%`;
   }
 
+  function round1(n) { return Math.round(Number(n) * 10) / 10; }
+
   function fmtDate(value) {
     if (!value) return "—";
     try { return new Date(value).toLocaleString(); } catch { return String(value); }
@@ -1946,6 +1948,7 @@
   function Backtest() {
     const [bt, setBt] = useState(null);
     const [sim, setSim] = useState(null);
+    const [goal, setGoal] = useState(null);
     const [btBusy, setBtBusy] = useState(false);
     const [simBusy, setSimBusy] = useState(false);
     const [btStatus, setBtStatus] = useState("");
@@ -1953,9 +1956,24 @@
 
     async function runBacktest() {
       setBtBusy(true); setBtStatus("Running backtest... fetching 4 weeks of historical data (30-60s)..."); setBt(null);
-      try { const data = await api("/api/predictions/backtest"); setBt(data); setBtStatus(""); }
+      try {
+        const [data, goalData] = await Promise.all([
+          api("/api/predictions/backtest"),
+          api("/api/predictions/goal").catch(() => null),
+        ]);
+        setBt(data);
+        setGoal(goalData);
+        setBtStatus("");
+      }
       catch (err) { setBtStatus("Error: " + err.message); }
       finally { setBtBusy(false); }
+    }
+
+    async function updateGoal(targetPct) {
+      try {
+        const res = await api("/api/predictions/goal", { method: "POST", body: JSON.stringify({ target_pct: targetPct }) });
+        setGoal(g => g ? { ...g, goal_target_pct: res.goal_target_pct } : g);
+      } catch (e) { /* silent */ }
     }
 
     async function runSim() {
@@ -1979,7 +1997,7 @@
         )
       ),
       h(Status, { message: btStatus, className: "mb-3" }),
-      bt && bt.summary ? h(BacktestSummary, { data: bt }) : null,
+      bt && bt.summary ? h(BacktestSummary, { data: bt, goal, onGoalChange: updateGoal }) : null,
       h("div", { className: "mt-6 border-t border-pulse-line pt-6" },
         h(SectionHead, { title: "P&L Simulator", kicker: "Monte Carlo", subtitle: "Replays buy signals through position sizing and runs 1,000 paths forward to project a 12-month range.", actions: [h(Button, { key: "sim", kind: "primary", onClick: runSim, disabled: simBusy }, simBusy ? "Running..." : "▶ Run Simulator")] }),
         h(Status, { message: simStatus, className: "mb-3" }),
@@ -1988,7 +2006,116 @@
     );
   }
 
-  function BacktestSummary({ data }) {
+  function GoalRewardCard({ data, goal, onGoalChange }) {
+    const s = data.summary;
+    const target = (goal && goal.goal_target_pct) || data.goal_target_pct || 55.0;
+    const mechAcc = s.accuracy_pct || 0;
+    const llmAcc = goal && goal.llm_accuracy_pct;
+    const [editTarget, setEditTarget] = useState(false);
+    const [targetInput, setTargetInput] = useState(String(target));
+
+    const vixRows = [
+      { label: "VIX < 15", sublabel: "Calm", key: "calm_lt15" },
+      { label: "VIX 15–20", sublabel: "Normal", key: "moderate_15_20" },
+      { label: "VIX 20–25", sublabel: "Elevated", key: "elevated_20_25" },
+      { label: "VIX > 25", sublabel: "Fear", key: "fearful_gt25" },
+    ];
+    const momRows = [
+      { label: "S&P > +1%", sublabel: "Bullish", key: "bullish_gt1" },
+      { label: "S&P ±1%", sublabel: "Neutral", key: "neutral" },
+      { label: "S&P < -1%", sublabel: "Bearish", key: "bearish_lt_neg1" },
+    ];
+
+    function condCell(c) {
+      if (!c) return h("div", { className: "rounded-lg border border-pulse-line/40 bg-pulse-panel/50 p-3 text-center" }, h("div", { className: "text-xs text-pulse-dim" }, "—"));
+      const tone = c.accuracy_pct >= target ? "text-pulse-green" : c.accuracy_pct >= 50 ? "text-pulse-amber" : "text-pulse-red";
+      const bg = c.accuracy_pct >= target ? "border-pulse-green/30 bg-pulse-green/10" : c.accuracy_pct >= 50 ? "border-pulse-amber/20 bg-pulse-amber/5" : "border-pulse-red/30 bg-pulse-red/10";
+      return h("div", { className: `rounded-lg border p-3 text-center ${bg}` },
+        h("div", { className: `font-mono text-base font-bold ${tone}` }, c.accuracy_pct + "%"),
+        h("div", { className: "text-[11px] text-pulse-dim mt-0.5" }, `${c.correct}/${c.total}`)
+      );
+    }
+
+    const progressPct = Math.min(100, Math.max(0, (mechAcc / target) * 100));
+    const barColor = mechAcc >= target ? "bg-pulse-green" : mechAcc >= target * 0.9 ? "bg-pulse-amber" : "bg-pulse-red";
+
+    return h(Card, { className: "p-4" },
+      h("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Goal & Reward Model"),
+        editTarget
+          ? h("div", { className: "flex items-center gap-2" },
+              h("input", {
+                type: "number", min: 40, max: 80, step: 1,
+                value: targetInput,
+                onChange: e => setTargetInput(e.target.value),
+                className: "w-20 rounded border border-pulse-line bg-pulse-card px-2 py-1 text-sm font-mono text-pulse-ink"
+              }),
+              h(Button, { kind: "primary", onClick: () => { onGoalChange(parseFloat(targetInput)); setEditTarget(false); } }, "Set"),
+              h(Button, { onClick: () => setEditTarget(false) }, "Cancel")
+            )
+          : h("button", { onClick: () => setEditTarget(true), className: "text-xs text-pulse-cyan hover:underline" }, `Target: ${target}% — edit`)
+      ),
+
+      h("div", { className: "mt-3" },
+        h("div", { className: "flex justify-between text-[11px] text-pulse-muted mb-1" },
+          h("span", null, `Signal model: ${mechAcc}%`),
+          llmAcc != null ? h("span", null, `LLM predictions: ${llmAcc}% (${goal.llm_sample_count} resolved)`) : h("span", null, "LLM predictions: awaiting resolved outcomes"),
+          h("span", null, `Goal: ${target}%`)
+        ),
+        h("div", { className: "h-2 rounded-full bg-pulse-line overflow-hidden" },
+          h("div", { className: `h-full rounded-full transition-all ${barColor}`, style: { width: `${progressPct}%` } })
+        ),
+        mechAcc < target && h("div", { className: "text-[11px] text-pulse-muted mt-1" },
+          `${Math.abs(round1(target - mechAcc))}pp below goal`
+        )
+      ),
+
+      h("div", { className: "mt-4 grid gap-4 sm:grid-cols-2" },
+        h("div", null,
+          h("div", { className: "text-[10px] font-mono uppercase tracking-[0.16em] text-pulse-dim mb-2" }, "Accuracy by VIX regime"),
+          h("div", { className: "grid grid-cols-2 gap-2" },
+            vixRows.map(({ label, sublabel, key }) => h("div", { key },
+              h("div", { className: "text-[10px] text-pulse-muted" }, `${label} · ${sublabel}`),
+              condCell(data.by_vix_regime && data.by_vix_regime[key])
+            ))
+          )
+        ),
+        h("div", null,
+          h("div", { className: "text-[10px] font-mono uppercase tracking-[0.16em] text-pulse-dim mb-2" }, "Accuracy by momentum"),
+          h("div", { className: "grid grid-cols-3 gap-2" },
+            momRows.map(({ label, sublabel, key }) => h("div", { key },
+              h("div", { className: "text-[10px] text-pulse-muted" }, `${label} · ${sublabel}`),
+              condCell(data.by_momentum_regime && data.by_momentum_regime[key])
+            ))
+          ),
+          h("div", { className: "mt-3" },
+            h("div", { className: "text-[10px] font-mono uppercase tracking-[0.16em] text-pulse-dim mb-2" }, "By call direction"),
+            h("div", { className: "grid grid-cols-2 gap-2" },
+              [["long_calls", "Long (predict ↑)"], ["short_calls", "Short (predict ↓)"]].map(([key, lbl]) => h("div", { key },
+                h("div", { className: "text-[10px] text-pulse-muted" }, lbl),
+                condCell(data.by_direction && data.by_direction[key])
+              ))
+            )
+          )
+        )
+      ),
+
+      data.filtered_accuracy && h("div", { className: "mt-3 rounded-lg border border-pulse-cyan/30 bg-pulse-cyan/5 px-3 py-2 text-sm" },
+        h("span", { className: "font-medium text-pulse-cyan" }, "Filtered signal accuracy: "),
+        h("span", { className: "text-pulse-ink" }, `${data.filtered_accuracy.accuracy_pct}%`),
+        h("span", { className: "text-pulse-muted" }, ` over ${data.filtered_accuracy.total} signals (VIX < 20 + S&P not bearish)`)
+      ),
+
+      Array.isArray(data.recommendations) && data.recommendations.length > 0 && h("div", { className: "mt-4" },
+        h("div", { className: "text-[10px] font-mono uppercase tracking-[0.16em] text-pulse-dim mb-2" }, "Reward model recommendations"),
+        h("div", { className: "space-y-2" },
+          data.recommendations.map((r, i) => h("div", { key: i, className: "rounded-lg border border-pulse-line/60 bg-pulse-panel px-3 py-2 text-sm text-pulse-muted" }, r))
+        )
+      )
+    );
+  }
+
+  function BacktestSummary({ data, goal, onGoalChange }) {
     const s = data.summary;
     const tickerStats = data.by_ticker ? Object.entries(data.by_ticker).sort((a, b) => b[1].accuracy_pct - a[1].accuracy_pct) : [];
     const total = s.total || 0;
@@ -2006,6 +2133,7 @@
       h("div", { className: cx("rounded-lg border border-pulse-line px-4 py-2 text-sm", reliabilityTone) },
         h("span", { className: "font-medium" }, "Sample size: "), `${total} signals — `, reliability, total < 100 ? ` (need ${100 - total} more for meaningful conclusions)` : "."
       ),
+      h(GoalRewardCard, { data, goal, onGoalChange }),
       tickerStats.length ? h(Card, { className: "p-4" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "By ticker"),
         h("div", { className: "mt-3 grid grid-cols-2 gap-2 md:grid-cols-4 lg:grid-cols-6" },
