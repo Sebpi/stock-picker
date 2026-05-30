@@ -548,6 +548,7 @@ def load_settings() -> dict:
         "alert_buy_min_score": 72,
         "alert_sell_max_score": 42,
         # Phase 2: regime gate — block BUYs when broad market is risk-off
+        "prediction_accuracy_goal": 55.0,
         "regime_gate_enabled": True,
         "regime_spy_dma_period": 200,
         "regime_vix_max": 25.0,
@@ -5133,6 +5134,88 @@ async def backtest_predictions():
             "avg_abs_variance": round(sum(abs(r["variance"]) for r in rows) / len(rows), 2),
         }
 
+    # ── Condition-level accuracy (goal & reward model) ────────────────────────
+    def _cond_acc(rows: list) -> dict | None:
+        if not rows:
+            return None
+        c = sum(1 for r in rows if r["correct"])
+        return {"total": len(rows), "correct": c, "accuracy_pct": round(c / len(rows) * 100, 1)}
+
+    by_vix_regime = {
+        "calm_lt15":      _cond_acc([r for r in results if r["vix"] < 15]),
+        "moderate_15_20": _cond_acc([r for r in results if 15 <= r["vix"] < 20]),
+        "elevated_20_25": _cond_acc([r for r in results if 20 <= r["vix"] < 25]),
+        "fearful_gt25":   _cond_acc([r for r in results if r["vix"] >= 25]),
+    }
+    by_momentum_regime = {
+        "bullish_gt1":     _cond_acc([r for r in results if r["sp_5d_chg"] > 1.0]),
+        "neutral":         _cond_acc([r for r in results if -1.0 <= r["sp_5d_chg"] <= 1.0]),
+        "bearish_lt_neg1": _cond_acc([r for r in results if r["sp_5d_chg"] < -1.0]),
+    }
+    by_direction = {
+        "long_calls":  _cond_acc([r for r in results if r["predicted_pct"] > 0]),
+        "short_calls": _cond_acc([r for r in results if r["predicted_pct"] <= 0]),
+    }
+    filtered_rows = [r for r in results if r["vix"] < 20 and r["sp_5d_chg"] > -1.0]
+    filtered_accuracy = _cond_acc(filtered_rows)
+
+    goal_target = load_settings().get("prediction_accuracy_goal", 55.0)
+    overall_acc = round(correct / total * 100, 1) if total else 0.0
+
+    recommendations: list[str] = []
+    # Systematic directional bias
+    if abs(avg_pred - avg_actual) >= 0.4 and (avg_pred > 0) != (avg_actual > 0):
+        recommendations.append(
+            f"SYSTEMATIC BIAS: model averages {avg_pred:+.2f}% predicted but market averaged "
+            f"{avg_actual:+.2f}% — signals are pointing the wrong direction on average. "
+            "Consider recalibrating the fundamental adjustment or adding a baseline correction."
+        )
+    # VIX gate recommendations
+    for rk, rl in [("fearful_gt25", "VIX > 25 (fear)"), ("elevated_20_25", "VIX 20–25 (elevated)")]:
+        c = by_vix_regime.get(rk)
+        if c and c["total"] >= 5 and c["accuracy_pct"] < 48:
+            recommendations.append(
+                f"Gate signals during {rl} — accuracy is only {c['accuracy_pct']}% "
+                f"({c['correct']}/{c['total']}). The regime gate already blocks BUYs above "
+                "VIX 25; consider lowering the threshold to 20."
+            )
+    for rk, rl in [("calm_lt15", "VIX < 15 (calm)"), ("moderate_15_20", "VIX 15–20 (normal)")]:
+        c = by_vix_regime.get(rk)
+        if c and c["total"] >= 5 and c["accuracy_pct"] >= goal_target:
+            recommendations.append(
+                f"Prioritise signals during {rl} — accuracy is {c['accuracy_pct']}% "
+                f"({c['correct']}/{c['total']}), above the {goal_target}% goal."
+            )
+    # Direction bias
+    lc = by_direction.get("long_calls")
+    sc = by_direction.get("short_calls")
+    if lc and sc and lc["total"] >= 5 and sc["total"] >= 5:
+        if lc["accuracy_pct"] > sc["accuracy_pct"] + 10:
+            recommendations.append(
+                f"Long-call accuracy ({lc['accuracy_pct']}%) significantly outperforms "
+                f"short-call accuracy ({sc['accuracy_pct']}%). Model's sell signals are unreliable — "
+                "consider suppressing SELL signals when accuracy gap persists."
+            )
+        elif sc["accuracy_pct"] > lc["accuracy_pct"] + 10:
+            recommendations.append(
+                f"Short-call accuracy ({sc['accuracy_pct']}%) outperforms long-call accuracy "
+                f"({lc['accuracy_pct']}%). Model is better at spotting downside than upside."
+            )
+    # Filtered accuracy improvement
+    if filtered_accuracy and filtered_accuracy["total"] >= 5:
+        gain = round(filtered_accuracy["accuracy_pct"] - overall_acc, 1)
+        if gain >= 2.0:
+            recommendations.append(
+                f"Filtering to VIX < 20 + S&P not bearish improves accuracy by {gain:+.1f}pp "
+                f"to {filtered_accuracy['accuracy_pct']}% over {filtered_accuracy['total']} signals. "
+                "Apply this as a secondary signal quality gate."
+            )
+    if not recommendations:
+        recommendations.append(
+            f"No dominant regime pattern detected yet ({total} signals). Run more predictions "
+            "and re-backtest to build a richer condition profile."
+        )
+
     # Factor IC: load latest predictions and compute Pearson correlation
     # between each factor score and actual next-day returns from backtest
     factor_ic: dict = {}
@@ -5184,7 +5267,65 @@ async def backtest_predictions():
         },
         "by_ticker": by_ticker,
         "factor_ic": factor_ic,
+        "by_vix_regime":     by_vix_regime,
+        "by_momentum_regime": by_momentum_regime,
+        "by_direction":      by_direction,
+        "filtered_accuracy": filtered_accuracy,
+        "recommendations":   recommendations,
+        "goal_target_pct":   goal_target,
     }
+
+
+@app.get("/api/predictions/goal")
+@limiter.limit("60/hour")
+async def get_prediction_goal(request: Request, current_user: str = Depends(get_current_user)):
+    """Return the accuracy goal and current LLM prediction accuracy from resolved predictions."""
+    settings = load_settings()
+    goal_target = settings.get("prediction_accuracy_goal", 55.0)
+    predictions = load_predictions()
+    completed = [
+        p for p in predictions
+        if p.get("actual_pct") is not None and p.get("predicted_pct") is not None
+    ]
+    if completed:
+        c = sum(1 for p in completed if (p["predicted_pct"] > 0) == (p["actual_pct"] > 0))
+        llm_accuracy_pct = round(c / len(completed) * 100, 1)
+    else:
+        llm_accuracy_pct = None
+    gap = round((llm_accuracy_pct or 0) - goal_target, 1) if llm_accuracy_pct is not None else None
+    if llm_accuracy_pct is None:
+        status = "no_data"
+    elif llm_accuracy_pct >= goal_target:
+        status = "on_track"
+    elif llm_accuracy_pct >= goal_target - 5:
+        status = "approaching"
+    else:
+        status = "below_target"
+    return {
+        "goal_target_pct": goal_target,
+        "llm_accuracy_pct": llm_accuracy_pct,
+        "llm_sample_count": len(completed),
+        "status": status,
+        "gap_pct": gap,
+    }
+
+
+@app.post("/api/predictions/goal")
+@limiter.limit("20/hour")
+async def set_prediction_goal(request: Request, current_user: str = Depends(get_current_user)):
+    """Update the accuracy goal target (40–80%)."""
+    body = await request.json()
+    try:
+        target = float(body.get("target_pct", 55.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="target_pct must be a number")
+    if not (40.0 <= target <= 80.0):
+        raise HTTPException(status_code=400, detail="target_pct must be between 40 and 80")
+    settings = load_settings()
+    settings["prediction_accuracy_goal"] = target
+    save_settings(settings)
+    logger.info("PREDICTION_GOAL_SET user=%s target=%s", current_user, target)
+    return {"ok": True, "goal_target_pct": target}
 
 
 @app.get("/api/predictions/simulate")
