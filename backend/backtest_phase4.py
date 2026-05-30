@@ -70,6 +70,39 @@ DEFAULT_SCORE_ANCHORS = [
 ]
 
 
+# ── Correlation helper ───────────────────────────────────────────────────────
+def _compute_return_corr(hist_map: dict) -> dict[str, dict[str, float]]:
+    """Pearson correlation of daily returns from hist_map price data.
+
+    Falls back to an empty dict (all cross-correlations treated as 0) when
+    there are fewer than 2 tickers or fewer than 20 days of common history.
+    """
+    try:
+        import pandas as pd
+        frames = {
+            t: h["Close"].pct_change().dropna()
+            for t, h in hist_map.items()
+            if h is not None and not h.empty
+        }
+        if len(frames) < 2:
+            return {}
+        df = pd.DataFrame(frames).dropna(how="all")
+        if len(df) < 20:
+            return {}
+        corr_df = df.corr()
+        result: dict[str, dict[str, float]] = {}
+        for t1 in corr_df.index:
+            result[str(t1)] = {
+                str(t2): float(v)
+                for t2, v in corr_df[t1].items()
+                if not pd.isna(v)
+            }
+        return result
+    except Exception as exc:
+        logger.warning("backtest: corr computation failed: %s", exc)
+        return {}
+
+
 # ── Data fetching ────────────────────────────────────────────────────────────
 async def _fetch_ticker_history(ticker: str, start: date, end: date) -> Optional[Any]:
     """Pull yfinance daily OHLC for a ticker over the window. Cached by caller."""
@@ -401,13 +434,16 @@ async def run_phase4_backtest(
     month_vol_factor     = 1.0 / math.sqrt(12.0)
     var_budget           = portfolio_var_max_pct * base_portfolio_value
 
-    trades:           list[dict]            = []
-    open_positions:   dict[str, dict]       = {}     # ticker → entry record
-    last_sell_date:   dict[str, date]       = {}     # ticker → cooldown anchor
-    sector_exposure:  dict[str, float]      = defaultdict(float)
-    existing_var_sq:  float                 = 0.0
-    skipped_reasons:  dict[str, int]        = defaultdict(int)
-    regime_blocked_dates: list[str]         = []
+    trades:              list[dict]            = []
+    open_positions:      dict[str, dict]      = {}     # ticker → entry record
+    last_sell_date:      dict[str, date]      = {}     # ticker → cooldown anchor
+    sector_exposure:     dict[str, float]     = defaultdict(float)
+    existing_cov_sq:     float                = 0.0   # portfolio VaR² (correlated)
+    held_var_terms:      dict[str, float]     = {}    # ticker → individual dollar VaR
+    skipped_reasons:     dict[str, int]       = defaultdict(int)
+    regime_blocked_dates: list[str]           = []
+
+    corr_matrix = _compute_return_corr(hist_map)
 
     # Process each prediction date in order
     by_date: dict[date, list[dict]] = defaultdict(list)
@@ -496,14 +532,25 @@ async def run_phase4_backtest(
             monthly_vol = (vol_pct / 100.0) * month_vol_factor
             if monthly_vol > 0:
                 new_var = var_z_95 * monthly_vol * position_value
-                projected = math.sqrt(existing_var_sq + new_var ** 2)
-                if projected > var_budget:
-                    headroom_sq = max(0.0, var_budget ** 2 - existing_var_sq)
-                    if headroom_sq <= 0:
+                cross_sum = sum(
+                    corr_matrix.get(ticker, {}).get(t2, 0.0) * new_var * v2
+                    for t2, v2 in held_var_terms.items()
+                )
+                projected_cov_sq = existing_cov_sq + 2.0 * cross_sum + new_var ** 2
+                if math.sqrt(max(0.0, projected_cov_sq)) > var_budget:
+                    rho_sum = sum(
+                        corr_matrix.get(ticker, {}).get(t2, 0.0) * v2
+                        for t2, v2 in held_var_terms.items()
+                    )
+                    discriminant = rho_sum ** 2 - existing_cov_sq + var_budget ** 2
+                    if discriminant <= 0:
                         skipped_reasons["var_cap"] += 1
                         continue
-                    max_ind = math.sqrt(headroom_sq)
-                    position_value = max_ind / (var_z_95 * monthly_vol)
+                    max_ind_var = -rho_sum + math.sqrt(discriminant)
+                    if max_ind_var <= 0:
+                        skipped_reasons["var_cap"] += 1
+                        continue
+                    position_value = max_ind_var / (var_z_95 * monthly_vol)
 
             if position_value < 500:
                 skipped_reasons["below_minimum"] += 1
@@ -511,7 +558,12 @@ async def run_phase4_backtest(
 
             sector_exposure[sec] += position_value
             actual_var = var_z_95 * monthly_vol * position_value if monthly_vol > 0 else 0.0
-            existing_var_sq += actual_var ** 2
+            cross = sum(
+                corr_matrix.get(ticker, {}).get(t2, 0.0) * actual_var * v2
+                for t2, v2 in held_var_terms.items()
+            )
+            existing_cov_sq += 2.0 * cross + actual_var ** 2
+            held_var_terms[ticker] = actual_var
 
             open_positions[ticker] = {
                 "ticker":             ticker,
