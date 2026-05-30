@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 from pathlib import Path
 
 import yfinance as yf
@@ -129,16 +130,27 @@ def main():
         return
 
     results = []
-    for ticker in watchlist:
+    for i, ticker in enumerate(watchlist):
+        if i > 0:
+            time.sleep(0.8)  # stay well under Yahoo Finance's rate limit
         try:
             results.append(analyze_ticker(ticker))
         except Exception as exc:
+            err_str = str(exc)
+            if "429" in err_str or "Too Many" in err_str.lower():
+                # Rate-limited mid-scan: wait and retry once before giving up
+                time.sleep(15)
+                try:
+                    results.append(analyze_ticker(ticker))
+                    continue
+                except Exception:
+                    pass
             results.append({
                 "ticker": ticker,
                 "name": ticker,
                 "sentiment": "error",
                 "sentiment_score": 0,
-                "error": str(exc),
+                "error": err_str,
             })
 
     print(json.dumps({"watchlist": watchlist, "results": results}, indent=2))
