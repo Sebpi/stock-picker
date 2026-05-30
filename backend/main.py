@@ -741,6 +741,20 @@ NASDAQ100_TICKERS = [
     "WBD", "ENPH", "ALGN", "DLTR", "NTES", "FANG",
 ]
 
+FTSE100_TICKERS = [
+    "AAL.L", "ABF.L", "ADM.L", "AHT.L", "ANTO.L", "AZN.L", "BA.L", "BARC.L",
+    "BATS.L", "BHPB.L", "BP.L", "BVIC.L", "CCH.L", "CPG.L", "CRH.L", "DCC.L",
+    "DGE.L", "DPLM.L", "EDV.L", "ENT.L", "EXPN.L", "FERG.L", "FLTR.L", "FRES.L",
+    "GLEN.L", "GSK.L", "HIK.L", "HLMA.L", "HSBA.L", "HWDN.L", "IAG.L", "IHG.L",
+    "III.L", "IMB.L", "INF.L", "ITRK.L", "JD.L", "KGF.L", "LAND.L", "LGEN.L",
+    "LLOY.L", "LMP.L", "LSE.L", "LTIM.L", "MKS.L", "MNDI.L", "MNG.L", "MRO.L",
+    "NG.L", "NWG.L", "NXT.L", "OCDO.L", "PHNX.L", "PRU.L", "PSH.L", "PSN.L",
+    "PSON.L", "REL.L", "RIO.L", "RKT.L", "RMV.L", "RR.L", "RS1.L", "SBRY.L",
+    "SDR.L", "SGE.L", "SHEL.L", "SKG.L", "SMDS.L", "SMIN.L", "SMT.L", "SN.L",
+    "SPX.L", "SSE.L", "STAN.L", "SVT.L", "TSCO.L", "TW.L", "ULVR.L", "UTG.L",
+    "UU.L", "VOD.L", "WEIR.L", "WPP.L", "WTB.L",
+]
+
 FTSE250_TICKERS = [
     "AJB.L", "BBOX.L", "BEZ.L", "BOWL.L", "BWY.L", "CARD.L", "CCC.L",
     "COA.L", "CTEC.L", "DARK.L", "DFS.L", "DLG.L", "DNLM.L", "DOM.L",
@@ -751,7 +765,7 @@ FTSE250_TICKERS = [
     "SXS.L", "TRN.L", "TLW.L", "VCT.L", "VTY.L", "VSVS.L", "WKP.L", "WOSG.L",
 ]
 
-UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
+UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
 
 
 _WIKI_HEADERS = {
@@ -817,6 +831,28 @@ def _fetch_nasdaq100_from_wiki() -> list:
         return [s.upper() for s in rows]
     except Exception as e:
         logger.warning(f"Failed to fetch NASDAQ 100 from Wikipedia: {e}")
+        return []
+
+
+def _fetch_ftse100_from_wiki() -> list:
+    """Current FTSE 100 constituents with the yfinance-compatible `.L` suffix."""
+    try:
+        rows = _wiki_constituents(
+            "https://en.wikipedia.org/wiki/FTSE_100_Index",
+            ("ticker", "epic", "symbol", "code"),
+            min_rows=50,
+        )
+        cleaned: list[str] = []
+        for sym in rows:
+            s = sym.strip().upper().replace(" ", "")
+            if not s:
+                continue
+            if "." not in s:
+                s += ".L"
+            cleaned.append(s)
+        return cleaned
+    except Exception as e:
+        logger.warning(f"Failed to fetch FTSE 100 from Wikipedia: {e}")
         return []
 
 
@@ -1374,6 +1410,7 @@ async def _prewarm_universe_cache():
     index_pools = {
         "sp500":      SP500_TICKERS,
         "nasdaq100":  NASDAQ100_TICKERS,
+        "ftse100":    FTSE100_TICKERS,
         "ftse250":    FTSE250_TICKERS,
         "__all__":    UNIVERSE,
     }
@@ -2508,10 +2545,11 @@ class ResetPasswordRequest(BaseModel):
 async def startup():
     _load_lockout_state()
     # Refresh index constituent lists from Wikipedia
-    global SP500_TICKERS, NASDAQ100_TICKERS, FTSE250_TICKERS, UNIVERSE
+    global SP500_TICKERS, NASDAQ100_TICKERS, FTSE100_TICKERS, FTSE250_TICKERS, UNIVERSE
     loop = asyncio.get_event_loop()
     sp500   = await loop.run_in_executor(None, _fetch_sp500_from_wiki)
     nasdaq  = await loop.run_in_executor(None, _fetch_nasdaq100_from_wiki)
+    ftse100 = await loop.run_in_executor(None, _fetch_ftse100_from_wiki)
     ftse250 = await loop.run_in_executor(None, _fetch_ftse250_from_wiki)
     if sp500:
         SP500_TICKERS = sp500
@@ -2519,10 +2557,13 @@ async def startup():
     if nasdaq:
         NASDAQ100_TICKERS = nasdaq
         logger.info(f"NASDAQ 100 tickers refreshed from Wikipedia ({len(nasdaq)} stocks)")
+    if ftse100:
+        FTSE100_TICKERS = ftse100
+        logger.info(f"FTSE 100 tickers refreshed from Wikipedia ({len(ftse100)} stocks)")
     if ftse250:
         FTSE250_TICKERS = ftse250
         logger.info(f"FTSE 250 tickers refreshed from Wikipedia ({len(ftse250)} stocks)")
-    UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
+    UNIVERSE = list(dict.fromkeys(SP500_TICKERS + NASDAQ100_TICKERS + FTSE100_TICKERS + FTSE250_TICKERS + ["TSM", "BE"]))
 
     # Create default admin account on first run
     users = load_users()
@@ -2800,9 +2841,10 @@ async def screen_stocks(
     if q:
         q = re.sub(r"[^a-zA-Z0-9\-\. ]", "", q.strip()[:50]).lower()
     index_map = {
-        "sp500": SP500_TICKERS,
+        "sp500":     SP500_TICKERS,
         "nasdaq100": NASDAQ100_TICKERS,
-        "ftse250": FTSE250_TICKERS,
+        "ftse100":   FTSE100_TICKERS,
+        "ftse250":   FTSE250_TICKERS,
     }
     pool_key = index or "__all__"
     cached_universe = _screen_universe_cache.get(pool_key)
