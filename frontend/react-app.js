@@ -1991,14 +1991,20 @@
   function BacktestSummary({ data }) {
     const s = data.summary;
     const tickerStats = data.by_ticker ? Object.entries(data.by_ticker).sort((a, b) => b[1].accuracy_pct - a[1].accuracy_pct) : [];
+    const total = s.total || 0;
+    const reliability = total >= 100 ? "Statistically meaningful" : total >= 30 ? "Indicative — needs more data" : "Too few signals — treat as noise";
+    const reliabilityTone = total >= 100 ? "text-pulse-green" : total >= 30 ? "text-pulse-amber" : "text-pulse-red";
     return h("div", { className: "grid gap-4" },
       h("div", { className: "grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6" },
-        h(Metric, { label: "Accuracy", value: s.accuracy_pct + "%", tone: s.accuracy_pct >= 60 ? "text-pulse-green" : s.accuracy_pct >= 50 ? "text-pulse-amber" : "text-pulse-red" }),
-        h(Metric, { label: "Days Tested", value: s.total }),
-        h(Metric, { label: "Correct", value: s.correct }),
+        h(Metric, { label: "Accuracy", value: s.accuracy_pct + "%", hint: `${s.correct} correct / ${total - s.correct} wrong`, tone: s.accuracy_pct >= 60 ? "text-pulse-green" : s.accuracy_pct >= 50 ? "text-pulse-amber" : "text-pulse-red" }),
+        h(Metric, { label: "Signals tested", value: total }),
+        h(Metric, { label: "Correct / Total", value: `${s.correct} / ${total}` }),
         h(Metric, { label: "Avg Variance", value: "±" + s.avg_abs_variance + "%" }),
         h(Metric, { label: "Avg Predicted", value: fmtPct(s.avg_predicted, 1) }),
         h(Metric, { label: "Avg Actual", value: fmtPct(s.avg_actual, 1) })
+      ),
+      h("div", { className: cx("rounded-lg border border-pulse-line px-4 py-2 text-sm", reliabilityTone) },
+        h("span", { className: "font-medium" }, "Sample size: "), `${total} signals — `, reliability, total < 100 ? ` (need ${100 - total} more for meaningful conclusions)` : "."
       ),
       tickerStats.length ? h(Card, { className: "p-4" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "By ticker"),
