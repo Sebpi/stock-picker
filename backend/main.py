@@ -17,6 +17,7 @@ import tempfile
 import time as time_mod
 import uuid
 import xml.etree.ElementTree as ET
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 import zoneinfo
 from email.mime.multipart import MIMEMultipart
@@ -287,7 +288,15 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(h
             pass
     raise exc
 
-app = FastAPI(title="StockLens API")
+@asynccontextmanager
+async def lifespan(app):
+    await startup()
+    await _init_multiagent_db()
+    yield
+    await shutdown()
+
+
+app = FastAPI(title="StockLens API", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 scheduler = AsyncIOScheduler()
@@ -2481,7 +2490,6 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
-@app.on_event("startup")
 async def startup():
     _load_lockout_state()
     # Refresh index constituent lists from Wikipedia
@@ -2573,7 +2581,6 @@ async def startup():
     if _eval_enabled:
         print(f"[Evaluation] Forecast evaluation scheduled every {_eval_interval} minutes.")
 
-@app.on_event("shutdown")
 async def shutdown():
     scheduler.shutdown()
 
@@ -7560,11 +7567,6 @@ async def v1_evaluate(
     return {"ok": True, "message": "Evaluation job started in background"}
 
 
-# Wire DB init into startup
-_original_startup = startup.__wrapped__ if hasattr(startup, "__wrapped__") else None
-
-
-@app.on_event("startup")
 async def _init_multiagent_db():
     """Initialise the SQLite database for the multi-agent system."""
     try:
