@@ -195,7 +195,7 @@ PREDICTIONS_INCLUDE_STOCK_RESEARCH = os.getenv("PREDICTIONS_INCLUDE_STOCK_RESEAR
 PREDICTIONS_UNIVERSE_FILL_LIMIT = max(0, int(os.getenv("PREDICTIONS_UNIVERSE_FILL_LIMIT", "6")))
 PREDICTIONS_MAX_TOKENS = max(512, int(os.getenv("PREDICTIONS_MAX_TOKENS", "8192")))
 PREDICTION_MODEL_VERSION = os.getenv("PREDICTION_MODEL_VERSION", "pred-v3.3.0").strip() or "pred-v3.3.0"
-PREDICTION_PROMPT_VERSION = os.getenv("PREDICTION_PROMPT_VERSION", "prompt-v4").strip() or "prompt-v4"
+PREDICTION_PROMPT_VERSION = os.getenv("PREDICTION_PROMPT_VERSION", "prompt-v5").strip() or "prompt-v5"
 PREDICTION_LEARNING_ENABLED = os.getenv("PREDICTION_LEARNING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 PREDICTION_CALIBRATION_MIN_SAMPLES = max(1, int(os.getenv("PREDICTION_CALIBRATION_MIN_SAMPLES", "3")))
 THESIS_AUTO_RUN_ENABLED = os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -549,6 +549,7 @@ def load_settings() -> dict:
         "alert_sell_max_score": 42,
         # Phase 2: regime gate — block BUYs when broad market is risk-off
         "prediction_accuracy_goal": 55.0,
+        "min_buy_confidence": "medium",
         "regime_gate_enabled": True,
         "regime_spy_dma_period": 200,
         "regime_vix_max": 25.0,
@@ -4619,9 +4620,35 @@ async def _generate_predictions_impl():
     else:
         watchlist_research_context = "No watchlist research available."
 
-    prompt = f"""You are a quantitative stock analyst with one goal: identify stocks with potential for >10% monthly returns (~0.5%+ per day).
+    # Build thesis context for watchlist tickers — injected as the primary signal anchor.
+    _thesis_lines: list[str] = []
+    if watchlist_tickers:
+        try:
+            import db as _db_pred
+            for _t in watchlist_tickers:
+                _th = _db_pred.get_latest_thesis(_t)
+                if _th:
+                    _age_h = round((datetime.now(timezone.utc) - _th.generated_at).total_seconds() / 3600, 1)
+                    _f12 = _th.forecast.get("12m")
+                    _drivers = "; ".join(_th.drivers[:2]) if _th.drivers else "none"
+                    _risks   = "; ".join(_th.risks[:2])   if _th.risks   else "none"
+                    _thesis_lines.append(
+                        f"{_t}: score={_th.composite_score:.0f}/100, "
+                        f"12m_base={_f12.base_return_pct:+.1f}% (bull={_f12.bull_return_pct:+.1f}%, bear={_f12.bear_return_pct:+.1f}%), "
+                        f"risk={_th.risk_rating.value}, evidence={_th.evidence_quality.value}, "
+                        f"age={_age_h}h | drivers: {_drivers} | risks: {_risks}"
+                    )
+        except Exception as _exc:
+            logger.debug("Thesis context lookup failed: %s", _exc)
+    thesis_context = "\n".join(_thesis_lines) if _thesis_lines else "No recent thesis available for watchlist tickers — rely on factor scores."
+
+    prompt = f"""You are a quantitative analyst making 4-week directional predictions. Your goal is CALIBRATED ACCURACY — predict what the market will actually do, not what you wish it would do. Being wrong 60% of the time with high confidence is worse than being right 55% of the time with measured confidence.
 
 Today: {today}
+
+=== MULTI-AGENT THESIS CONTEXT (primary anchor — use this first) ===
+Where present, each line shows the 10-agent thesis score (0-100), 12-month base/bull/bear return forecasts, risk rating, evidence quality, age, and key drivers/risks. This is your STRONGEST signal — it integrates fundamentals, valuation, insider activity, macro, and sentiment.
+{thesis_context}
 
 === MACROECONOMIC CONDITIONS ===
 {json.dumps(macro, indent=2)}
@@ -4630,64 +4657,38 @@ Today: {today}
 {chr(10).join(headlines[:20]) if headlines else "No headlines fetched."}
 
 === WATCHLIST STOCK RESEARCH INPUTS ===
-Use these outputs from the stock research agent for each watchlist ticker only if they are present, and incorporate them into your model reasoning and forecast adjustments.
 {watchlist_research_context}
 
 === STOCKS TO ANALYZE ===
-Each stock includes a pre-calculated `sentiment_score` (%) built from:
-  - VIX fear adjustment
-  - S&P 500 5-day momentum adjustment
-  - Beta multiplier (amplifies market moves for high/low beta stocks)
-  - Headline sentiment (keyword scan: +0.3% per positive signal, -0.3% per negative)
+Each stock includes a pre-calculated `sentiment_score` (%) (VIX + S&P momentum + beta + headline keywords) and `factor_scores` (0-100 each: value, momentum, quality, growth, composite).
+Also per-stock when available: `dcf.margin_of_safety_pct`, `annualised_vol_pct`, `max_drawdown_pct`.
 
 {json.dumps(stocks_data, indent=2)}
 {accuracy_summary}
 {durable_learning_summary}
-=== SCORING RULES ===
-1. START with `sentiment_score` as your baseline signal strength for each stock.
-2. Each stock now includes pre-computed `factor_scores` (0-100 each). Use these to ANCHOR and VALIDATE your analysis:
+=== REASONING PROCESS — follow for every stock ===
+1. THESIS: Start from the multi-agent thesis score and 12m forecast (above). This is the primary signal.
+2. FUNDAMENTALS: Cross-check with factor_scores. composite ≥ 70 supports bullish; ≤ 35 supports bearish.
+3. MACRO/SENTIMENT: Does the VIX/momentum environment support or contradict the fundamental thesis? Sentiment is a secondary modifier, not the primary signal.
+4. CALIBRATION: Apply historical bias corrections (accuracy_summary above).
+5. DIRECTION + CONFIDENCE: Assign direction and confidence strictly per the rules below.
 
-   VALUE     — How cheap vs fundamentals (P/E, P/B, FCF yield, EV/EBITDA, PEG)
-   MOMENTUM  — Price trend strength (RSI, 52-week position, vs 50-SMA, 5d return, short interest)
-   QUALITY   — Balance sheet health (ROE, gross/net margins, debt ratio, current ratio)
-   GROWTH    — Earnings & revenue expansion (rev growth, EPS growth, forward PE improvement)
-   COMPOSITE — Equal-weight average of all four
+FACTOR GUIDANCE:
+- composite ≥ 70: strong bullish signal; composite ≤ 35: strong bearish signal
+- Strong VALUE + QUALITY but weak MOMENTUM → cap confidence at "medium" (good company, bad timing)
+- DCF margin_of_safety_pct > 15% → bullish support; < -25% → cap confidence at "medium", note overvaluation
+- annualised_vol_pct > 45% → cap confidence at "medium"; > 60% → cap at "low"
+- max_drawdown_pct < -25% → note near-term pressure in reasoning
 
-   Also included per-stock (when available):
-   - `dcf`: intrinsic_per_share, margin_of_safety_pct (positive = undervalued), wacc_pct
-   - `annualised_vol_pct`: 60-day realised volatility
-   - `max_drawdown_pct`: worst peak-to-trough over 60 days
-
-FACTOR GUIDANCE — let these scores shape confidence and direction:
-- composite ≥ 70 + positive sentiment → strongly support bullish, high confidence eligible
-- composite ≤ 35 + negative sentiment → strongly support bearish, high confidence eligible
-- Strong VALUE + QUALITY but weak MOMENTUM → patient BUY thesis, cap confidence at "medium"
-- Strong MOMENTUM but weak VALUE (composite driven by momentum only) → growth play, note valuation risk
-- DCF margin_of_safety_pct > 15% → supports bullish confidence level up by one tier
-- DCF margin_of_safety_pct < -25% → cap confidence at "medium" even if sentiment positive, note overvaluation
-- annualised_vol_pct > 45% → high risk stock, cap confidence at "medium", mention volatility in reasoning
-- max_drawdown_pct < -25% → significant recent drawdown, factor this into near-term thesis
-
-VALUATION THRESHOLDS (for reference when factor_scores not available):
-- P/E < 15 = cheap, 15-25 = fair, >25 = expensive
-- PEG < 1 = undervalued vs growth, >2 = expensive
-- P/B < 1 = below asset value, >3 = expensive
-- EV/EBITDA < 8 = cheap, 8-15 = fair, >15 = expensive
-- FCF Yield > 8% = excellent, 4-8% = good, <4% = poor
-
-QUALITY:
-- High profit margins + growing revenue = quality business
-- Low debt-to-equity = financial safety
-- High EPS and revenue growth = momentum
+CONFIDENCE RULES — apply strictly, no exceptions:
+- "high" (bullish): thesis_score ≥ 65 OR (composite ≥ 68 AND dcf_mos > 5% AND vol ≤ 45%). Multiple signals align. No contradictions.
+- "high" (bearish): thesis_score ≤ 35 OR (composite ≤ 32 AND no major positive catalysts). No thesis = can't be high.
+- "medium": Mixed thesis/factor signals, one risk factor present, or thesis is stale (> 48h).
+- "low": Contradictory signals, high uncertainty, VIX > 25, vol > 60%, drawdown > 25%, or no data.
+- AUTOMATIC DOWNGRADE: if reasoning contains any of — "uncertain", "mixed", "volatile", "could", "might", "risk", "concern", "drawdown", "expensive" — confidence cannot be "high".
 
 IMPORTANT: You MUST return a prediction for EVERY stock in the watchlist: {must_predict}.
 For any remaining stocks {also_consider}, only include the 2-3 with the strongest outlook.
-
-CONFIDENCE RULES — must directly reflect the reasoning, no contradictions:
-- "high": sentiment_score positive AND strong fundamentals support it
-- "medium": mixed signals or at least one notable risk factor
-- "low": negative sentiment_score OR meaningful bearish fundamentals present
-If your reasoning mentions a sell-off, downtrend, overvaluation, or risk — confidence MUST be "low" or "medium", never "high".
 
 Return ONLY a valid JSON array, no explanation, no markdown:
 [
@@ -4696,15 +4697,14 @@ Return ONLY a valid JSON array, no explanation, no markdown:
     "direction": "bullish",
     "score": 74,
     "confidence": "high",
-    "reasoning": "Sentiment score is modestly positive, PEG is attractive, and cash generation is strong. Signals align on the bullish side."
+    "reasoning": "Thesis score 72/100 with +14% base case. Composite 71, DCF margin of safety +18%. Bull case: strong FCF and product cycle. Bear case: macro headwinds and premium valuation. Bull outweighs — fundamentals and thesis aligned."
   }}
 ]
 Rules:
-- `direction` must be one of: "bullish", "neutral", "bearish"
-- `score` must be an integer from 0 to 100
-- 0-39 = bearish, 40-60 = neutral, 61-100 = bullish
-- `confidence` must be "low" | "medium" | "high"
-- reasoning should explain the signal, not claim precise percentage upside."""
+- `direction`: "bullish" | "neutral" | "bearish"
+- `score`: integer 0–100 (0-39 bearish, 40-60 neutral, 61-100 bullish)
+- `confidence`: "low" | "medium" | "high" — must follow the strict rules above
+- `reasoning`: must briefly state (a) primary bullish signal, (b) primary bearish risk, (c) why one wins"""
 
     client = anthropic.Anthropic(api_key=api_key)
     claude_preds = None
@@ -6064,8 +6064,13 @@ async def _build_recommendations(progress: Optional[callable] = None):
             except Exception:
                 continue
 
-        # Phase 1: raise BUY floor — composite ≥ 70, drop low-confidence back-door
-        if direction != "bullish" or signal_score < 70 or confidence == "low" or remaining_cash < 500:
+        # Phase 1: raise BUY floor — composite ≥ 70, drop low-confidence back-door.
+        # Also gate by min_buy_confidence setting (default "medium" = accept medium+high).
+        _conf_rank = {"low": 0, "medium": 1, "high": 2}
+        _min_conf  = settings.get("min_buy_confidence", "medium").lower()
+        if (direction != "bullish" or signal_score < 70
+                or _conf_rank.get(confidence, 1) < _conf_rank.get(_min_conf, 1)
+                or remaining_cash < 500):
             continue
 
         current_price = price_map.get(ticker, 0)
