@@ -1389,7 +1389,8 @@
 
     useEffect(() => {
       api("/api/watchlist").then(data => {
-        const tickers = Array.isArray(data) ? data : (data.watchlist || []);
+        const raw = Array.isArray(data) ? data : (data.watchlist || []);
+        const tickers = raw.map(item => (typeof item === "object" && item !== null ? item.ticker : item)).filter(Boolean);
         setWatchlist(tickers);
         if (tickers.length > 0) {
           setTicker(tickers[0]);
