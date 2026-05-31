@@ -1980,7 +1980,7 @@ async def _get_portfolio_price_map(held: list[str], positions: dict[str, dict]) 
 
 async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: int = 3) -> dict:
     """
-    Build buy/sell alert candidates using the full 9-agent thesis pipeline.
+    Build buy/sell alert candidates using the full 21-agent thesis pipeline.
     Agent signals are cached in SQLite (max_age_hours=26) so repeated calls
     within the snapshot TTL reuse stored signals without hitting Claude again.
     Position sizing respects the initial_float from Alert Settings.
@@ -2073,7 +2073,7 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
             narrative.get("summary")
             or narrative.get("base")
             or ("; ".join(thesis.drivers[:2]) if thesis.drivers else "")
-            or f"10-agent composite score {composite:.0f}/100 across fundamentals, valuation, growth, macro, sentiment and more."
+            or f"21-agent composite score {composite:.0f}/100 across fundamentals, valuation, growth, macro, sentiment and more."
         )
 
         strong_buys.append({
@@ -2082,7 +2082,7 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
             "action":           "BUY",
             "type":             "buy_opportunity",
             "trigger":          "AGENT CONSENSUS",
-            "signal":           f"10-agent composite score {composite:.0f}/100 — BUY signal confirmed.",
+            "signal":           f"21-agent composite score {composite:.0f}/100 — BUY signal confirmed.",
             "price":            float(thesis.current_price or 0.0),
             "score_value":      int(round(composite)),
             "confidence":       confidence_s,
@@ -2135,7 +2135,7 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
             reasoning = (
                 bear_text
                 or ("; ".join(thesis.risks[:2]) if thesis.risks else "")
-                or f"9-agent composite fell to {composite:.0f}/100 with a {projected_12m:.1f}% 12-month base return."
+                or f"21-agent composite fell to {composite:.0f}/100 with a {projected_12m:.1f}% 12-month base return."
             )
 
         # Secondary: composite is bearish even if not fully below threshold
@@ -4701,7 +4701,7 @@ async def _generate_predictions_impl():
 Today: {today}
 
 === MULTI-AGENT THESIS CONTEXT (primary anchor — use this first) ===
-Where present, each line shows the 10-agent thesis score (0-100), 12-month base/bull/bear return forecasts, risk rating, evidence quality, age, and key drivers/risks. This is your STRONGEST signal — it integrates fundamentals, valuation, insider activity, macro, and sentiment.
+Where present, each line shows the 21-agent thesis score (0-100), 12-month base/bull/bear return forecasts, risk rating, evidence quality, age, and key drivers/risks. This is your STRONGEST signal — it integrates fundamentals, valuation, growth, insider activity, options flow, credit risk, momentum, earnings quality, analyst consensus, Piotroski, Altman Z-Score, and more.
 {thesis_context}
 
 === MACROECONOMIC CONDITIONS ===
