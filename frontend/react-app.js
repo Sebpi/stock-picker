@@ -1466,21 +1466,21 @@
     }
 
     return h("div", null,
-      h(SectionHead, { title: "Agent Thesis", kicker: "Long-term conviction", subtitle: "Long-term conviction analysis from 8 specialist agents — fundamentals, valuation, macro, sentiment, technicals and more. For short-term signal rankings, see the Predictions tab.", actions: [
-        h(Button, { key: "ops", onClick: () => openPanel("ops") }, "Operations"),
-        h(Button, { key: "eval", onClick: () => openPanel("evaluate") }, "Evaluate"),
-        h(Button, { key: "health", onClick: () => openPanel("health") }, "Agent Health"),
+      h(SectionHead, { title: "Agent Thesis", kicker: "Long-term conviction", subtitle: "Long-term conviction analysis from 21 specialist agents — fundamentals, valuation, momentum, insider activity, earnings quality, credit risk, analyst consensus and more. For short-term signal rankings, see the Predictions tab.", actions: [
+        h(Button, { key: "ops", kind: "ghost", onClick: () => openPanel("ops") }, "Operations"),
+        h(Button, { key: "eval", kind: "ghost", onClick: () => openPanel("evaluate") }, "Evaluate"),
+        h(Button, { key: "health", kind: "ghost", onClick: () => openPanel("health") }, "Agent Health"),
         h(Button, { key: "refresh", onClick: () => loadLatest(), disabled: busy }, "Refresh latest"),
       ] }),
       h(Card, { className: "mb-4 p-4" },
-        h("div", { className: "grid gap-3 sm:grid-cols-[1fr_auto_auto_auto]" },
-          h(TextInput, { value: ticker, onChange: e => setTicker(e.target.value.toUpperCase()), onKeyDown: e => { if (e.key === "Enter") loadLatest(); }, placeholder: "Ticker" }),
+        h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-[1fr_auto_auto_auto]" },
+          h(TextInput, { value: ticker, onChange: e => setTicker(e.target.value.toUpperCase()), onKeyDown: e => { if (e.key === "Enter") loadLatest(); }, placeholder: "Ticker", className: "col-span-2 sm:col-span-1" }),
           h("label", { className: "flex min-h-11 items-center gap-2 rounded-lg border border-pulse-line bg-pulse-panel px-3 text-sm text-pulse-muted" },
             h("input", { type: "checkbox", checked: runFresh, onChange: e => setRunFresh(e.target.checked) }),
             "Run fresh"
           ),
           h(Button, { onClick: () => loadLatest(), disabled: busy }, "View latest"),
-          h(Button, { kind: "primary", onClick: run, disabled: busy }, busy ? "Working..." : "Run agents")
+          h(Button, { kind: "primary", onClick: run, disabled: busy, className: "col-span-2 sm:col-span-1" }, busy ? "Working..." : "Run agents")
         ),
         h("div", { className: "mt-3 grid gap-2 sm:grid-cols-[1fr_auto]" },
           h(TextInput, { value: compareInput, onChange: e => setCompareInput(e.target.value.toUpperCase()), placeholder: "Compare: MSFT,AAPL,NVDA", onKeyDown: e => { if (e.key === "Enter") runCompare(); } }),
@@ -1875,7 +1875,7 @@
             h("h3", { className: "mt-1 text-2xl font-semibold" }, thesis.ticker, " Analysis"),
             h("p", { className: "mt-1 text-sm text-pulse-muted" }, fmtDate(thesis.generated_at), thesis.thesis_id ? ` · thesis ${String(thesis.thesis_id).slice(0, 8)}` : "")
           ),
-          h("a", { href: "#", onClick: exportPdf, className: "inline-flex min-h-10 items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink" }, "Export PDF")
+          h("a", { href: "#", onClick: exportPdf, className: "inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink sm:w-auto sm:min-h-10" }, "Export PDF")
         )
       ),
       h(Reconciliation, { data: recon }),
@@ -1903,10 +1903,10 @@
           ))
         )
       ) : null,
-      h("div", { className: "grid gap-3 md:grid-cols-3" },
+      h("div", { className: "grid gap-3 sm:grid-cols-3" },
         ["3m", "6m", "12m"].map(key => h(ForecastCard, { key, label: key.toUpperCase(), forecast: forecast[key], weighted: thesis.weighted_scores && thesis.weighted_scores[key] }))
       ),
-      h("div", { className: "grid gap-3 lg:grid-cols-3" },
+      h("div", { className: "grid gap-3 md:grid-cols-3" },
         ["bull", "base", "bear"].map(key => h(Card, { key, className: "p-4" },
           h("div", { className: cx("font-mono text-[10px] uppercase tracking-[0.2em]", key === "bull" ? "text-pulse-green" : key === "bear" ? "text-pulse-red" : "text-pulse-amber") }, key, " case"),
           h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted" }, (thesis.narrative || {})[key] || "No narrative.")
@@ -1915,14 +1915,14 @@
       h(Card, { className: "p-4" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Agent scores"),
         h("div", { className: "mt-3 grid gap-3" },
-          Object.entries(thesis.agent_scores || {}).map(([agent, value]) => h("div", { key: agent, className: "grid grid-cols-[112px_1fr_40px] items-center gap-3 text-sm" },
-            h("span", { className: "truncate text-pulse-muted" }, agent.replace("agent.", "").replace(/_/g, " ")),
+          Object.entries(thesis.agent_scores || {}).map(([agent, value]) => h("div", { key: agent, className: "grid grid-cols-[90px_1fr_36px] items-center gap-2 text-sm sm:grid-cols-[112px_1fr_40px] sm:gap-3" },
+            h("span", { className: "truncate text-[11px] text-pulse-muted sm:text-sm" }, agent.replace("agent.", "").replace(/_/g, " ")),
             h(ProgressBar, { value }),
             h("strong", { className: cx("font-mono text-right", scoreTone(value)) }, Number(value || 0).toFixed(0))
           ))
         )
       ),
-      h("div", { className: "grid gap-3 md:grid-cols-2" },
+      h("div", { className: "grid gap-3 sm:grid-cols-2" },
         h(ListCard, { title: "Drivers", items: thesis.drivers, tone: "text-pulse-green" }),
         h(ListCard, { title: "Risks", items: thesis.risks, tone: "text-pulse-red" })
       )
