@@ -229,6 +229,35 @@ def test_all_quality_flags_have_tooltips():
 # 6. Orchestrator run_thesis failure path emits metric
 # ---------------------------------------------------------------------------
 
+def test_observability_all_agent_ids_matches_run_all_agents():
+    """ALL_AGENT_IDS must stay in sync with run_all_agents so health reports are accurate."""
+    import observability
+    from agents import run_all_agents
+    import inspect, ast
+
+    # Extract agent_id class attributes by parsing agents/__init__.py
+    init_path = os.path.join(os.path.dirname(__file__), "..", "agents", "__init__.py")
+    source = open(init_path).read()
+    # Get all agent_id strings from the registered agents module files
+    agents_dir = os.path.join(os.path.dirname(__file__), "..", "agents")
+    registered_ids = set()
+    for fname in os.listdir(agents_dir):
+        if fname.endswith(".py") and fname not in ("__init__.py", "orchestrator.py", "base.py"):
+            fpath = os.path.join(agents_dir, fname)
+            text = open(fpath).read()
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("agent_id") and "=" in line:
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val.startswith("agent."):
+                        registered_ids.add(val)
+
+    missing = registered_ids - set(observability.ALL_AGENT_IDS)
+    assert not missing, (
+        f"Agents registered in agents/ but missing from observability.ALL_AGENT_IDS: {sorted(missing)}"
+    )
+
+
 def test_orchestrator_emits_error_metric_on_failure():
     from agents.orchestrator import OrchestratorAgent
     orch = OrchestratorAgent()
