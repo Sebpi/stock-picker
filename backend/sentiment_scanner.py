@@ -82,8 +82,8 @@ def classify_sentiment(score):
     return "neutral"
 
 
-def _relevant_headlines(ticker: str, company_name: str, headlines: list[dict]) -> list[dict]:
-    """Return only headlines that explicitly name the ticker symbol or company."""
+def _string_filter(ticker: str, company_name: str, headlines: list[dict]) -> list[dict]:
+    """Fast pre-filter: keep headlines that at least name the ticker or company."""
     name_clean = (company_name or ticker).lower()
     for suffix in (" inc", " corp", " corporation", " ltd", " plc", " co", ".", ","):
         name_clean = name_clean.replace(suffix, "")
@@ -96,37 +96,67 @@ def _relevant_headlines(ticker: str, company_name: str, headlines: list[dict]) -
     ]
 
 
-def _summarize_with_claude(ticker: str, company_name: str, headlines: list[dict]) -> str:
-    """Summarise only headlines that explicitly mention ticker or company name."""
+def _classify_and_summarize(ticker: str, company_name: str, candidates: list[dict]) -> tuple[list[dict], str]:
+    """
+    Use Claude to decide which candidates are *primarily about* ticker (not just mentioned),
+    then summarise the relevant ones. Returns (relevant_headlines, summary).
+    """
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    if not api_key or not headlines:
-        return ""
-
-    relevant = _relevant_headlines(ticker, company_name, headlines[:12])
-
-    if not relevant:
-        return "No company-specific headlines found for this period."
+    if not api_key:
+        return candidates, ""
+    if not candidates:
+        return [], "No company-specific headlines found for this period."
 
     try:
         import anthropic
-        titles = "\n".join(f"- {h['title']}" for h in relevant[:6])
+        numbered = "\n".join(f"{i + 1}. {h['title']}" for i, h in enumerate(candidates[:10]))
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(
             model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            max_tokens=180,
+            max_tokens=300,
             messages=[{
                 "role": "user",
                 "content": (
-                    f"These headlines all mention {ticker} ({company_name}):\n\n{titles}\n\n"
-                    f"Write 2-3 bullet points (each ≤20 words) summarising the key developments "
-                    f"for {ticker} investors. Focus on catalysts, risks, guidance changes, or "
-                    f"analyst moves. Be specific — no filler phrases."
+                    f"You are reviewing headlines for relevance to {ticker} ({company_name}).\n\n"
+                    f"Headlines:\n{numbered}\n\n"
+                    f"Step 1 — on ONE line, list the numbers of headlines where {ticker} is the "
+                    f"PRIMARY subject (the article is fundamentally about this company, not just "
+                    f"mentioning it in a list or passing comparison). Format exactly:\n"
+                    f"RELEVANT: 1,3 (or RELEVANT: none)\n\n"
+                    f"Step 2 — for the relevant headlines only, write 2-3 bullet points "
+                    f"(each ≤20 words) covering key developments: earnings, guidance, analyst "
+                    f"moves, leadership, products. If RELEVANT was none, write: "
+                    f"No company-specific news this period."
                 ),
             }],
         )
-        return resp.content[0].text.strip()
+        text = resp.content[0].text.strip()
+
+        relevant_indices: list[int] = []
+        summary_lines: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.upper().startswith("RELEVANT:"):
+                nums = stripped.split(":", 1)[1].strip()
+                if nums.lower() != "none":
+                    for n in nums.split(","):
+                        try:
+                            idx = int(n.strip()) - 1
+                            if 0 <= idx < len(candidates):
+                                relevant_indices.append(idx)
+                        except ValueError:
+                            pass
+            elif stripped:
+                summary_lines.append(stripped)
+
+        relevant = [candidates[i] for i in sorted(set(relevant_indices))]
+        summary = "\n".join(summary_lines).strip()
+        if not relevant:
+            summary = "No company-specific news this period."
+        return relevant, summary
+
     except Exception:
-        return ""
+        return candidates, ""  # fallback: show string-matched on error
 
 
 def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
@@ -175,7 +205,14 @@ def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
         composite -= 2
 
     company_name = info.get("shortName", ticker)
-    display_headlines = _relevant_headlines(ticker, company_name, headlines)
+    # String-match pre-filter runs for all scans (fast, no API cost)
+    candidates = _string_filter(ticker, company_name, headlines)
+    if with_summary:
+        # Deep filter: Claude decides primary-subject vs passing-mention, and summarises
+        display_headlines, news_summary = _classify_and_summarize(ticker, company_name, candidates)
+    else:
+        display_headlines, news_summary = candidates, ""
+
     return {
         "ticker": ticker,
         "name": company_name,
@@ -187,7 +224,7 @@ def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
         "sentiment_score": composite,
         "sentiment": classify_sentiment(composite),
         "headlines": display_headlines[:5],
-        "news_summary": _summarize_with_claude(ticker, company_name, display_headlines) if with_summary else "",
+        "news_summary": news_summary,
     }
 
 
