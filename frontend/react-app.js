@@ -355,7 +355,7 @@
       } catch (err) { setMessage(err.message || "Could not reset password."); } finally { setBusy(false); }
     }
 
-    return h("main", { className: "flex min-h-screen items-center justify-center px-4 py-10" },
+    return h("main", { id: "login-overlay", className: "flex min-h-screen items-center justify-center px-4 py-10" },
       h(Card, { className: "w-full max-w-sm p-6" },
         h("div", { className: "mb-6 flex items-center gap-3" },
           h("img", { src: "/static/logo.svg", className: "h-10 w-10", alt: "" }),
@@ -366,11 +366,11 @@
         ),
         mode === "login" ? h("form", { onSubmit: submitLogin, className: "grid gap-3" },
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Username"),
-          h(TextInput, { value: username, onChange: e => setUsername(e.target.value), autoComplete: "username" }),
+          h(TextInput, { id: "login-username", value: username, onChange: e => setUsername(e.target.value), autoComplete: "username" }),
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Password"),
-          h(TextInput, { value: password, onChange: e => setPassword(e.target.value), type: "password", autoComplete: "current-password" }),
+          h(TextInput, { id: "login-password", value: password, onChange: e => setPassword(e.target.value), type: "password", autoComplete: "current-password" }),
           message ? h("p", { className: "text-sm text-pulse-amber" }, message) : null,
-          h(Button, { kind: "primary", disabled: busy, type: "submit", className: "mt-2" }, busy ? "Signing in..." : "Sign in"),
+          h(Button, { id: "btn-login", kind: "primary", disabled: busy, type: "submit", className: "mt-2" }, busy ? "Signing in..." : "Sign in"),
           h("button", { type: "button", onClick: () => { setMode("forgot"); setMessage(""); }, className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Forgot password?")
         ) : mode === "forgot" ? h("form", { onSubmit: forgot, className: "grid gap-3" },
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Username"),
@@ -413,9 +413,9 @@
         ),
         h("nav", { className: "scrollbar-none mx-auto flex max-w-7xl gap-1 overflow-x-auto pb-2" },
           TABS.map(([id, label]) => h("button", {
-            key: id, onClick: () => setActive(id),
+            key: id, id: `tab-${id}`, "data-tab": id, onClick: () => setActive(id),
             className: cx("shrink-0 rounded-lg px-3 py-2 text-xs font-medium transition",
-              active === id ? "bg-pulse-card text-pulse-ink ring-1 ring-pulse-line" : "text-pulse-muted hover:bg-pulse-panel hover:text-pulse-ink")
+              active === id ? "active bg-pulse-card text-pulse-ink ring-1 ring-pulse-line" : "text-pulse-muted hover:bg-pulse-panel hover:text-pulse-ink")
           }, label))
         )
       ),
@@ -522,15 +522,31 @@
   const INDEXES = [["", "All universes"], ["sp500", "S&P 500"], ["nasdaq100", "NASDAQ 100"], ["ftse100", "FTSE 100"], ["ftse250", "FTSE 250"]];
 
   const SCREEN_FILTERS = [
-    { id: "pe",         label: "P/E",            backend: "pe",          scale: 1,     defaultOp: "max", hint: "Share price ÷ EPS · <15 cheap, 15-25 fair, >30 expensive" },
-    { id: "peg",        label: "PEG",            backend: "peg",         scale: 1,     defaultOp: "max", hint: "P/E ÷ growth rate · <1 undervalued, 1-2 fair, >2 expensive" },
-    { id: "pb",         label: "P/B",            backend: "pb",          scale: 1,     defaultOp: "max", hint: "Price ÷ book · <1.5 near assets, >5 high premium" },
-    { id: "ev",         label: "EV/EBITDA",      backend: "ev_ebitda",   scale: 1,     defaultOp: "max", hint: "Enterprise value ÷ operating profit · <10 cheap, >20 expensive" },
-    { id: "fcf",        label: "FCF Yield %",    backend: "fcf_yield",   scale: 1,     defaultOp: "min", hint: "FCF ÷ market cap · >5% strong, <2% weak" },
-    { id: "cap",        label: "Market Cap $B",  backend: "market_cap",  scale: 1e9,   defaultOp: "min", hint: ">$200B mega · $10-200B large · $2-10B mid · <$2B small" },
-    { id: "vol",        label: "Avg Vol (M)",    backend: "volume",      scale: 1e6,   defaultOp: "min", hint: ">1M liquid · <500K thin" },
-    { id: "rev-growth", label: "Rev Growth %",   backend: "rev_growth",  scale: 1,     defaultOp: "min", hint: ">10% strong · 5-10% decent · <5% slow · negative shrinking" },
+    { id: "pe",         label: "P/E",            backend: "pe",          scale: 1,     defaultOp: "max", placeholder: "e.g. 25", hint: "Share price ÷ EPS · <15 cheap, 15-25 fair, >30 expensive" },
+    { id: "peg",        label: "PEG",            backend: "peg",         scale: 1,     defaultOp: "max", placeholder: "e.g. 1.5", hint: "P/E ÷ growth rate · <1 undervalued, 1-2 fair, >2 expensive" },
+    { id: "pb",         label: "P/B",            backend: "pb",          scale: 1,     defaultOp: "max", placeholder: "e.g. 3",  hint: "Price ÷ book · <1.5 near assets, >5 high premium" },
+    { id: "ev",         label: "EV/EBITDA",      backend: "ev_ebitda",   scale: 1,     defaultOp: "max", placeholder: "e.g. 15", hint: "Enterprise value ÷ operating profit · <10 cheap, >20 expensive" },
+    { id: "fcf",        label: "FCF Yield %",    backend: "fcf_yield",   scale: 1,     defaultOp: "min", placeholder: "e.g. 5",  hint: "FCF ÷ market cap · >5% strong, <2% weak" },
+    { id: "cap",        label: "Market Cap $B",  backend: "market_cap",  scale: 1e9,   defaultOp: "min", placeholder: "e.g. 10", hint: ">$200B mega · $10-200B large · $2-10B mid · <$2B small" },
+    { id: "vol",        label: "Avg Vol (M)",    backend: "volume",      scale: 1e6,   defaultOp: "min", placeholder: "e.g. 1",  hint: ">1M liquid · <500K thin" },
+    { id: "rev-growth", label: "Rev Growth %",   backend: "rev_growth",  scale: 1,     defaultOp: "min", placeholder: "e.g. 10", hint: ">10% strong · 5-10% decent · <5% slow · negative shrinking" },
   ];
+
+  // Sector-specific P/E guidance and example values
+  const PE_SECTOR_DATA = {
+    "":                       { hint: "Price-to-Earnings · <15 cheap, 15-25 fair, >30 expensive", placeholder: "e.g. 25" },
+    Technology:               { hint: "Technology P/E · 20-35 typical; high-growth names justify higher. Good value play <35.", placeholder: "e.g. 35" },
+    Healthcare:               { hint: "Healthcare P/E · 20-30 typical; biotech/pharma often higher on pipeline expectations.", placeholder: "e.g. 30" },
+    "Real Estate":            { hint: "REITs: P/E is less meaningful — use P/FFO instead. Focus on FFO yield and dividend coverage.", placeholder: "e.g. 20" },
+    Financials:               { hint: "Bank P/E · 8-15 typical; insurance 10-15. Also check P/B for banks (fair value ≈ 1-1.5×).", placeholder: "e.g. 14" },
+    Utilities:                { hint: "Utilities P/E · 15-20 typical. Regulated earnings make P/E reliable; above 22 is stretched.", placeholder: "e.g. 18" },
+    Energy:                   { hint: "Energy P/E · cyclical — compare to sector avg. <12 is cheap at cycle bottom; ignore in loss years.", placeholder: "e.g. 12" },
+    "Consumer Staples":       { hint: "Consumer Staples P/E · 20-25 for brand moat. <18 may indicate structural headwinds.", placeholder: "e.g. 22" },
+    "Consumer Discretionary": { hint: "Consumer Discretionary P/E · 15-25 typical; luxury/brand names justify a premium. Cyclical.", placeholder: "e.g. 20" },
+    Industrials:              { hint: "Industrials P/E · 15-22 typical. Capital-intensive; check capex vs. earnings quality.", placeholder: "e.g. 18" },
+    Materials:                { hint: "Materials P/E · 10-18; highly cyclical. A 'cheap' P/E at a cycle bottom is common — compare to mid-cycle.", placeholder: "e.g. 14" },
+    "Communication Services": { hint: "Comm. Services P/E · 15-30. Advertising cyclicality vs. recurring subscription mix matters.", placeholder: "e.g. 22" },
+  };
 
   function Screener({ openDetail }) {
     const [filters, setFilters] = useState(() => {
@@ -604,37 +620,47 @@
         h("div", { className: "grid gap-3 sm:grid-cols-2 lg:grid-cols-4" },
           h("div", null,
             h("label", { className: "block text-[10px] font-mono uppercase tracking-wide text-pulse-dim mb-1" }, "Index"),
-            h(Select, { value: filters.index, onChange: e => setField("index", e.target.value) },
+            h(Select, { id: "filter-index", value: filters.index, onChange: e => setField("index", e.target.value) },
               INDEXES.map(([v, label]) => h("option", { key: v, value: v }, label))
             )
           ),
           h("div", null,
             h("label", { className: "block text-[10px] font-mono uppercase tracking-wide text-pulse-dim mb-1" }, "Sector"),
-            h(Select, { value: filters.sector, onChange: e => setField("sector", e.target.value) },
+            h(Select, { id: "filter-sector", value: filters.sector, onChange: e => setField("sector", e.target.value) },
               h("option", { value: "" }, "All sectors"),
               SECTORS.map(s => h("option", { key: s, value: s }, s))
             )
           ),
-          SCREEN_FILTERS.map(f => h("div", { key: f.id },
-            h("label", { className: "block text-[10px] font-mono uppercase tracking-wide text-pulse-dim mb-1" }, f.label, h("span", { className: "ml-1 text-pulse-dim", title: f.hint }, "ⓘ")),
-            h("div", { className: "flex gap-1" },
-              h("button", {
-                type: "button",
-                onClick: () => toggleOp(f.id),
-                title: "Toggle ≤ / ≥",
-                className: "h-11 w-11 shrink-0 rounded-lg border border-pulse-line bg-pulse-panel text-pulse-cyan font-mono text-base hover:border-pulse-cyan",
-              }, filters[f.id + "_op"] === "max" ? "≤" : "≥"),
-              h(TextInput, { type: "number", step: "any", placeholder: "—", value: filters[f.id], onChange: e => setField(f.id, e.target.value) })
-            )
-          ))
+          SCREEN_FILTERS.map(f => {
+            const peData = f.id === "pe" ? (PE_SECTOR_DATA[filters.sector] || PE_SECTOR_DATA[""]) : null;
+            const hint = peData ? peData.hint : f.hint;
+            const placeholder = peData ? peData.placeholder : f.placeholder;
+            return h("div", { key: f.id, className: "filter-group" },
+              h("label", { className: "block text-[10px] font-mono uppercase tracking-wide text-pulse-dim mb-1" },
+                f.label,
+                h("span", { className: "tip ml-1 cursor-help text-pulse-dim", title: hint, "data-tip": hint }, "ⓘ")
+              ),
+              h("div", { className: "flex gap-1" },
+                h("button", {
+                  type: "button",
+                  onClick: () => toggleOp(f.id),
+                  title: "Toggle ≤ / ≥",
+                  className: "filter-op-btn h-11 w-11 shrink-0 rounded-lg border border-pulse-line bg-pulse-panel text-pulse-cyan font-mono text-base hover:border-pulse-cyan",
+                  "data-filter": f.id,
+                }, filters[f.id + "_op"] === "max" ? "≤" : "≥"),
+                h(TextInput, { id: f.id, type: "number", step: "any", placeholder, value: filters[f.id], onChange: e => setField(f.id, e.target.value) })
+              )
+            );
+          })
         ),
         h("div", { className: "mt-3 flex flex-col gap-2 sm:flex-row" },
-          h(TextInput, { placeholder: "Search by ticker or name (Enter)", value: filters.search, onChange: e => setField("search", e.target.value), onKeyDown: e => { if (e.key === "Enter") run(); } }),
-          h(Button, { kind: "primary", onClick: run, disabled: busy }, busy ? "Running..." : "Run screen")
+          h(TextInput, { id: "screener-search", placeholder: "Search by ticker or name (Enter)", value: filters.search, onChange: e => setField("search", e.target.value), onKeyDown: e => { if (e.key === "Enter") run(); } }),
+          h(Button, { id: "btn-screen", kind: "primary", onClick: run, disabled: busy }, busy ? "Running..." : "Run screen")
         ),
-        status ? h("p", { className: "mt-3 text-sm text-pulse-muted" }, status) : null,
+        status ? h("p", { id: "screen-status", className: "mt-3 text-sm text-pulse-muted" }, status) : null,
         error ? h("p", { className: "mt-3 text-sm text-pulse-red" }, error) : null
       ),
+      h("div", { id: "screen-body" },
       h(ResponsiveTable, {
         columns, rows,
         minWidth: 1100,
@@ -657,7 +683,7 @@
           ),
           h(Button, { onClick: ev => addToWatch(ev, r.ticker), className: "w-full min-h-9 text-xs" }, "+ Watch")
         )
-      })
+      }))
     );
   }
 
@@ -693,6 +719,7 @@
         ),
         error ? h("p", { className: "mt-3 text-sm text-pulse-red" }, error) : null
       ),
+      h("p", { id: "watchlist-status", className: "sr-only" }, busy ? "Loading..." : `${rows.length} items`),
       h(ResponsiveTable, {
         rows,
         onRowClick: r => openDetail(r.ticker),
@@ -831,7 +858,8 @@
           h(Button, { onClick: () => scan("list"), disabled: busy }, "List watchlist"),
           h(Button, { kind: "primary", onClick: () => scan("scan"), disabled: busy }, busy ? "Working..." : "Scan watchlist")
         ),
-        h(Status, { message: status, className: "mt-3" })
+        h(Status, { message: status, className: "mt-3" }),
+        h("span", { id: "sentiment-status", className: "sr-only" }, status)
       ),
       renderBody()
     );
@@ -1013,6 +1041,7 @@
         h(Button, { key: "gen", kind: "primary", onClick: generate, disabled: busy }, busy ? "Working..." : "Generate today"),
       ] }),
       error ? h(Empty, null, error) : null,
+      h("span", { id: "pred-status", className: "sr-only" }, busy ? "Loading predictions..." : status || "ready"),
       status ? h(Status, { message: status, tone: "ok", className: "mb-3" }) : null,
       h("div", { className: "mb-3 flex flex-wrap gap-2" },
         PRED_PERIODS.map(([k, label]) => h("button", {
@@ -1058,7 +1087,7 @@
           h("thead", { className: "bg-pulse-panel font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
             h("tr", null, ["Date", "Ticker", "Current", "Signal", "Factors", "MoS", "3M", "6M", "12M", "Actual", "Variance", "Result", "Confidence", ""].map((x, i) => h("th", { className: "px-3 py-3 text-left", key: i }, x)))
           ),
-          h("tbody", null, filtered.length ? filtered.map((p, i) => h(PredictionRow, { key: i, p, onOpen: () => setSelected(p) })) :
+          h("tbody", { id: "pred-body" }, filtered.length ? filtered.map((p, i) => h(PredictionRow, { key: i, p, onOpen: () => setSelected(p) })) :
             h("tr", null, h("td", { className: "px-3 py-4 text-pulse-muted", colSpan: 14 }, busy ? "Loading..." : "No predictions for this period.")))
         )
       ),
@@ -2416,6 +2445,7 @@
     return h("div", null,
       h(SectionHead, { title: "Recommendations", kicker: "Buy/Sell signals", subtitle: "Sized from your float. Click View for reasoning.", actions: [h(Button, { key: "run", kind: "primary", onClick: load, disabled: busy }, busy ? "Running..." : "↻ Refresh")] }),
       error ? h(Empty, null, error) : null,
+      h("span", { id: "rec-status", className: "sr-only" }, busy ? (progress?.message || "Loading recommendations...") : "ready"),
       progress ? h(Card, { className: "mb-4 p-4" },
         h("div", { className: "flex items-center justify-between text-sm" },
           h("span", { className: "text-pulse-muted" }, progress.message || "Loading recommendations..."),
@@ -2590,14 +2620,24 @@
       try { await api("/api/alerts", { method: "DELETE" }); load(); } catch (err) { setError(err.message); }
     }
 
+    async function testWhatsApp() {
+      setBusy(true); setError("");
+      try {
+        const data = await api("/api/alerts/test-whatsapp", { method: "POST" });
+        setError(data.sms_sent ? "WhatsApp accepted by Twilio ✓" : "WhatsApp not configured");
+      } catch (err) { setError("Error: " + err.message); } finally { setBusy(false); }
+    }
+
     function setField(key, value) { setSettings(s => Object.assign({}, s, { [key]: value })); }
 
     return h("div", null,
       h(SectionHead, { title: "Alerts", kicker: "Recommendation alerts", subtitle: "Email & WhatsApp notifications when high-conviction BUY or SELL signals appear.", actions: [
         h(Button, { key: "test", onClick: testPreview, disabled: busy }, "Send Preview"),
+        h(Button, { id: "btn-test-whatsapp", key: "wa", onClick: testWhatsApp, disabled: busy }, "Send Test WhatsApp"),
         h(Button, { key: "refresh", onClick: load, disabled: busy }, "↻ Refresh"),
         h(Button, { key: "clear", kind: "danger", onClick: clearHistory }, "Clear History"),
       ] }),
+      h("span", { id: "alerts-status", className: "sr-only" }, busy ? "Loading..." : error || "ready"),
       error ? h("p", { className: "mb-3 text-sm text-pulse-amber" }, error) : null,
       monStatus ? h(Card, { className: "mb-4 p-4" },
         h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6" },
@@ -2767,7 +2807,8 @@
           h(Button, { kind: "primary", onClick: () => submitTrade("buy") }, "+ Buy"),
           h(Button, { kind: "danger", onClick: () => submitTrade("sell") }, "− Sell"),
         ),
-        h(Status, { message: status, className: "mt-3" })
+        h(Status, { message: status, className: "mt-3" }),
+        h("span", { id: "portfolio-status", className: "sr-only" }, busy ? "Loading..." : status || "ready")
       ),
       h(ResponsiveTable, {
         rows: positions,
@@ -2833,6 +2874,7 @@
         h(Button, { key: "reset", kind: "danger", onClick: reset }, "✕ Reset"),
       ] }),
       h(Status, { message: status, className: "mb-3" }),
+      h("span", { id: "paper-status", className: "sr-only" }, busy ? "Loading..." : status || "ready"),
       data ? h(Card, { className: "mb-4 p-4" },
         h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7" },
           h(Metric, { label: "Start Float", value: fmtGbp(s.initial_float, 0) }),
