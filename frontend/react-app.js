@@ -3086,7 +3086,23 @@
       tagline: "Credit spread environment & company leverage profile",
       description: "Combines two orthogonal signals: (1) the macro credit environment — using FRED HY/IG OAS spreads when available, otherwise HYG/LQD ETF 30-day momentum as proxies — and (2) the company's own leverage profile (debt/equity, interest coverage, current ratio, free cash flow). Credit spreads lead equity stress by 2–8 weeks, making this a useful early-warning signal. A highly-leveraged company amplifies spread-widening risk; a conservatively-financed company is insulated.",
       sources: ["FRED (BAMLH0A0HYM2 HY OAS, BAMLC0A0CM IG OAS — optional)", "yfinance (HYG/LQD ETF prices; company info: debtToEquity, interestExpense, EBIT, currentRatio, freeCashflow)"],
-      weight: "Most actionable at 3m (0.08); fades at 6m (0.06) and 12m (0.04) as fundamentals take over",
+      weight: "Most actionable at 3m (0.07); fades at 6m (0.05) and 12m (0.04) as fundamentals take over",
+    },
+    {
+      name: "Institutional Flow",
+      icon: "🏛️",
+      tagline: "Institutional ownership level from 13F filings",
+      description: "Tracks what professional money managers collectively own. Healthy institutional interest (40–70% of float) signals broad conviction; dangerously crowded ownership (>85%) creates unwinding risk if sentiment shifts. Insider ownership is equally important — high insider stakes align management with shareholders. Breadth (number of distinct holders) separates concentrated bets from widely-distributed conviction. Data is derived from quarterly 13F filings with a 45-day lag.",
+      sources: ["yfinance (institutionsPercentHeld, insidersPercentHeld, institutionsCount, institutional_holders — 13F-derived)"],
+      weight: "Consistent across horizons: 3m (0.06), 6m (0.07), 12m (0.06)",
+    },
+    {
+      name: "Earnings Surprise",
+      icon: "🎯",
+      tagline: "Historical EPS beat rate & estimate revision trend",
+      description: "Exploits analyst anchoring bias: companies that consistently beat expectations tend to keep doing so because analysts are slow to raise estimates. Scores on the trailing 4-quarter beat rate, the magnitude of average surprises (large beats signal structural underestimation), and the direction of near-term estimate revisions (net upgrades in the last 7 days predict an imminent beat; net cuts are a red flag). Strongest signal in the 1–3 month window around earnings.",
+      sources: ["yfinance (earnings_history: epsEstimate, epsActual, surprisePercent; eps_revisions: upLast7days, downLast7days)"],
+      weight: "Strongest at 3m (0.08) and 6m (0.07); fades at 12m (0.04) where structural trends dominate",
     },
     {
       name: "Portfolio Risk",
@@ -3099,9 +3115,9 @@
     {
       name: "Orchestrator",
       icon: "🧠",
-      tagline: "Aggregates all 13 agents into an investment thesis",
-      description: "Runs all 13 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
-      sources: ["All 13 agents above", "Claude Sonnet (thesis narrative generation)"],
+      tagline: "Aggregates all 15 agents into an investment thesis",
+      description: "Runs all 15 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 15 agents above", "Claude Sonnet (thesis narrative generation)"],
       weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
     },
   ];
@@ -3134,7 +3150,7 @@
     const [openAgent, setOpenAgent] = useState(null);
 
     return h("div", { className: "grid gap-6 pb-10" },
-      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 14 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 15 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
 
       // Pipeline flow
       h(Card, { className: "p-4" },
@@ -3142,7 +3158,7 @@
         h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
           [
             ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
-            ["14 Specialist agents", "Run in parallel"],
+            ["15 Specialist agents", "Run in parallel"],
             ["Orchestrator", "Aggregates + weights"],
             ["Investment thesis", "Claude Sonnet narrative"],
             ["Predictions", "Claude Haiku signals"],
@@ -3160,7 +3176,7 @@
 
       // 10 Agents
       h(Card, { className: "p-4" },
-        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 14 AI agents"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 15 AI agents"),
         h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
         h("div", { className: "grid gap-2" },
           AGENTS.map(a => h("div", { key: a.name },
