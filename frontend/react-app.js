@@ -3126,7 +3126,31 @@
       tagline: "ROIC, FCF conversion & acquisition discipline",
       description: "Scores on the quality of management's capital deployment decisions. Return on equity measures how efficiently the company turns shareholders' capital into profit. FCF conversion (free cash flow vs net income) reveals whether earnings are backed by real cash or accruals. Goodwill growth flags acquisition-driven expansion that often destroys value. Asset turnover trend shows whether operational efficiency is improving. High ROIC companies compound value over years.",
       sources: ["yfinance (returnOnEquity, returnOnAssets; annual financials, balance sheet, cash flow)"],
-      weight: "Long-duration signal: light at 3m (0.03), builds at 6m (0.05), most meaningful at 12m (0.08)",
+      weight: "Long-duration signal: light at 3m (0.02), builds at 6m (0.05), most meaningful at 12m (0.07)",
+    },
+    {
+      name: "Analyst Consensus",
+      icon: "🎙️",
+      tagline: "Sell-side recommendation distribution & price target upside",
+      description: "Aggregates the collective view of all covering sell-side analysts: consensus recommendation (strong buy → strong sell), mean price target vs current price, and target spread (a tight range signals high conviction; a wide range signals disagreement). While analysts lag inflection points, the aggregate target upside and recommendation level provide a calibrated directional signal, especially combined with estimate revision data from the Earnings Surprise agent.",
+      sources: ["yfinance (recommendationKey, numberOfAnalystOpinions, targetMeanPrice, targetHighPrice, targetLowPrice, currentPrice)"],
+      weight: "Most actionable at 3m (0.07) and 6m (0.06); fades at 12m (0.04) as targets drift",
+    },
+    {
+      name: "Financial Distress",
+      icon: "🚨",
+      tagline: "Altman Z''-Score — bankruptcy risk prediction",
+      description: "Computes the sector-agnostic Altman Z''-Score (Altman 2000) using four financial ratios: working capital/assets (liquidity), retained earnings/assets (cumulative profitability), EBIT/assets (operating efficiency), and book equity/liabilities (leverage). Z'' > 2.60 = safe zone; 1.10–2.60 = grey zone; < 1.10 = distress zone with elevated bankruptcy risk. Provides a balance-sheet early-warning signal distinct from the credit spread environment covered by the Credit Risk agent.",
+      sources: ["yfinance (annual balance sheet: working capital, retained earnings, total assets/liabilities, equity; income statement: EBIT)"],
+      weight: "Balance sheet signals play out slowly: 3m (0.04), 6m (0.05), 12m (0.06)",
+    },
+    {
+      name: "Piotroski F-Score",
+      icon: "🏆",
+      tagline: "9-factor accounting quality composite (Piotroski 2000)",
+      description: "Scores nine binary accounting signals across three dimensions: Profitability (ROA positive, ROA improving, operating cash flow positive, cash earnings > reported earnings), Leverage/Liquidity (debt ratio falling, current ratio improving, no share dilution), and Operating Efficiency (gross margin improving, asset turnover improving). A score of 8–9 flags high-quality compounders; 0–1 flags distressed quality. Well-proven at separating winners from losers in value stocks.",
+      sources: ["yfinance (annual financials, balance sheet, cash flow — 2 years for YoY comparisons)"],
+      weight: "Annual accounting signal: light at 3m (0.03), meaningful at 6m (0.06), strongest at 12m (0.08)",
     },
     {
       name: "Portfolio Risk",
@@ -3139,9 +3163,9 @@
     {
       name: "Orchestrator",
       icon: "🧠",
-      tagline: "Aggregates all 18 agents into an investment thesis",
-      description: "Runs all 18 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
-      sources: ["All 18 agents above", "Claude Sonnet (thesis narrative generation)"],
+      tagline: "Aggregates all 21 agents into an investment thesis",
+      description: "Runs all 21 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 21 agents above", "Claude Sonnet (thesis narrative generation)"],
       weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
     },
   ];
@@ -3174,7 +3198,7 @@
     const [openAgent, setOpenAgent] = useState(null);
 
     return h("div", { className: "grid gap-6 pb-10" },
-      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 18 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 21 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
 
       // Pipeline flow
       h(Card, { className: "p-4" },
@@ -3182,7 +3206,7 @@
         h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
           [
             ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
-            ["18 Specialist agents", "Run in parallel"],
+            ["21 Specialist agents", "Run in parallel"],
             ["Orchestrator", "Aggregates + weights"],
             ["Investment thesis", "Claude Sonnet narrative"],
             ["Predictions", "Claude Haiku signals"],
@@ -3200,7 +3224,7 @@
 
       // 10 Agents
       h(Card, { className: "p-4" },
-        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 18 AI agents"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 21 AI agents"),
         h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
         h("div", { className: "grid gap-2" },
           AGENTS.map(a => h("div", { key: a.name },
