@@ -106,7 +106,7 @@ def _fred_oas(series_id: str, api_key: str) -> float | None:
             f"?series_id={series_id}&api_key={api_key}"
             f"&sort_order=desc&limit=5&file_type=json"
         )
-        with urllib.request.urlopen(url, timeout=8) as r:
+        with urllib.request.urlopen(url, timeout=8) as r:  # nosec B310 — URL is constructed from hardcoded FRED base, not user input
             data = json.loads(r.read())
         for obs in data.get("observations", []):
             val = obs.get("value", ".")
