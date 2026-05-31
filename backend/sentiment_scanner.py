@@ -82,25 +82,27 @@ def classify_sentiment(score):
     return "neutral"
 
 
+def _relevant_headlines(ticker: str, company_name: str, headlines: list[dict]) -> list[dict]:
+    """Return only headlines that explicitly name the ticker symbol or company."""
+    name_clean = (company_name or ticker).lower()
+    for suffix in (" inc", " corp", " corporation", " ltd", " plc", " co", ".", ","):
+        name_clean = name_clean.replace(suffix, "")
+    name_clean = name_clean.strip()
+    ticker_lower = ticker.lower()
+    return [
+        h for h in headlines
+        if ticker_lower in h["title"].lower()
+        or (len(name_clean) > 3 and name_clean in h["title"].lower())
+    ]
+
+
 def _summarize_with_claude(ticker: str, company_name: str, headlines: list[dict]) -> str:
     """Summarise only headlines that explicitly mention ticker or company name."""
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key or not headlines:
         return ""
 
-    # Strip legal suffixes so "Apple" matches "Apple Inc.", "NVIDIA" matches "Nvidia Corp" etc.
-    name_clean = (company_name or ticker)
-    for suffix in (" inc", " corp", " corporation", " ltd", " plc", " co", ".", ","):
-        name_clean = name_clean.lower().replace(suffix, "")
-    name_clean = name_clean.strip()
-    ticker_lower = ticker.lower()
-
-    # Only forward headlines that actually name the company or ticker
-    relevant = [
-        h for h in headlines[:12]
-        if ticker_lower in h["title"].lower()
-        or (len(name_clean) > 3 and name_clean in h["title"].lower())
-    ]
+    relevant = _relevant_headlines(ticker, company_name, headlines[:12])
 
     if not relevant:
         return "No company-specific headlines found for this period."
@@ -173,6 +175,7 @@ def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
         composite -= 2
 
     company_name = info.get("shortName", ticker)
+    display_headlines = _relevant_headlines(ticker, company_name, headlines)
     return {
         "ticker": ticker,
         "name": company_name,
@@ -180,11 +183,11 @@ def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
         "change_pct": round(change_pct, 2) if isinstance(change_pct, (int, float)) else None,
         "target_mean_price": round(target_mean, 2) if isinstance(target_mean, (int, float)) else None,
         "recommendation": recommendation or "n/a",
-        "headline_count": len(headlines),
+        "headline_count": len(display_headlines),
         "sentiment_score": composite,
         "sentiment": classify_sentiment(composite),
-        "headlines": headlines[:5],
-        "news_summary": _summarize_with_claude(ticker, company_name, headlines) if with_summary else "",
+        "headlines": display_headlines[:5],
+        "news_summary": _summarize_with_claude(ticker, company_name, display_headlines) if with_summary else "",
     }
 
 
