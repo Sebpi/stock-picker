@@ -342,18 +342,28 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "unsafe-none"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     if is_secure:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com https://unpkg.com; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://cdn.tailwindcss.com; "
-        "connect-src 'self' https://cdn.jsdelivr.net https://pick-shovels-wistful-morning-252.fly.dev; "
-        "img-src 'self' data: https:; "
-        "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.tailwindcss.com; "
+        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; "
+        "connect-src 'self' https://pick-shovels-wistful-morning-252.fly.dev; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self'; "
         "worker-src blob:; "
-        "frame-ancestors 'none';"
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self';"
     )
+    # Suppress server version disclosure (uvicorn sets this at ASGI level)
+    try:
+        del response.headers["server"]
+    except KeyError:
+        pass
     return response
 
 
