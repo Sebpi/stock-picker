@@ -3102,7 +3102,31 @@
       tagline: "Historical EPS beat rate & estimate revision trend",
       description: "Exploits analyst anchoring bias: companies that consistently beat expectations tend to keep doing so because analysts are slow to raise estimates. Scores on the trailing 4-quarter beat rate, the magnitude of average surprises (large beats signal structural underestimation), and the direction of near-term estimate revisions (net upgrades in the last 7 days predict an imminent beat; net cuts are a red flag). Strongest signal in the 1–3 month window around earnings.",
       sources: ["yfinance (earnings_history: epsEstimate, epsActual, surprisePercent; eps_revisions: upLast7days, downLast7days)"],
-      weight: "Strongest at 3m (0.08) and 6m (0.07); fades at 12m (0.04) where structural trends dominate",
+      weight: "Strongest at 3m (0.07) and 6m (0.06); fades at 12m (0.04) where structural trends dominate",
+    },
+    {
+      name: "Price Momentum",
+      icon: "📈",
+      tagline: "12-1 month price momentum factor (Jegadeesh-Titman)",
+      description: "One of the most robustly documented equity anomalies: stocks that have outperformed over the prior 6–12 months tend to continue outperforming over the next 3–6 months. The final month is excluded to avoid short-term bid-ask reversal. Signals include absolute 12-1m momentum, 3-month trend confirmation, and relative performance vs the S&P 500 (removes market-wide tailwinds to isolate stock-specific momentum). A short-term reversal check dampens overbought readings.",
+      sources: ["yfinance (daily price history — ticker + SPY for relative momentum)"],
+      weight: "Strongest at 3m (0.09) where momentum effect peaks; fades rapidly at 12m (0.02)",
+    },
+    {
+      name: "Dividend Quality",
+      icon: "💰",
+      tagline: "Dividend sustainability, payout safety & buyback yield",
+      description: "Evaluates not just yield but whether the dividend is sustainable. A high yield with a payout ratio above 90% is a value trap; a modest yield with strong FCF coverage and room to grow is a quality signal. Also computes buyback yield (net share reduction rate) and total shareholder yield (dividend + buyback) — the complete picture of capital return to shareholders.",
+      sources: ["yfinance (dividendYield, payoutRatio, dividendRate; balance sheet shares outstanding; cash flow dividends paid)"],
+      weight: "Long-duration quality signal: 3m (0.03), 6m (0.05), 12m (0.07)",
+    },
+    {
+      name: "Capital Allocation",
+      icon: "⚙️",
+      tagline: "ROIC, FCF conversion & acquisition discipline",
+      description: "Scores on the quality of management's capital deployment decisions. Return on equity measures how efficiently the company turns shareholders' capital into profit. FCF conversion (free cash flow vs net income) reveals whether earnings are backed by real cash or accruals. Goodwill growth flags acquisition-driven expansion that often destroys value. Asset turnover trend shows whether operational efficiency is improving. High ROIC companies compound value over years.",
+      sources: ["yfinance (returnOnEquity, returnOnAssets; annual financials, balance sheet, cash flow)"],
+      weight: "Long-duration signal: light at 3m (0.03), builds at 6m (0.05), most meaningful at 12m (0.08)",
     },
     {
       name: "Portfolio Risk",
@@ -3115,9 +3139,9 @@
     {
       name: "Orchestrator",
       icon: "🧠",
-      tagline: "Aggregates all 15 agents into an investment thesis",
-      description: "Runs all 15 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
-      sources: ["All 15 agents above", "Claude Sonnet (thesis narrative generation)"],
+      tagline: "Aggregates all 18 agents into an investment thesis",
+      description: "Runs all 18 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 18 agents above", "Claude Sonnet (thesis narrative generation)"],
       weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
     },
   ];
@@ -3150,7 +3174,7 @@
     const [openAgent, setOpenAgent] = useState(null);
 
     return h("div", { className: "grid gap-6 pb-10" },
-      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 15 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 18 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
 
       // Pipeline flow
       h(Card, { className: "p-4" },
@@ -3158,7 +3182,7 @@
         h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
           [
             ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
-            ["15 Specialist agents", "Run in parallel"],
+            ["18 Specialist agents", "Run in parallel"],
             ["Orchestrator", "Aggregates + weights"],
             ["Investment thesis", "Claude Sonnet narrative"],
             ["Predictions", "Claude Haiku signals"],
@@ -3176,7 +3200,7 @@
 
       // 10 Agents
       h(Card, { className: "p-4" },
-        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 15 AI agents"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 18 AI agents"),
         h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
         h("div", { className: "grid gap-2" },
           AGENTS.map(a => h("div", { key: a.name },
