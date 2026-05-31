@@ -1386,6 +1386,7 @@
     const [panel, setPanel] = useState(null);
     const [panelData, setPanelData] = useState(null);
     const [watchlist, setWatchlist] = useState([]);
+    const [completedSet, setCompletedSet] = useState(new Set());
 
     useEffect(() => {
       // names_only=true skips yfinance price fetches — returns bare ticker list instantly
@@ -1400,12 +1401,12 @@
         if (savedRunId) {
           api(`/v1/runs/${encodeURIComponent(savedRunId)}`).then(run => {
             if (run && ["running", "queued"].includes(run.status)) {
-              const target = (run.tickers || tickers)[0] || first;
+              const done = run.completed || [];
+              const target = done.length > 0 ? done[done.length - 1] : ((run.tickers || tickers)[0] || first);
               if (target) setTicker(target);
+              setCompletedSet(new Set(done));
               setBusy(true);
-              const done = (run.completed || []).length;
-              const total = (run.tickers || []).length;
-              setStatus(`Resuming run · ${done}/${total || "?"} tickers complete`);
+              setStatus(`Resuming run · ${done.length}/${(run.tickers || []).length || "?"} tickers complete`);
               pollRun(savedRunId, target || first);
             } else {
               sessionStorage.removeItem("thesis_active_run_id");
@@ -1455,21 +1456,39 @@
     }
 
     async function pollRun(runId, target) {
-      let attempts = 0;
+      let lastCompletedCount = 0;
+      let currentTarget = target;
       const timer = setInterval(async () => {
-        attempts += 1;
         try {
           const data = await api(`/v1/runs/${encodeURIComponent(runId)}`);
-          const completed = (data.completed || []).length;
+          const completed = data.completed || [];
           const total = (data.tickers || []).length;
-          setStatus(`Running agents · ${completed}/${total || "?"} tickers complete`);
-          if (["complete", "completed", "partial", "failed"].includes(data.status) || attempts > 180) {
+          setStatus(`Running agents · ${completed.length}/${total || "?"} tickers complete`);
+
+          // Stream: as each ticker finishes, show its thesis immediately
+          if (completed.length > lastCompletedCount) {
+            const justDone = completed[completed.length - 1];
+            lastCompletedCount = completed.length;
+            setCompletedSet(prev => new Set([...prev, ...completed]));
+            if (justDone) {
+              currentTarget = justDone;
+              setTicker(justDone);
+              loadLatest(justDone);
+            }
+          }
+
+          if (["complete", "completed", "partial", "failed"].includes(data.status)) {
             clearInterval(timer);
             sessionStorage.removeItem("thesis_active_run_id");
             setBusy(false);
-            loadLatest(target);
+            setStatus(`Done · ${completed.length}/${total} tickers · ${data.status}`);
           }
-        } catch (err) { clearInterval(timer); sessionStorage.removeItem("thesis_active_run_id"); setBusy(false); setStatus(err.message || "Run failed."); }
+        } catch (err) {
+          clearInterval(timer);
+          sessionStorage.removeItem("thesis_active_run_id");
+          setBusy(false);
+          setStatus(err.message || "Run failed.");
+        }
       }, 2500);
     }
 
@@ -1535,9 +1554,11 @@
                 "rounded-md border px-2.5 py-1 font-mono text-xs font-semibold transition",
                 ticker === t
                   ? "border-pulse-cyan bg-pulse-cyan/10 text-pulse-cyan"
-                  : "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
+                  : completedSet.has(t)
+                    ? "border-emerald-500/40 bg-emerald-500/5 text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
+                    : "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
               )
-            }, t))
+            }, completedSet.has(t) && ticker !== t ? `✓ ${t}` : t))
           ),
           h("div", { className: "mb-3 border-t border-pulse-line/60" })
         ) : null,
