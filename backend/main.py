@@ -352,7 +352,7 @@ async def security_headers(request: Request, call_next):
         "script-src 'self' "
         "'sha256-G0xAtLNSRFwbaVvJoMXIL39pcsyt3wPr8A0Gt4fNPx4=' "
         "https://unpkg.com; "
-        "style-src 'self'; "
+        "style-src 'self' 'sha256-JY2CPnAQYQylZcG0tTBIGoRtNV0dsTWGI3U7cL/c9Rc='; "
         "connect-src 'self' https://pick-shovels-wistful-morning-252.fly.dev; "
         "img-src 'self' data: blob:; "
         "font-src 'self'; "
