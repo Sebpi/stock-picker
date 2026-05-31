@@ -3081,6 +3081,14 @@
       weight: "Light at 3m (0.04); meaningful at 6m (0.09) and 12m (0.10) where accrual reversals materialise",
     },
     {
+      name: "Credit Risk",
+      icon: "🏦",
+      tagline: "Credit spread environment & company leverage profile",
+      description: "Combines two orthogonal signals: (1) the macro credit environment — using FRED HY/IG OAS spreads when available, otherwise HYG/LQD ETF 30-day momentum as proxies — and (2) the company's own leverage profile (debt/equity, interest coverage, current ratio, free cash flow). Credit spreads lead equity stress by 2–8 weeks, making this a useful early-warning signal. A highly-leveraged company amplifies spread-widening risk; a conservatively-financed company is insulated.",
+      sources: ["FRED (BAMLH0A0HYM2 HY OAS, BAMLC0A0CM IG OAS — optional)", "yfinance (HYG/LQD ETF prices; company info: debtToEquity, interestExpense, EBIT, currentRatio, freeCashflow)"],
+      weight: "Most actionable at 3m (0.08); fades at 6m (0.06) and 12m (0.04) as fundamentals take over",
+    },
+    {
       name: "Portfolio Risk",
       icon: "⚖️",
       tagline: "Concentration, beta & correlation",
@@ -3091,9 +3099,9 @@
     {
       name: "Orchestrator",
       icon: "🧠",
-      tagline: "Aggregates all 12 agents into an investment thesis",
-      description: "Runs all 12 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
-      sources: ["All 12 agents above", "Claude Sonnet (thesis narrative generation)"],
+      tagline: "Aggregates all 13 agents into an investment thesis",
+      description: "Runs all 13 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 13 agents above", "Claude Sonnet (thesis narrative generation)"],
       weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
     },
   ];
@@ -3126,7 +3134,7 @@
     const [openAgent, setOpenAgent] = useState(null);
 
     return h("div", { className: "grid gap-6 pb-10" },
-      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 13 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 14 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
 
       // Pipeline flow
       h(Card, { className: "p-4" },
@@ -3134,7 +3142,7 @@
         h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
           [
             ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
-            ["13 Specialist agents", "Run in parallel"],
+            ["14 Specialist agents", "Run in parallel"],
             ["Orchestrator", "Aggregates + weights"],
             ["Investment thesis", "Claude Sonnet narrative"],
             ["Predictions", "Claude Haiku signals"],
@@ -3152,7 +3160,7 @@
 
       // 10 Agents
       h(Card, { className: "p-4" },
-        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 13 AI agents"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 14 AI agents"),
         h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
         h("div", { className: "grid gap-2" },
           AGENTS.map(a => h("div", { key: a.name },
