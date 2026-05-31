@@ -349,7 +349,10 @@ async def security_headers(request: Request, call_next):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com; "
+        "script-src 'self' "
+        "'sha256-G0xAtLNSRFwbaVvJoMXIL39pcsyt3wPr8A0Gt4fNPx4=' "
+        "'sha256-HlgpxjiLraB9kZBXrAL4Rp9gSFZ67BkY9pfl+LWetOI=' "
+        "https://cdn.tailwindcss.com https://unpkg.com; "
         "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; "
         "connect-src 'self' https://pick-shovels-wistful-morning-252.fly.dev; "
         "img-src 'self' data: blob:; "
