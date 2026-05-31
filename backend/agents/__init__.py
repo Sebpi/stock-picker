@@ -188,6 +188,7 @@ def run_all_agents(ticker: str, run_id: str | None = None) -> dict[str, AgentSig
     from agents.portfolio_risk import PortfolioRiskAgent
     from agents.insider_activity import InsiderActivityAgent
     from agents.options_flow import OptionsFlowAgent
+    from agents.short_interest import ShortInterestAgent
 
     agents: list[BaseAgent] = [
         FundamentalsAgent(),
@@ -200,6 +201,7 @@ def run_all_agents(ticker: str, run_id: str | None = None) -> dict[str, AgentSig
         PortfolioRiskAgent(),
         InsiderActivityAgent(),
         OptionsFlowAgent(),
+        ShortInterestAgent(),
     ]
     if run_id is None:
         run_id = str(uuid.uuid4())
