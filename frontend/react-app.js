@@ -3065,6 +3065,14 @@
       weight: "High at 3-month horizon (0.09) where near-term positioning is actionable; light at 6m (0.04) and minimal at 12m (0.02)",
     },
     {
+      name: "Short Interest",
+      icon: "🩳",
+      tagline: "Short selling activity & squeeze risk",
+      description: "Tracks the percentage of the float sold short, days-to-cover (how many trading days it would take all shorts to exit at average volume), and the month-on-month change in shares short. A falling short interest on a highly-shorted stock signals shorts capitulating — a powerful bullish indicator. A rapidly rising short % signals growing negative conviction. High days-to-cover (>8) combined with active covering creates squeeze risk, which adds a score bonus.",
+      sources: ["yfinance (FINRA short interest: shortPercentOfFloat, shortRatio, sharesShort, sharesShortPriorMonth)"],
+      weight: "Meaningful at 3m (0.07) and 6m (0.05); modest at 12m (0.03) where fundamentals dominate",
+    },
+    {
       name: "Portfolio Risk",
       icon: "⚖️",
       tagline: "Concentration, beta & correlation",
@@ -3075,9 +3083,9 @@
     {
       name: "Orchestrator",
       icon: "🧠",
-      tagline: "Aggregates all 10 agents into an investment thesis",
-      description: "Runs all 10 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
-      sources: ["All 10 agents above", "Claude Sonnet (thesis narrative generation)"],
+      tagline: "Aggregates all 11 agents into an investment thesis",
+      description: "Runs all 11 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 11 agents above", "Claude Sonnet (thesis narrative generation)"],
       weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
     },
   ];
@@ -3110,7 +3118,7 @@
     const [openAgent, setOpenAgent] = useState(null);
 
     return h("div", { className: "grid gap-6 pb-10" },
-      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 11 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 12 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
 
       // Pipeline flow
       h(Card, { className: "p-4" },
@@ -3118,7 +3126,7 @@
         h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
           [
             ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
-            ["11 Specialist agents", "Run in parallel"],
+            ["12 Specialist agents", "Run in parallel"],
             ["Orchestrator", "Aggregates + weights"],
             ["Investment thesis", "Claude Sonnet narrative"],
             ["Predictions", "Claude Haiku signals"],
@@ -3136,7 +3144,7 @@
 
       // 10 Agents
       h(Card, { className: "p-4" },
-        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 11 AI agents"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 12 AI agents"),
         h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
         h("div", { className: "grid gap-2" },
           AGENTS.map(a => h("div", { key: a.name },
