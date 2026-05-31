@@ -3039,8 +3039,10 @@ async def get_peer_valuation(ticker: str):
 
 
 @app.get("/api/watchlist")
-async def get_watchlist():
+async def get_watchlist(names_only: bool = False):
     tickers = load_watchlist()
+    if names_only:
+        return tickers
     infos = await asyncio.gather(*[get_info(t) for t in tickers], return_exceptions=True)
     results = []
     for ticker, info in zip(tickers, infos):

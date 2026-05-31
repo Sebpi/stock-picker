@@ -1388,13 +1388,36 @@
     const [watchlist, setWatchlist] = useState([]);
 
     useEffect(() => {
-      api("/api/watchlist").then(data => {
+      // names_only=true skips yfinance price fetches — returns bare ticker list instantly
+      api("/api/watchlist?names_only=true").then(data => {
         const raw = Array.isArray(data) ? data : (data.watchlist || []);
         const tickers = raw.map(item => (typeof item === "object" && item !== null ? item.ticker : item)).filter(Boolean);
         setWatchlist(tickers);
-        if (tickers.length > 0) {
-          setTicker(tickers[0]);
-          loadLatest(tickers[0]);
+        const first = tickers[0] || "";
+
+        // Reconnect to a run that was in progress when the tab was closed/navigated away
+        const savedRunId = sessionStorage.getItem("thesis_active_run_id");
+        if (savedRunId) {
+          api(`/v1/runs/${encodeURIComponent(savedRunId)}`).then(run => {
+            if (run && ["running", "queued"].includes(run.status)) {
+              const target = (run.tickers || tickers)[0] || first;
+              if (target) setTicker(target);
+              setBusy(true);
+              const done = (run.completed || []).length;
+              const total = (run.tickers || []).length;
+              setStatus(`Resuming run · ${done}/${total || "?"} tickers complete`);
+              pollRun(savedRunId, target || first);
+            } else {
+              sessionStorage.removeItem("thesis_active_run_id");
+              if (first) { setTicker(first); loadLatest(first); }
+            }
+          }).catch(() => {
+            sessionStorage.removeItem("thesis_active_run_id");
+            if (first) { setTicker(first); loadLatest(first); }
+          });
+        } else if (first) {
+          setTicker(first);
+          loadLatest(first);
         }
       }).catch(() => {});
     }, []);
@@ -1416,6 +1439,7 @@
       setBusy(true); setStatus(`Starting agent run for ${target}...`);
       try {
         const r = await api("/v1/runs", { method: "POST", body: JSON.stringify({ tickers: [target], run_fresh: runFresh }) });
+        sessionStorage.setItem("thesis_active_run_id", r.run_id);
         pollRun(r.run_id, target);
       } catch (err) { setStatus(err.message || "Could not start run."); setBusy(false); }
     }
@@ -1425,6 +1449,7 @@
       setBusy(true); setStatus(`Starting agent run for ${watchlist.length} watchlist tickers...`);
       try {
         const r = await api("/v1/runs", { method: "POST", body: JSON.stringify({ run_fresh: runFresh }) });
+        sessionStorage.setItem("thesis_active_run_id", r.run_id);
         pollRun(r.run_id, watchlist[0]);
       } catch (err) { setStatus(err.message || "Could not start run."); setBusy(false); }
     }
@@ -1438,10 +1463,13 @@
           const completed = (data.completed || []).length;
           const total = (data.tickers || []).length;
           setStatus(`Running agents · ${completed}/${total || "?"} tickers complete`);
-          if (["complete", "completed", "partial", "failed"].includes(data.status) || attempts > 90) {
-            clearInterval(timer); setBusy(false); loadLatest(target);
+          if (["complete", "completed", "partial", "failed"].includes(data.status) || attempts > 180) {
+            clearInterval(timer);
+            sessionStorage.removeItem("thesis_active_run_id");
+            setBusy(false);
+            loadLatest(target);
           }
-        } catch (err) { clearInterval(timer); setBusy(false); setStatus(err.message || "Run failed."); }
+        } catch (err) { clearInterval(timer); sessionStorage.removeItem("thesis_active_run_id"); setBusy(false); setStatus(err.message || "Run failed."); }
       }, 2500);
     }
 
