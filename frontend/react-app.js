@@ -1374,7 +1374,7 @@
   // ──────────────────────────────────────────────────────────────
 
   function Thesis() {
-    const [ticker, setTicker] = useState("CEG");
+    const [ticker, setTicker] = useState("");
     const [runFresh, setRunFresh] = useState(false);
     const [thesis, setThesis] = useState(null);
     const [history, setHistory] = useState([]);
@@ -1385,6 +1385,18 @@
     const [compareData, setCompareData] = useState(null);
     const [panel, setPanel] = useState(null);
     const [panelData, setPanelData] = useState(null);
+    const [watchlist, setWatchlist] = useState([]);
+
+    useEffect(() => {
+      api("/api/watchlist").then(data => {
+        const tickers = Array.isArray(data) ? data : (data.watchlist || []);
+        setWatchlist(tickers);
+        if (tickers.length > 0) {
+          setTicker(tickers[0]);
+          loadLatest(tickers[0]);
+        }
+      }).catch(() => {});
+    }, []);
 
     async function loadLatest(sym) {
       const target = (sym || ticker).trim().toUpperCase();
@@ -1407,13 +1419,24 @@
       } catch (err) { setStatus(err.message || "Could not start run."); setBusy(false); }
     }
 
+    async function runWatchlist() {
+      if (!watchlist.length) return;
+      setBusy(true); setStatus(`Starting agent run for ${watchlist.length} watchlist tickers...`);
+      try {
+        const r = await api("/v1/runs", { method: "POST", body: JSON.stringify({ run_fresh: runFresh }) });
+        pollRun(r.run_id, watchlist[0]);
+      } catch (err) { setStatus(err.message || "Could not start run."); setBusy(false); }
+    }
+
     async function pollRun(runId, target) {
       let attempts = 0;
       const timer = setInterval(async () => {
         attempts += 1;
         try {
           const data = await api(`/v1/runs/${encodeURIComponent(runId)}`);
-          setStatus(`Run ${data.status || "running"} · completed ${(data.completed || []).length}`);
+          const completed = (data.completed || []).length;
+          const total = (data.tickers || []).length;
+          setStatus(`Running agents · ${completed}/${total || "?"} tickers complete`);
           if (["complete", "completed", "partial", "failed"].includes(data.status) || attempts > 90) {
             clearInterval(timer); setBusy(false); loadLatest(target);
           }
@@ -1473,6 +1496,22 @@
         h(Button, { key: "refresh", onClick: () => loadLatest(), disabled: busy }, "Refresh latest"),
       ] }),
       h(Card, { className: "mb-4 p-4" },
+        watchlist.length > 0 ? h("div", null,
+          h("div", { className: "flex flex-wrap items-center gap-2 pb-3" },
+            h("span", { className: "font-mono text-[10px] uppercase tracking-[0.18em] text-pulse-dim shrink-0" }, "Watchlist"),
+            watchlist.map(t => h("button", {
+              key: t,
+              onClick: () => { setTicker(t); loadLatest(t); },
+              className: cx(
+                "rounded-md border px-2.5 py-1 font-mono text-xs font-semibold transition",
+                ticker === t
+                  ? "border-pulse-cyan bg-pulse-cyan/10 text-pulse-cyan"
+                  : "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
+              )
+            }, t))
+          ),
+          h("div", { className: "mb-3 border-t border-pulse-line/60" })
+        ) : null,
         h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-[1fr_auto_auto_auto]" },
           h(TextInput, { value: ticker, onChange: e => setTicker(e.target.value.toUpperCase()), onKeyDown: e => { if (e.key === "Enter") loadLatest(); }, placeholder: "Ticker", className: "col-span-2 sm:col-span-1" }),
           h("label", { className: "flex min-h-11 items-center gap-2 rounded-lg border border-pulse-line bg-pulse-panel px-3 text-sm text-pulse-muted" },
@@ -1482,6 +1521,9 @@
           h(Button, { onClick: () => loadLatest(), disabled: busy }, "View latest"),
           h(Button, { kind: "primary", onClick: run, disabled: busy, className: "col-span-2 sm:col-span-1" }, busy ? "Working..." : "Run agents")
         ),
+        watchlist.length > 0 ? h(Button, { kind: "primary", onClick: runWatchlist, disabled: busy, className: "mt-3 w-full" },
+          busy ? "Working..." : `Run all ${watchlist.length} watchlist tickers`
+        ) : null,
         h("div", { className: "mt-3 grid gap-2 sm:grid-cols-[1fr_auto]" },
           h(TextInput, { value: compareInput, onChange: e => setCompareInput(e.target.value.toUpperCase()), placeholder: "Compare: MSFT,AAPL,NVDA", onKeyDown: e => { if (e.key === "Enter") runCompare(); } }),
           h(Button, { kind: "primary", onClick: runCompare, disabled: busy }, "Compare")
@@ -1489,7 +1531,7 @@
         h(Status, { message: status, className: "mt-3" })
       ),
       compareData ? h(CompareCard, { data: compareData, onClose: () => setCompareData(null) }) : null,
-      thesis ? h(ThesisView, { thesis, history, recon, onHistory: loadById }) : h(Empty, null, "Enter a ticker, load latest, or run agents."),
+      thesis ? h(ThesisView, { thesis, history, recon, onHistory: loadById }) : h(Empty, null, busy ? "Running agents, please wait..." : "No thesis yet — tap 'Run all watchlist' above to generate today's analysis."),
       panel ? h(SlideOver, { title: panel === "ops" ? "Operations" : panel === "health" ? "Agent Health" : "Evaluation", kicker: "Agent infrastructure", onClose: () => { setPanel(null); setPanelData(null); } },
         panelData == null ? h(Empty, null, "Loading...") :
         panelData.error ? h(Empty, null, panelData.error) :
