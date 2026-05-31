@@ -1867,15 +1867,15 @@
       }
     }
 
-    return h("div", { className: "grid gap-4" },
-      h(Card, { className: "p-4" },
+    return h("div", { className: "grid gap-4 min-w-0 overflow-x-hidden" },
+      h(Card, { className: "overflow-hidden p-4" },
         h("div", { className: "flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between" },
-          h("div", null,
+          h("div", { className: "min-w-0 flex-1" },
             h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Deep dive"),
             h("h3", { className: "mt-1 text-2xl font-semibold" }, thesis.ticker, " Analysis"),
-            h("p", { className: "mt-1 text-sm text-pulse-muted" }, fmtDate(thesis.generated_at), thesis.thesis_id ? ` · thesis ${String(thesis.thesis_id).slice(0, 8)}` : "")
+            h("p", { className: "mt-1 truncate text-sm text-pulse-muted" }, fmtDate(thesis.generated_at), thesis.thesis_id ? ` · thesis ${String(thesis.thesis_id).slice(0, 8)}` : "")
           ),
-          h("a", { href: "#", onClick: exportPdf, className: "inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink sm:w-auto sm:min-h-10" }, "Export PDF")
+          h("a", { href: "#", onClick: exportPdf, className: "inline-flex min-h-11 w-full shrink-0 items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink sm:w-auto sm:min-h-10" }, "Export PDF")
         )
       ),
       h(Reconciliation, { data: recon }),
@@ -1894,16 +1894,16 @@
           )
         )
       ),
-      history && history.length ? h(Card, { className: "p-4" },
+      history && history.length ? h(Card, { className: "overflow-hidden p-4" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Dated results · last 12 months"),
-        h("div", { className: "mt-3 flex gap-2 overflow-x-auto pb-1 scrollbar-none" },
+        h("div", { className: "mt-3 flex gap-2 overflow-x-auto pb-1" },
           history.map(row => h("button", { key: row.thesis_id, onClick: () => onHistory(row.thesis_id), className: "shrink-0 rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2 text-left" },
             h("div", { className: cx("font-mono text-sm", scoreTone(row.composite_score)) }, Number(row.composite_score || 0).toFixed(1)),
             h("div", { className: "text-[11px] text-pulse-muted" }, row.generated_at ? new Date(row.generated_at).toLocaleDateString() : "—")
           ))
         )
       ) : null,
-      h("div", { className: "grid gap-3 sm:grid-cols-3" },
+      h("div", { className: "grid gap-3 md:grid-cols-3" },
         ["3m", "6m", "12m"].map(key => h(ForecastCard, { key, label: key.toUpperCase(), forecast: forecast[key], weighted: thesis.weighted_scores && thesis.weighted_scores[key] }))
       ),
       h("div", { className: "grid gap-3 md:grid-cols-3" },
@@ -1912,13 +1912,13 @@
           h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted" }, (thesis.narrative || {})[key] || "No narrative.")
         ))
       ),
-      h(Card, { className: "p-4" },
+      h(Card, { className: "overflow-hidden p-4" },
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Agent scores"),
-        h("div", { className: "mt-3 grid gap-3" },
-          Object.entries(thesis.agent_scores || {}).map(([agent, value]) => h("div", { key: agent, className: "grid grid-cols-[90px_1fr_36px] items-center gap-2 text-sm sm:grid-cols-[112px_1fr_40px] sm:gap-3" },
+        h("div", { className: "mt-3 grid gap-2" },
+          Object.entries(thesis.agent_scores || {}).map(([agent, value]) => h("div", { key: agent, className: "grid grid-cols-[80px_1fr_32px] items-center gap-2 sm:grid-cols-[112px_1fr_40px]" },
             h("span", { className: "truncate text-[11px] text-pulse-muted sm:text-sm" }, agent.replace("agent.", "").replace(/_/g, " ")),
             h(ProgressBar, { value }),
-            h("strong", { className: cx("font-mono text-right", scoreTone(value)) }, Number(value || 0).toFixed(0))
+            h("strong", { className: cx("font-mono text-right text-xs sm:text-sm", scoreTone(value)) }, Number(value || 0).toFixed(0))
           ))
         )
       ),
@@ -1936,7 +1936,7 @@
         h("div", { className: "flex justify-between" }, h("span", { className: "text-pulse-muted" }, "Base"), h("strong", { className: cx("font-mono", Number(forecast.base_return_pct) >= 0 ? "text-pulse-green" : "text-pulse-red") }, fmtPct(forecast.base_return_pct, 1))),
         h("div", { className: "flex justify-between" }, h("span", { className: "text-pulse-muted" }, "Bull"), h("strong", { className: "font-mono text-pulse-green" }, fmtPct(forecast.bull_return_pct, 1))),
         h("div", { className: "flex justify-between" }, h("span", { className: "text-pulse-muted" }, "Bear"), h("strong", { className: "font-mono text-pulse-red" }, fmtPct(forecast.bear_return_pct, 1))),
-        h("div", { className: "pt-2 text-xs text-pulse-dim" }, "Confidence ", forecast.confidence == null ? "—" : `${Math.round(Number(forecast.confidence) * 100)}%`, " · score ", weighted == null ? "—" : Number(weighted).toFixed(1))
+        h("div", { className: "truncate pt-2 text-xs text-pulse-dim" }, "Confidence ", forecast.confidence == null ? "—" : `${Math.round(Number(forecast.confidence) * 100)}%`, " · score ", weighted == null ? "—" : Number(weighted).toFixed(1))
       ) : h("p", { className: "mt-3 text-sm text-pulse-muted" }, "No forecast.")
     );
   }
