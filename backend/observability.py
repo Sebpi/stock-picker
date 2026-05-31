@@ -27,6 +27,19 @@ ALL_AGENT_IDS = [
     "agent.sentiment_news",
     "agent.industry_competition",
     "agent.portfolio_risk",
+    "agent.insider_activity",
+    "agent.options_flow",
+    "agent.short_interest",
+    "agent.earnings_quality",
+    "agent.credit_risk",
+    "agent.institutional_flow",
+    "agent.earnings_surprise",
+    "agent.price_momentum",
+    "agent.dividend_quality",
+    "agent.capital_allocation",
+    "agent.analyst_consensus",
+    "agent.financial_distress",
+    "agent.piotroski",
 ]
 
 
