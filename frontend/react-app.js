@@ -3073,6 +3073,14 @@
       weight: "Meaningful at 3m (0.07) and 6m (0.05); modest at 12m (0.03) where fundamentals dominate",
     },
     {
+      name: "Earnings Quality",
+      icon: "🔬",
+      tagline: "Beneish M-score & Sloan accruals — are earnings real?",
+      description: "Answers the question the Fundamentals agent doesn't: are these earnings real? Computes the Beneish M-score (8-factor manipulation detector — M > −1.78 flags elevated risk) and the Sloan accruals ratio (earnings minus operating cash flow as a fraction of assets — high accruals predict future earnings reversals). Both metrics are derived purely from annual financial statements, no extra API needed. Strongest signal at 6–12 month horizons where accrual mean-reversion plays out.",
+      sources: ["yfinance (income statement, balance sheet, cash flow — annual, 2 years)"],
+      weight: "Light at 3m (0.04); meaningful at 6m (0.09) and 12m (0.10) where accrual reversals materialise",
+    },
+    {
       name: "Portfolio Risk",
       icon: "⚖️",
       tagline: "Concentration, beta & correlation",
@@ -3083,9 +3091,9 @@
     {
       name: "Orchestrator",
       icon: "🧠",
-      tagline: "Aggregates all 11 agents into an investment thesis",
-      description: "Runs all 11 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
-      sources: ["All 11 agents above", "Claude Sonnet (thesis narrative generation)"],
+      tagline: "Aggregates all 12 agents into an investment thesis",
+      description: "Runs all 12 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 12 agents above", "Claude Sonnet (thesis narrative generation)"],
       weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
     },
   ];
@@ -3118,7 +3126,7 @@
     const [openAgent, setOpenAgent] = useState(null);
 
     return h("div", { className: "grid gap-6 pb-10" },
-      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 12 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 13 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
 
       // Pipeline flow
       h(Card, { className: "p-4" },
@@ -3126,7 +3134,7 @@
         h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
           [
             ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
-            ["12 Specialist agents", "Run in parallel"],
+            ["13 Specialist agents", "Run in parallel"],
             ["Orchestrator", "Aggregates + weights"],
             ["Investment thesis", "Claude Sonnet narrative"],
             ["Predictions", "Claude Haiku signals"],
@@ -3144,7 +3152,7 @@
 
       // 10 Agents
       h(Card, { className: "p-4" },
-        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 12 AI agents"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 13 AI agents"),
         h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
         h("div", { className: "grid gap-2" },
           AGENTS.map(a => h("div", { key: a.name },
