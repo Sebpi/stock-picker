@@ -200,7 +200,7 @@ PREDICTION_LEARNING_ENABLED = os.getenv("PREDICTION_LEARNING_ENABLED", "true").l
 PREDICTION_CALIBRATION_MIN_SAMPLES = max(1, int(os.getenv("PREDICTION_CALIBRATION_MIN_SAMPLES", "3")))
 THESIS_AUTO_RUN_ENABLED = os.getenv("THESIS_AUTO_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 THESIS_AUTO_RUN_INTERVAL_MINUTES = max(15, int(os.getenv("THESIS_AUTO_RUN_INTERVAL_MINUTES", "1440")))
-THESIS_AUTO_RUN_MAX_TICKERS = max(1, int(os.getenv("THESIS_AUTO_RUN_MAX_TICKERS", "8")))
+THESIS_AUTO_RUN_MAX_TICKERS = int(os.getenv("THESIS_AUTO_RUN_MAX_TICKERS", "0")) or None  # None = entire watchlist
 EVALUATION_AUTO_RUN_ENABLED = os.getenv("EVALUATION_AUTO_RUN_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 EVALUATION_AUTO_RUN_INTERVAL_MINUTES = max(60, int(os.getenv("EVALUATION_AUTO_RUN_INTERVAL_MINUTES", "1440")))
 
@@ -2421,7 +2421,8 @@ async def auto_thesis():
         logger.info("[Thesis] Auto-thesis skipped; previous run still active.")
         return
 
-    tickers = [_validate_ticker(t) for t in load_watchlist()[:THESIS_AUTO_RUN_MAX_TICKERS]]
+    _wl = load_watchlist()
+    tickers = [_validate_ticker(t) for t in (_wl[:THESIS_AUTO_RUN_MAX_TICKERS] if THESIS_AUTO_RUN_MAX_TICKERS else _wl)]
     if not tickers:
         thesis_scheduler_status["last_error"] = "watchlist_empty"
         return
