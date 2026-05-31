@@ -46,8 +46,8 @@ StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-pr
 - **Confidence calibration** — `compute_confidence_calibration` adds a `buckets` key to `/api/predictions/calibration`: per-confidence hit rate vs `CONFIDENCE_PRIOR_HIT_RATE` ({high: 0.75, medium: 0.62, low: 0.55}), MAE, and ECE (expected calibration error — lower is better, <0.05 ≈ well-calibrated). Rendered as `ConfidenceCalibrationTile` on the Predictions tab.
 
 ### Frontend — `frontend/`
-- `index.html` + `react-app.js` (~2.6k lines) is the active app; `app.js` / `legacy-app.js` / `legacy.html` are older fallbacks (`/legacy` route). The active SPA uses **React 18 UMD from unpkg + Tailwind Play CDN** — no bundler, no npm install for the frontend itself.
-- `tailwind.config` **must** be set in a script tag **after** the Tailwind CDN loads, or the custom `pulse-*` color utilities silently fail to generate (this is called out in an inline comment in `index.html` and is easy to break).
+- `index.html` + `react-app.js` (~2.6k lines) is the active app; `app.js` / `legacy-app.js` / `legacy.html` are older fallbacks (`/legacy` route). The active SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
+- **Rebuilding Tailwind CSS:** run `./node_modules/.bin/tailwindcss -i tailwind.input.css -o frontend/tailwind.css --minify` from the repo root whenever you add new Tailwind classes to `react-app.js` or `index.html`. After regenerating: recompute the SRI hash (`python3 -c "import hashlib,base64,sys; d=open('frontend/tailwind.css','rb').read(); print('sha256-'+base64.b64encode(hashlib.sha256(d).digest()).decode())"`) and update the `integrity=` attribute in `index.html`. The config lives in `tailwind.config.js` at the repo root.
 - Version string in `index.html` (`<title>StockLens vX.Y.Z`) and the `?v=` cache-buster on `react-app.js` are hand-edited — there is no build that injects them.
 - `fetch` uses `API = ""` (relative paths), so the SPA must be served from the same origin as the FastAPI backend in production.
 
@@ -61,6 +61,10 @@ StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-pr
 # Install
 cd backend && pip install -r requirements.txt
 cd .. && npm install && npx playwright install chromium
+
+# Rebuild Tailwind CSS (run after adding new Tailwind classes to react-app.js / index.html)
+./node_modules/.bin/tailwindcss -i tailwind.input.css -o frontend/tailwind.css --minify
+# Then update the integrity= hash in index.html — see CLAUDE.md "Things to be careful with"
 
 # Run dev (single process — serves SPA + API on the same port)
 cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 --reload
@@ -87,7 +91,7 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 - **Playwright test harness.** `tests/server.js` is a proxy server — it serves the frontend static files on `:4321` AND proxies `/api/*` and `/v1/*` to the FastAPI backend on `:8000`. Start the backend first (`uvicorn main:app --port 8000`), then `npx playwright test`. The harness won't work without a running backend. React DOM IDs are baked into `react-app.js` and `index.html` for test selectors — don't rename them without updating the tests.
 - **`ALLOWED_IDEA_KEYS`-style allowlist doesn't apply here**, but the equivalent gotcha is `_TICKER_RE` — anything user-supplied that bypasses `_validate_ticker()` is a bug.
 - **Don't rearrange the `tailwind.config` script tag** in `index.html` (must come after the CDN script) or the entire dark theme renders white. There's a comment in the file explaining why.
-- **CSP inline-script hashes must stay in sync.** `backend/main.py` `security_headers` middleware uses `sha256-` hashes (not `'unsafe-inline'`) for the two inline `<script>` blocks in `index.html` (the theme-detection snippet and the `tailwind.config` block). If you change either script's content — even whitespace — recompute the hash: `python3 -c "import hashlib,base64; print(base64.b64encode(hashlib.sha256(open('frontend/index.html').read().split('<script>')[N+1].split('</script>')[0].encode()).digest()).decode())"` (replace N with 0 or 1). `style-src` still carries `'unsafe-inline'` because Tailwind Play CDN injects `<style>` tags at runtime — that cannot be hashed.
+- **CSP inline-script hash must stay in sync.** `backend/main.py` `security_headers` middleware uses a `sha256-` hash for the one remaining inline `<script>` block in `index.html` (the theme-detection snippet). If you change its content — even whitespace — recompute the hash: `python3 -c "import hashlib,base64,re; s=re.findall(r'<script(?![^>]*\bsrc\b)[^>]*>(.*?)</script>',open('frontend/index.html').read(),re.DOTALL); print('sha256-'+base64.b64encode(hashlib.sha256(s[0].encode()).digest()).decode())"`. `style-src 'self'` is now clean — no more `unsafe-inline` since Tailwind is served as a static pre-built file.
 - **Always check recent git commits** before making changes (`git log --oneline -15`) to avoid reverting work already merged.
 - **State files vs symlinks.** In production, `backend/users.json` etc. are symlinks into `/app/data`. Editing them locally via the symlink path will silently write into your local `data/` directory once `DATA_DIR` is set — be deliberate about which copy you're touching when reproducing prod bugs.
 - **Version bumps are manual.** Change the `<title>` and the `?v=` query in `index.html` together; otherwise browsers serve stale `react-app.js`.
