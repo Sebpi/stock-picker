@@ -3057,6 +3057,14 @@
       weight: "High at 3-month horizon (0.10) where Form 4 cluster signals are strongest; lighter at 12m (0.04)",
     },
     {
+      name: "Options Flow",
+      icon: "🎲",
+      tagline: "Options market positioning & smart money signals",
+      description: "Reads the live options chain for the nearest 1–3 expiry dates and computes four metrics: put/call ratio by volume (PCR), IV skew (near-ATM put IV minus call IV), dominant volume direction (call spike vs put spike), and average implied volatility level. Low PCR with negative skew (calls bid up) is bullish; high PCR with elevated put IV signals hedging or downside fear. Strongest over 1–4 weeks; weight decays sharply toward 12m.",
+      sources: ["yfinance (options chain — strikes, volume, open interest, implied volatility)"],
+      weight: "High at 3-month horizon (0.09) where near-term positioning is actionable; light at 6m (0.04) and minimal at 12m (0.02)",
+    },
+    {
       name: "Portfolio Risk",
       icon: "⚖️",
       tagline: "Concentration, beta & correlation",
@@ -3067,9 +3075,9 @@
     {
       name: "Orchestrator",
       icon: "🧠",
-      tagline: "Aggregates all 9 agents into an investment thesis",
-      description: "Runs all 9 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
-      sources: ["All 9 agents above", "Claude Sonnet (thesis narrative generation)"],
+      tagline: "Aggregates all 10 agents into an investment thesis",
+      description: "Runs all 10 specialist agents in parallel, applies horizon-specific weights (3m, 6m, 12m), and passes the aggregated signals to Claude Sonnet to generate a structured bull/base/bear investment thesis with return forecasts. Requires at least 3 agents to return successfully.",
+      sources: ["All 10 agents above", "Claude Sonnet (thesis narrative generation)"],
       weight: "This IS the thesis — composite score 0–100 drives the 12-month return forecast",
     },
   ];
@@ -3102,7 +3110,7 @@
     const [openAgent, setOpenAgent] = useState(null);
 
     return h("div", { className: "grid gap-6 pb-10" },
-      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 10 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
+      h(SectionHead, { title: "How StockLens Works", kicker: "Platform guide", subtitle: "An AI-driven equity research tool that combines 11 specialist agents, LLM narrative generation, and rules-based portfolio construction." }),
 
       // Pipeline flow
       h(Card, { className: "p-4" },
@@ -3110,7 +3118,7 @@
         h("div", { className: "flex flex-wrap items-center gap-2 text-sm" },
           [
             ["Market data", "yfinance · Finnhub · SEC EDGAR · FRED"],
-            ["10 Specialist agents", "Run in parallel"],
+            ["11 Specialist agents", "Run in parallel"],
             ["Orchestrator", "Aggregates + weights"],
             ["Investment thesis", "Claude Sonnet narrative"],
             ["Predictions", "Claude Haiku signals"],
@@ -3128,7 +3136,7 @@
 
       // 10 Agents
       h(Card, { className: "p-4" },
-        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 10 AI agents"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "The 11 AI agents"),
         h("p", { className: "text-xs text-pulse-muted mb-4" }, "Each agent scores a ticker 0–100 on its dimension. The orchestrator applies horizon-specific weights (3m / 6m / 12m) and aggregates into a composite thesis. A minimum of 3 agents must return successfully for a thesis to be accepted."),
         h("div", { className: "grid gap-2" },
           AGENTS.map(a => h("div", { key: a.name },
