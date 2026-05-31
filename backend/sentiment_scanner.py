@@ -82,26 +82,43 @@ def classify_sentiment(score):
     return "neutral"
 
 
-def _summarize_with_claude(ticker: str, headlines: list[dict]) -> str:
-    """Call Claude Haiku to produce a 2-3 bullet summary of relevant news for ticker."""
+def _summarize_with_claude(ticker: str, company_name: str, headlines: list[dict]) -> str:
+    """Summarise only headlines that explicitly mention ticker or company name."""
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key or not headlines:
         return ""
+
+    # Strip legal suffixes so "Apple" matches "Apple Inc.", "NVIDIA" matches "Nvidia Corp" etc.
+    name_clean = (company_name or ticker)
+    for suffix in (" inc", " corp", " corporation", " ltd", " plc", " co", ".", ","):
+        name_clean = name_clean.lower().replace(suffix, "")
+    name_clean = name_clean.strip()
+    ticker_lower = ticker.lower()
+
+    # Only forward headlines that actually name the company or ticker
+    relevant = [
+        h for h in headlines[:12]
+        if ticker_lower in h["title"].lower()
+        or (len(name_clean) > 3 and name_clean in h["title"].lower())
+    ]
+
+    if not relevant:
+        return "No company-specific headlines found for this period."
+
     try:
         import anthropic
-        titles = "\n".join(f"- {h['title']}" for h in headlines[:8])
+        titles = "\n".join(f"- {h['title']}" for h in relevant[:6])
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(
             model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            max_tokens=200,
+            max_tokens=180,
             messages=[{
                 "role": "user",
                 "content": (
-                    f"You are analysing recent news for {ticker} stock. Headlines:\n\n{titles}\n\n"
-                    f"In 2-3 short bullet points (each under 20 words), summarise ONLY what is directly "
-                    f"relevant to {ticker}'s business or stock price. Skip macro or sector news unless it "
-                    f"directly names {ticker}. Be specific. If nothing is relevant, write exactly: "
-                    f"'No material company-specific news in this period.'"
+                    f"These headlines all mention {ticker} ({company_name}):\n\n{titles}\n\n"
+                    f"Write 2-3 bullet points (each ≤20 words) summarising the key developments "
+                    f"for {ticker} investors. Focus on catalysts, risks, guidance changes, or "
+                    f"analyst moves. Be specific — no filler phrases."
                 ),
             }],
         )
@@ -155,9 +172,10 @@ def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
     elif recommendation == "strong_sell":
         composite -= 2
 
+    company_name = info.get("shortName", ticker)
     return {
         "ticker": ticker,
-        "name": info.get("shortName", ticker),
+        "name": company_name,
         "price": round(price, 2) if isinstance(price, (int, float)) else None,
         "change_pct": round(change_pct, 2) if isinstance(change_pct, (int, float)) else None,
         "target_mean_price": round(target_mean, 2) if isinstance(target_mean, (int, float)) else None,
@@ -166,7 +184,7 @@ def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
         "sentiment_score": composite,
         "sentiment": classify_sentiment(composite),
         "headlines": headlines[:5],
-        "news_summary": _summarize_with_claude(ticker, headlines) if with_summary else "",
+        "news_summary": _summarize_with_claude(ticker, company_name, headlines) if with_summary else "",
     }
 
 
