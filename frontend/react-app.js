@@ -811,11 +811,21 @@
           item.target_mean_price != null ? h("span", { className: "font-mono text-xs text-pulse-muted" }, "target $", Number(item.target_mean_price).toFixed(2)) : null
         ),
         item.summary ? h("p", { className: "mt-3 text-sm text-pulse-muted" }, item.summary) : null,
+        item.news_summary ? h("div", { className: "mt-3" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.18em] text-pulse-dim" }, "AI news summary"),
+          h("p", { className: "mt-1 whitespace-pre-line text-sm text-pulse-muted" }, item.news_summary)
+        ) : null,
         Array.isArray(item.headlines) && item.headlines.length ? h("div", { className: "mt-3" },
           h("div", { className: "font-mono text-[10px] uppercase tracking-[0.18em] text-pulse-dim" }, "Recent headlines"),
-          h("ul", { className: "mt-2 grid gap-1 text-sm text-pulse-muted" }, item.headlines.slice(0, 5).map((line, j) =>
-            h("li", { key: j, className: "list-disc pl-5" }, typeof line === "string" ? line : (line.title || line.headline || JSON.stringify(line)))
-          ))
+          h("ul", { className: "mt-2 grid gap-1 text-sm text-pulse-muted" }, item.headlines.slice(0, 5).map((line, j) => {
+            const title = typeof line === "string" ? line : (line.title || line.headline || "");
+            const url = typeof line === "object" ? (line.url || "") : "";
+            return h("li", { key: j, className: "list-disc pl-5" },
+              url
+                ? h("a", { href: url, target: "_blank", rel: "noopener noreferrer", className: "hover:text-pulse-cyan hover:underline transition-colors" }, title)
+                : title
+            );
+          }))
         ) : item.headline_count === 0 ? h("p", { className: "mt-3 text-xs text-pulse-dim" }, "No recent headlines.") : null,
         item.error ? h("p", { className: "mt-3 text-sm text-pulse-red" }, item.error) : null
       );
