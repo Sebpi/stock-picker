@@ -1402,6 +1402,7 @@
     const [panelData, setPanelData] = useState(null);
     const [watchlist, setWatchlist] = useState([]);
     const [completedSet, setCompletedSet] = useState(new Set());
+    const [scoreMap, setScoreMap] = useState({});
 
     useEffect(() => {
       // names_only=true skips yfinance price fetches — returns bare ticker list instantly
@@ -1445,6 +1446,7 @@
       try {
         const data = await api(`/v1/thesis/${encodeURIComponent(target)}/latest`);
         setThesis(data); setTicker(target); setStatus(`Loaded ${target}.`);
+        if (data && data.composite_score != null) setScoreMap(prev => ({ ...prev, [target]: Number(data.composite_score) }));
         loadHistory(target); reconcile(data);
       } catch (err) { setStatus(err.message || "No thesis found."); } finally { setBusy(false); }
     }
@@ -1562,18 +1564,31 @@
         watchlist.length > 0 ? h("div", null,
           h("div", { className: "flex flex-wrap items-center gap-2 pb-3" },
             h("span", { className: "font-mono text-[10px] uppercase tracking-[0.18em] text-pulse-dim shrink-0" }, "Watchlist"),
-            watchlist.map(t => h("button", {
-              key: t,
-              onClick: () => { setTicker(t); loadLatest(t); },
-              className: cx(
-                "rounded-md border px-2.5 py-1 font-mono text-xs font-semibold transition",
-                ticker === t
-                  ? "border-pulse-cyan bg-pulse-cyan/10 text-pulse-cyan"
-                  : completedSet.has(t)
-                    ? "border-emerald-500/40 bg-emerald-500/5 text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
-                    : "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
-              )
-            }, completedSet.has(t) && ticker !== t ? `✓ ${t}` : t))
+            watchlist.map(t => {
+              const score = scoreMap[t];
+              const done = completedSet.has(t);
+              const isActive = ticker === t;
+              let chipClass;
+              if (isActive) {
+                chipClass = "border-pulse-cyan bg-pulse-cyan/10 text-pulse-cyan";
+              } else if (done && score != null) {
+                chipClass = score >= 70
+                  ? "border-emerald-500/50 bg-emerald-500/8 text-emerald-400 hover:border-emerald-400/70"
+                  : score >= 45
+                    ? "border-amber-500/50 bg-amber-500/8 text-amber-400 hover:border-amber-400/70"
+                    : "border-red-500/50 bg-red-500/8 text-red-400 hover:border-red-400/70";
+              } else if (done) {
+                chipClass = "border-emerald-500/40 bg-emerald-500/5 text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink";
+              } else {
+                chipClass = "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink";
+              }
+              return h("button", {
+                key: t,
+                onClick: () => { setTicker(t); loadLatest(t); },
+                title: score != null ? `Score: ${Math.round(score)}/100` : undefined,
+                className: cx("rounded-md border px-2.5 py-1 font-mono text-xs font-semibold transition", chipClass)
+              }, done && !isActive ? `✓ ${t}` : t);
+            })
           ),
           h("div", { className: "mb-3 border-t border-pulse-line/60" })
         ) : null,
@@ -1979,7 +1994,13 @@
         h("div", { className: "flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between" },
           h("div", { className: "min-w-0 flex-1" },
             h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Deep dive"),
-            h("h3", { className: "mt-1 text-2xl font-semibold" }, thesis.ticker, " Analysis"),
+            h("h3", { className: "mt-1 text-2xl font-semibold" },
+              thesis.ticker,
+              thesis.company_name && thesis.company_name !== thesis.ticker
+                ? h("span", { className: "ml-2 text-lg font-normal text-pulse-muted" }, thesis.company_name)
+                : null,
+              " Analysis"
+            ),
             h("p", { className: "mt-1 truncate text-sm text-pulse-muted" }, fmtDate(thesis.generated_at), thesis.thesis_id ? ` · thesis ${String(thesis.thesis_id).slice(0, 8)}` : "")
           ),
           h("a", { href: "#", onClick: exportPdf, className: "inline-flex min-h-11 w-full shrink-0 items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink sm:w-auto sm:min-h-10" }, "Export PDF")
@@ -2899,9 +2920,9 @@
         h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" },
           h(Metric, { label: "Invested Cost", value: fmtUsd(s.total_invested) }),
           h(Metric, { label: "Market Value", value: fmtUsd(s.total_current_value) }),
-          h(Metric, { label: "Unrealised P&L", value: fmtUsd(s.total_unrealised_pnl), tone: deltaTone(s.total_unrealised_pnl) }),
+          h(Metric, { label: "Unrealised P&L", value: fmtUsd(s.total_unrealised_pnl), hint: s.total_unrealised_pct != null ? fmtPct(s.total_unrealised_pct, 1) : null, tone: deltaTone(s.total_unrealised_pnl) }),
           h(Metric, { label: "Realised P&L", value: fmtUsd(s.total_realised_pnl), tone: deltaTone(s.total_realised_pnl) }),
-          h(Metric, { label: "Total P&L", value: fmtUsd(s.total_pnl), tone: deltaTone(s.total_pnl) })
+          h(Metric, { label: "Total P&L", value: fmtUsd(s.total_pnl), hint: s.total_pnl_pct != null ? fmtPct(s.total_pnl_pct, 1) : null, tone: deltaTone(s.total_pnl) })
         )
       ) : null,
       h(Card, { className: "mb-4 p-4" },
@@ -2930,7 +2951,7 @@
           { key: "cost_basis", label: "Cost Basis", className: "font-mono", render: p => fmtUsd(p.cost_basis) },
           { key: "current_value", label: "Value", className: "font-mono", render: p => fmtUsd(p.current_value) },
           { key: "unrealised_pnl", label: "Unrealised", className: "font-mono", render: p => h("span", { className: deltaTone(p.unrealised_pnl) }, fmtUsd(p.unrealised_pnl), " (", fmtPct(p.unrealised_pct, 1), ")") },
-          { key: "realised_pnl", label: "Realised", className: "font-mono", render: p => h("span", { className: deltaTone(p.realised_pnl) }, fmtUsd(p.realised_pnl)) },
+          { key: "realised_pnl", label: "Realised", className: "font-mono", render: p => h("span", { className: deltaTone(p.realised_pnl) }, fmtUsd(p.realised_pnl), p.realised_pct ? h("span", { className: "ml-1 text-xs opacity-70" }, "(", fmtPct(p.realised_pct, 1), ")") : null) },
         ],
         mobileRender: p => h("div", null,
           h("div", { className: "flex items-start justify-between gap-3" },
