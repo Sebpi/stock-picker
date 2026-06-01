@@ -1493,7 +1493,10 @@
       try {
         const data = await api(`/v1/thesis/${encodeURIComponent(target)}/latest`);
         setThesis(data); setTicker(target); setStatus(`Loaded ${target}.`);
-        if (data && data.composite_score != null) setScoreMap(prev => ({ ...prev, [target]: Number(data.composite_score) }));
+        if (data && data.composite_score != null) {
+          setScoreMap(prev => ({ ...prev, [target]: Number(data.composite_score) }));
+          setCompletedSet(prev => new Set([...prev, target]));
+        }
         loadHistory(target); reconcile(data);
       } catch (err) { setStatus(err.message || "No thesis found."); } finally { setBusy(false); }
     }
