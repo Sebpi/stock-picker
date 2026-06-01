@@ -480,7 +480,7 @@ def get_latest_scores(tickers: list[str]) -> dict[str, float]:
         return {}
     placeholders = ",".join("?" * len(tickers))
     with get_conn() as conn:
-        rows = conn.execute(
+        rows = conn.execute(  # nosec B608 — placeholders is only '?,?,...'
             f"""
             SELECT ticker, composite_score
             FROM investment_thesis t1
