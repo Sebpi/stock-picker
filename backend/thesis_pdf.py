@@ -176,22 +176,42 @@ def build_pdf(thesis: InvestmentThesis) -> bytes:
         story.append(Spacer(1, 0.3 * cm))
 
     # ── Agent Scores ──────────────────────────────────────────────────────
+    from observability import ALL_AGENT_IDS
     agent_scores = thesis.agent_scores or {}
-    if agent_scores:
-        story.append(Paragraph("Agent Scores", h2))
-        rows = [[
-            Paragraph(aid.replace("agent.", ""), ParagraphStyle("as", textColor=_TEXT, fontSize=8)),
-            Paragraph(f"{score:.1f}", ParagraphStyle("as", textColor=_score_color(score), fontSize=8, alignment=2)),
-        ] for aid, score in sorted(agent_scores.items(), key=lambda x: -x[1])]
-        at = Table(rows, colWidths=["70%", "30%"])
-        at.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#30363d")),
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ffffff")),
-            ("ROWHEIGHT", (0, 0), (-1, -1), 18),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ]))
-        story.append(at)
-        story.append(Spacer(1, 0.3 * cm))
+    # Merge stored scores with the full known agent list so older theses
+    # (generated before some agents were added) still show all rows.
+    all_rows: list[tuple[str, float | None]] = []
+    for aid in ALL_AGENT_IDS:
+        score = agent_scores.get(aid)
+        all_rows.append((aid, score))
+    # Also include any agents in the stored thesis not yet in ALL_AGENT_IDS
+    for aid, score in agent_scores.items():
+        if aid not in {a for a, _ in all_rows}:
+            all_rows.append((aid, score))
+    # Sort: scored agents first (by score desc), then missing ones
+    all_rows.sort(key=lambda x: (x[1] is None, -(x[1] or 0)))
+
+    story.append(Paragraph("Agent Scores", h2))
+    rows = []
+    for aid, score in all_rows:
+        label = aid.replace("agent.", "")
+        if score is None:
+            score_para = Paragraph("—", ParagraphStyle("as", textColor=colors.HexColor("#6b7280"), fontSize=8, alignment=2))
+        else:
+            score_para = Paragraph(f"{score:.1f}", ParagraphStyle("as", textColor=_score_color(score), fontSize=8, alignment=2))
+        rows.append([
+            Paragraph(label, ParagraphStyle("as", textColor=_TEXT, fontSize=8)),
+            score_para,
+        ])
+    at = Table(rows, colWidths=["70%", "30%"])
+    at.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#30363d")),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ffffff")),
+        ("ROWHEIGHT", (0, 0), (-1, -1), 18),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(at)
+    story.append(Spacer(1, 0.3 * cm))
 
     # ── Quality Flags ─────────────────────────────────────────────────────
     flags = [f.value if hasattr(f, "value") else str(f) for f in (thesis.quality_flags or [])]
