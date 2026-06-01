@@ -164,16 +164,17 @@ def _classify_and_summarize(ticker: str, company_name: str, candidates: list[dic
 def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
     stock = yf.Ticker(ticker)
 
-    # Fetch news sources and stock info in parallel — all three are independent I/O
-    with ThreadPoolExecutor(max_workers=3) as inner:
-        finnhub_f = inner.submit(_fetch_finnhub_headlines, ticker)
-        info_f    = inner.submit(lambda: stock.info or {})
-        news_f    = inner.submit(lambda: stock.news or [])
-        finnhub_headlines = finnhub_f.result(timeout=15)
-        info      = info_f.result(timeout=15)
-        yf_news   = news_f.result(timeout=15)
+    # Fetch sequentially — yfinance Ticker is not thread-safe for concurrent
+    # property access on the same instance. Outer pool handles parallelism.
+    headlines: list[dict] = _fetch_finnhub_headlines(ticker)
+    info = stock.info or {}
+    yf_news = []
+    if not headlines:
+        try:
+            yf_news = stock.news or []
+        except Exception:
+            pass
 
-    headlines: list[dict] = finnhub_headlines or []
     if not headlines:
         try:
             for item in yf_news[:8]:
