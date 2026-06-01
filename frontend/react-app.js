@@ -696,6 +696,8 @@
     const [ticker, setTicker] = useState("");
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
+    const [liveData, setLiveData] = useState({});
+    const [liveSource, setLiveSource] = useState(null); // "live" | "finnhub" | "delayed" | null
 
     async function load() {
       setBusy(true); setError("");
@@ -708,10 +710,47 @@
     async function remove(sym) {
       try { await api(`/api/watchlist/${encodeURIComponent(sym)}`, { method: "DELETE" }); load(); } catch (err) { setError(err.message); }
     }
-    useEffect(() => { load(); }, []);
+
+    useEffect(() => {
+      load();
+      // Poll live prices every 10 seconds
+      async function fetchPrices() {
+        try {
+          const data = await api("/api/prices");
+          if (data && typeof data === "object") {
+            setLiveData(data);
+            const sources = Object.values(data).map(d => d.source);
+            if (sources.includes("live")) setLiveSource("live");
+            else if (sources.includes("finnhub")) setLiveSource("finnhub");
+            else if (sources.length > 0) setLiveSource("delayed");
+          }
+        } catch {}
+      }
+      fetchPrices();
+      const interval = setInterval(fetchPrices, 10000);
+      return () => clearInterval(interval);
+    }, []);
+
+    // Merge live prices into rows
+    const mergedRows = rows.map(r => {
+      const live = liveData[r.ticker];
+      if (!live) return r;
+      return { ...r, price: live.price, change_pct: live.change_pct };
+    });
+
+    const liveLabel = liveSource === "live" ? "● Live"
+                    : liveSource === "finnhub" ? "◎ ~1min"
+                    : liveSource === "delayed" ? "○ Delayed"
+                    : null;
+    const liveTone = liveSource === "live" ? "text-emerald-400"
+                   : liveSource === "finnhub" ? "text-pulse-amber"
+                   : "text-pulse-muted";
 
     return h("div", null,
-      h(SectionHead, { title: "Watchlist", subtitle: "Pinned tickers with live prices.", actions: [h(Button, { key: "refresh", onClick: load, disabled: busy }, "Refresh")] }),
+      h(SectionHead, { title: "Watchlist", subtitle: "Pinned tickers with live prices.", actions: [
+        liveLabel ? h("span", { key: "live", className: cx("text-xs font-mono", liveTone) }, liveLabel) : null,
+        h(Button, { key: "refresh", onClick: load, disabled: busy }, "Refresh"),
+      ] }),
       h(Card, { className: "mb-4 p-4" },
         h("div", { className: "flex gap-2" },
           h(TextInput, { placeholder: "Ticker", value: ticker, onChange: e => setTicker(e.target.value.toUpperCase()), onKeyDown: e => { if (e.key === "Enter") add(); } }),
@@ -721,7 +760,7 @@
       ),
       h("p", { id: "watchlist-status", className: "sr-only" }, busy ? "Loading..." : `${rows.length} items`),
       h(ResponsiveTable, {
-        rows,
+        rows: mergedRows,
         onRowClick: r => openDetail(r.ticker),
         emptyText: busy ? "Loading..." : "No watchlist items yet.",
         columns: [

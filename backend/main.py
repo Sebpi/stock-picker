@@ -2655,6 +2655,10 @@ async def startup():
             coalesce=True,
         )
     scheduler.start()
+
+    # Start Finnhub real-time price feed (no-op if FINNHUB_API_KEY unset)
+    import finnhub_prices as _fp
+    _fp.start(load_watchlist())
     asyncio.ensure_future(_prewarm_universe_cache())
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
@@ -2886,11 +2890,14 @@ async def screen_stocks(
 
     results = []
     q_norm = (q or "").strip().lower()
+    q_alias = SEARCH_ALIASES.get(q_norm.upper())  # e.g. "tsmc" → "TSM"
     for row in universe_rows:
         if q_norm:
-            ticker_match = q_norm in str(row.get("ticker", "")).lower()
+            ticker = str(row.get("ticker", ""))
+            ticker_match = q_norm in ticker.lower()
             name_match = q_norm in str(row.get("name", "")).lower()
-            if not ticker_match and not name_match:
+            alias_match = q_alias is not None and q_alias == ticker
+            if not ticker_match and not name_match and not alias_match:
                 continue
         stock_sector = row.get("sector", "")
         pe = row.get("pe")
@@ -3096,6 +3103,8 @@ async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks):
         tickers.append(ticker)
         save_watchlist(tickers)
         background_tasks.add_task(_run_predictions_bg)
+        import finnhub_prices as _fp
+        _fp.subscribe([ticker])
     return {"watchlist": tickers}
 
 
@@ -3105,7 +3114,35 @@ def remove_from_watchlist(ticker: str):
     tickers = load_watchlist()
     tickers = [t for t in tickers if t != ticker]
     save_watchlist(tickers)
+    import finnhub_prices as _fp
+    _fp.unsubscribe(ticker)
     return {"watchlist": tickers}
+
+
+@app.get("/api/prices")
+async def get_live_prices(current_user: str = Depends(get_current_user)):
+    """Live prices from Finnhub WebSocket + REST, falling back to yfinance cache."""
+    import finnhub_prices as _fp
+    watchlist = load_watchlist()
+    live = _fp.get_prices()
+    result: dict[str, dict] = {}
+    for ticker in watchlist:
+        if ticker in live:
+            result[ticker] = live[ticker]
+        else:
+            # Fall back to yfinance in-memory cache (up to 5 min stale)
+            cached = _info_cache.get(ticker)
+            if cached:
+                info, _ = cached
+                price = info.get("currentPrice") or info.get("regularMarketPrice")
+                change_pct = info.get("regularMarketChangePercent") or 0.0
+                if price:
+                    result[ticker] = {
+                        "price": round(float(price), 2),
+                        "change_pct": round(float(change_pct), 2),
+                        "source": "delayed",
+                    }
+    return result
 
 
 class RecommendRequest(BaseModel):
