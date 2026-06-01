@@ -750,18 +750,22 @@
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState("");
 
-    async function scan(scope) {
+    async function scan(scope, forceRefresh = false) {
       setBusy(true);
       setStatus(scope === "ticker" ? `Scanning ${ticker}...` : scope === "list" ? "Loading watchlist..." : "Scanning watchlist...");
       try {
-        const url = scope === "ticker" ? `/api/sentiment?ticker=${encodeURIComponent(ticker)}`
-                  : scope === "list"   ? `/api/sentiment?watchlist=true`
-                  :                       `/api/sentiment`;
+        const refresh = forceRefresh ? "&refresh=true" : "";
+        const url = scope === "ticker" ? `/api/sentiment?ticker=${encodeURIComponent(ticker)}${refresh}`
+                  : scope === "list"   ? `/api/sentiment?watchlist=true${refresh}`
+                  :                       `/api/sentiment${refresh ? "?refresh=true" : ""}`;
         const d = await api(url);
         setData({ scope, payload: d });
-        if (scope === "list") setStatus(`Loaded ${(d.watchlist || []).length} watchlist ticker${(d.watchlist || []).length === 1 ? "" : "s"}.`);
-        else if (scope === "scan") setStatus(`Scanned ${(d.results || []).length} ticker${(d.results || []).length === 1 ? "" : "s"}.`);
-        else setStatus("Done.");
+        const cached = d.cached && d.scanned_at;
+        const age = cached ? Math.round((Date.now() - new Date(d.scanned_at).getTime()) / 60000) : 0;
+        const cacheNote = cached ? ` · Cached ${age < 1 ? "<1" : age} min ago` : "";
+        if (scope === "list") setStatus(`Loaded ${(d.watchlist || []).length} watchlist ticker${(d.watchlist || []).length === 1 ? "" : "s"}${cacheNote}.`);
+        else if (scope === "scan") setStatus(`Scanned ${(d.results || []).length} ticker${(d.results || []).length === 1 ? "" : "s"}${cacheNote}.`);
+        else setStatus(`Done${cacheNote}.`);
       } catch (err) { setStatus("Error: " + err.message); } finally { setBusy(false); }
     }
 
@@ -866,7 +870,8 @@
           h(TextInput, { value: ticker, onChange: e => setTicker(e.target.value.toUpperCase()), placeholder: "Ticker (e.g. NVDA)", onKeyDown: e => { if (e.key === "Enter" && ticker.trim()) scan("ticker"); } }),
           h(Button, { onClick: () => ticker.trim() && scan("ticker"), disabled: busy }, "Scan ticker"),
           h(Button, { onClick: () => scan("list"), disabled: busy }, "List watchlist"),
-          h(Button, { kind: "primary", onClick: () => scan("scan"), disabled: busy }, busy ? "Working..." : "Scan watchlist")
+          h(Button, { kind: "primary", onClick: () => scan("scan"), disabled: busy }, busy ? "Working..." : "Scan watchlist"),
+          data && !busy ? h(Button, { onClick: () => scan(data.scope, true), disabled: busy, title: "Bypass cache and fetch fresh data" }, "↻") : null
         ),
         h(Status, { message: status, className: "mt-3" }),
         h("span", { id: "sentiment-status", className: "sr-only" }, status)
