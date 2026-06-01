@@ -2890,11 +2890,14 @@ async def screen_stocks(
 
     results = []
     q_norm = (q or "").strip().lower()
+    q_alias = SEARCH_ALIASES.get(q_norm.upper())  # e.g. "tsmc" → "TSM"
     for row in universe_rows:
         if q_norm:
-            ticker_match = q_norm in str(row.get("ticker", "")).lower()
+            ticker = str(row.get("ticker", ""))
+            ticker_match = q_norm in ticker.lower()
             name_match = q_norm in str(row.get("name", "")).lower()
-            if not ticker_match and not name_match:
+            alias_match = q_alias is not None and q_alias == ticker
+            if not ticker_match and not name_match and not alias_match:
                 continue
         stock_sector = row.get("sector", "")
         pe = row.get("pe")
