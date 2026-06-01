@@ -1630,8 +1630,12 @@
               } else {
                 chipClass = "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink";
               }
+              const band = score == null ? "none" : score >= 70 ? "high" : score >= 45 ? "mid" : "low";
               return h("button", {
                 key: t,
+                "data-testid": `thesis-chip-${t}`,
+                "data-score": score == null ? "" : String(Math.round(score)),
+                "data-band": band,
                 onClick: () => { setTicker(t); loadLatest(t); },
                 title: score != null ? `Score: ${Math.round(score)}/100` : undefined,
                 className: cx("rounded-md border px-2.5 py-1 font-mono text-xs font-semibold transition", chipClass)
