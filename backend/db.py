@@ -480,7 +480,7 @@ def get_latest_scores(tickers: list[str]) -> dict[str, float]:
         return {}
     placeholders = ",".join("?" * len(tickers))
     with get_conn() as conn:
-        rows = conn.execute(  # nosec B608 — placeholders is only '?,?,...'
+        rows = conn.execute(
             f"""
             SELECT ticker, composite_score
             FROM investment_thesis t1
@@ -489,7 +489,7 @@ def get_latest_scores(tickers: list[str]) -> dict[str, float]:
                 SELECT MAX(generated_at) FROM investment_thesis t2
                 WHERE t2.ticker = t1.ticker
               )
-            """,
+            """,  # nosec B608 — placeholders is only '?,?,...'
             tickers,
         ).fetchall()
     return {row["ticker"]: row["composite_score"] for row in rows}
