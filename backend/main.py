@@ -1209,7 +1209,7 @@ def get_sentiment_scanner_path() -> Path:
     return Path(__file__).parent / "sentiment_scanner.py"
 
 
-def run_sentiment_scanner(ticker: Optional[str] = None, watchlist_only: bool = False) -> dict:
+def run_sentiment_scanner(ticker: Optional[str] = None, watchlist_only: bool = False, refresh: bool = False) -> dict:
     script_path = get_sentiment_scanner_path()
     if not script_path.exists():
         watchlist = load_watchlist()
@@ -1228,6 +1228,13 @@ def run_sentiment_scanner(ticker: Optional[str] = None, watchlist_only: bool = F
             "watchlist": watchlist,
         }
 
+    cache_key = ticker.upper() if ticker else ("__watchlist_only__" if watchlist_only else "__all__")
+    ttl = _SENTIMENT_TICKER_TTL if ticker else _SENTIMENT_WATCHLIST_TTL
+    if not refresh:
+        entry = _sentiment_cache.get(cache_key)
+        if entry and (datetime.now() - entry["ts"]).total_seconds() < ttl:
+            return {**entry["data"], "cached": True, "scanned_at": entry["ts"].isoformat()}
+
     cmd = [sys.executable, str(script_path)]
     if watchlist_only:
         cmd.append("--list")
@@ -1240,7 +1247,10 @@ def run_sentiment_scanner(ticker: Optional[str] = None, watchlist_only: bool = F
             parsed = json.loads(proc.stdout)
         except Exception:
             parsed = {}
-        return {"status": "ok", **parsed}
+        now = datetime.now()
+        result = {"status": "ok", "cached": False, "scanned_at": now.isoformat(), **parsed}
+        _sentiment_cache[cache_key] = {"ts": now, "data": result}
+        return result
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Sentiment scan timed out")
     except Exception as e:
@@ -1261,6 +1271,9 @@ _predictions_cache: dict[str, object] = {
     "data": None,
 }
 _screen_universe_cache: dict[str, tuple[list[dict], datetime]] = {}
+_sentiment_cache: dict[str, dict] = {}  # key → {"ts": datetime, "data": dict}
+_SENTIMENT_WATCHLIST_TTL = 1800   # 30 min
+_SENTIMENT_TICKER_TTL   = 900     # 15 min
 _PREWARM_BATCH = 25          # tickers per batch
 _PREWARM_DELAY = 1.2         # seconds between batches (avoids yfinance rate-limit)
 # Match the cache TTL to the prewarm cadence (6h, see scheduler in startup()).
@@ -3061,9 +3074,9 @@ async def get_watchlist(names_only: bool = False):
 
 
 @app.get("/api/sentiment")
-async def sentiment_scan(ticker: Optional[str] = None, watchlist: bool = False):
-    """Run sentiment scanner on watchlist, according to query params."""
-    return run_sentiment_scanner(ticker=ticker, watchlist_only=watchlist)
+async def sentiment_scan(ticker: Optional[str] = None, watchlist: bool = False, refresh: bool = False):
+    """Run sentiment scanner. Results cached 30 min (watchlist) / 15 min (ticker). Pass refresh=true to bypass."""
+    return run_sentiment_scanner(ticker=ticker, watchlist_only=watchlist, refresh=refresh)
 
 
 async def _run_predictions_bg():
