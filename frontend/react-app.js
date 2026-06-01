@@ -2899,9 +2899,9 @@
         h("div", { className: "grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" },
           h(Metric, { label: "Invested Cost", value: fmtUsd(s.total_invested) }),
           h(Metric, { label: "Market Value", value: fmtUsd(s.total_current_value) }),
-          h(Metric, { label: "Unrealised P&L", value: fmtUsd(s.total_unrealised_pnl), tone: deltaTone(s.total_unrealised_pnl) }),
+          h(Metric, { label: "Unrealised P&L", value: fmtUsd(s.total_unrealised_pnl), hint: s.total_unrealised_pct != null ? fmtPct(s.total_unrealised_pct, 1) : null, tone: deltaTone(s.total_unrealised_pnl) }),
           h(Metric, { label: "Realised P&L", value: fmtUsd(s.total_realised_pnl), tone: deltaTone(s.total_realised_pnl) }),
-          h(Metric, { label: "Total P&L", value: fmtUsd(s.total_pnl), tone: deltaTone(s.total_pnl) })
+          h(Metric, { label: "Total P&L", value: fmtUsd(s.total_pnl), hint: s.total_pnl_pct != null ? fmtPct(s.total_pnl_pct, 1) : null, tone: deltaTone(s.total_pnl) })
         )
       ) : null,
       h(Card, { className: "mb-4 p-4" },
@@ -2930,7 +2930,7 @@
           { key: "cost_basis", label: "Cost Basis", className: "font-mono", render: p => fmtUsd(p.cost_basis) },
           { key: "current_value", label: "Value", className: "font-mono", render: p => fmtUsd(p.current_value) },
           { key: "unrealised_pnl", label: "Unrealised", className: "font-mono", render: p => h("span", { className: deltaTone(p.unrealised_pnl) }, fmtUsd(p.unrealised_pnl), " (", fmtPct(p.unrealised_pct, 1), ")") },
-          { key: "realised_pnl", label: "Realised", className: "font-mono", render: p => h("span", { className: deltaTone(p.realised_pnl) }, fmtUsd(p.realised_pnl)) },
+          { key: "realised_pnl", label: "Realised", className: "font-mono", render: p => h("span", { className: deltaTone(p.realised_pnl) }, fmtUsd(p.realised_pnl), p.realised_pct ? h("span", { className: "ml-1 text-xs opacity-70" }, "(", fmtPct(p.realised_pct, 1), ")") : null) },
         ],
         mobileRender: p => h("div", null,
           h("div", { className: "flex items-start justify-between gap-3" },

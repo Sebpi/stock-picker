@@ -6814,11 +6814,30 @@ async def get_portfolio():
     held = [t for t, p in positions.items() if p["shares"] > 0]
     price_map = await _get_portfolio_price_map(held, positions) if held else {}
 
+    # Compute cost basis of all sold shares (for per-position realised %)
+    realised_cost_map: dict[str, float] = {}
+    _run: dict[str, dict] = {}
+    for tx in sorted(transactions, key=lambda x: x["timestamp"]):
+        t = tx["ticker"]
+        if t not in _run:
+            _run[t] = {"shares": 0.0, "avg_cost": 0.0}
+        r = _run[t]
+        qty = float(tx.get("qty", 0))
+        price = float(tx.get("price", 0))
+        if tx["type"] == "buy":
+            total = r["shares"] * r["avg_cost"] + qty * price
+            r["shares"] += qty
+            r["avg_cost"] = total / r["shares"] if r["shares"] > 0 else 0.0
+        elif tx["type"] == "sell":
+            sell_qty = min(qty, r["shares"])
+            realised_cost_map[t] = realised_cost_map.get(t, 0.0) + r["avg_cost"] * sell_qty
+            r["shares"] = max(0.0, r["shares"] - sell_qty)
+
     result = []
     total_invested = 0.0
     total_current_value = 0.0
     total_unrealised_pnl = 0.0
-    total_realised_pnl = 0.0
+    total_realised_pnl = sum(pos["realised_pnl"] for pos in positions.values())
 
     for ticker, pos in positions.items():
         if pos["shares"] <= 0:
@@ -6827,6 +6846,8 @@ async def get_portfolio():
         cost_basis = pos["shares"] * pos["avg_cost"]
         current_value = pos["shares"] * current_price
         unrealised_pnl = current_value - cost_basis
+        realised_pnl = pos["realised_pnl"]
+        realised_cost = realised_cost_map.get(ticker, 0.0)
         total_invested += cost_basis
         total_current_value += current_value
         total_unrealised_pnl += unrealised_pnl
@@ -6841,15 +6862,19 @@ async def get_portfolio():
             "current_value": round(current_value, 2),
             "unrealised_pnl": round(unrealised_pnl, 2),
             "unrealised_pct": round((unrealised_pnl / cost_basis * 100) if cost_basis else 0, 2),
-            "realised_pnl": round(pos["realised_pnl"], 2),
+            "realised_pnl": round(realised_pnl, 2),
+            "realised_pct": round((realised_pnl / realised_cost * 100) if realised_cost else 0, 2),
         })
 
+    total_pnl = total_unrealised_pnl + total_realised_pnl
     summary = {
         "total_invested": round(total_invested, 2),
         "total_current_value": round(total_current_value, 2),
         "total_unrealised_pnl": round(total_unrealised_pnl, 2),
+        "total_unrealised_pct": round((total_unrealised_pnl / total_invested * 100) if total_invested else 0, 2),
         "total_realised_pnl": round(total_realised_pnl, 2),
-        "total_pnl": round(total_unrealised_pnl + total_realised_pnl, 2),
+        "total_pnl": round(total_pnl, 2),
+        "total_pnl_pct": round((total_pnl / total_invested * 100) if total_invested else 0, 2),
     }
 
     return {
