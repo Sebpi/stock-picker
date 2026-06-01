@@ -262,13 +262,13 @@ def main():
 
     def _scan_one(t: str) -> dict:
         try:
-            return analyze_ticker(t, with_summary=True)
+            return analyze_ticker(t, with_summary=False)
         except Exception as exc:
             err_str = str(exc)
             if "429" in err_str or "too many" in err_str.lower():
                 time.sleep(10)
                 try:
-                    return analyze_ticker(t, with_summary=True)
+                    return analyze_ticker(t, with_summary=False)
                 except Exception as exc2:
                     err_str = str(exc2)
             return {"ticker": t, "name": t, "sentiment": "error", "sentiment_score": 0, "error": err_str}
