@@ -1412,6 +1412,14 @@
         setWatchlist(tickers);
         const first = tickers[0] || "";
 
+        // Pre-load composite scores for all watchlist tickers so chips are pre-coloured
+        api("/v1/thesis/scores").then(scores => {
+          if (scores && typeof scores === "object") {
+            setScoreMap(scores);
+            setCompletedSet(new Set(Object.keys(scores)));
+          }
+        }).catch(() => {});
+
         // Reconnect to a run that was in progress when the tab was closed/navigated away
         const savedRunId = sessionStorage.getItem("thesis_active_run_id");
         if (savedRunId) {

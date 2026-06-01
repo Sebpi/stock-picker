@@ -474,6 +474,27 @@ def get_thesis_by_id(thesis_id: str) -> InvestmentThesis | None:
         return None
 
 
+def get_latest_scores(tickers: list[str]) -> dict[str, float]:
+    """Return {ticker: composite_score} for the most recent thesis of each ticker."""
+    if not tickers:
+        return {}
+    placeholders = ",".join("?" * len(tickers))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT ticker, composite_score
+            FROM investment_thesis t1
+            WHERE ticker IN ({placeholders})
+              AND generated_at = (
+                SELECT MAX(generated_at) FROM investment_thesis t2
+                WHERE t2.ticker = t1.ticker
+              )
+            """,
+            tickers,
+        ).fetchall()
+    return {row["ticker"]: row["composite_score"] for row in rows}
+
+
 def get_thesis_history(ticker: str, limit: int = 10) -> list[dict]:
     """Return lightweight thesis summaries for a ticker, newest first."""
     prune_agent_history()

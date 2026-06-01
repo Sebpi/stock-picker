@@ -7590,6 +7590,19 @@ def v1_thesis_history(request: Request, ticker: str, limit: int = 10, current_us
     return {"ticker": symbol, "theses": _db.get_thesis_history(symbol, limit)}
 
 
+@app.get("/v1/thesis/scores")
+@limiter.limit("30/minute")
+def v1_thesis_scores(request: Request, tickers: str = "", current_user: str = Depends(get_current_user)):
+    """Return {ticker: composite_score} for the latest thesis of each requested ticker.
+    tickers= is a comma-separated list; omit to use the full watchlist."""
+    import db as _db
+    if tickers.strip():
+        ticker_list = [_validate_ticker(t.strip()) for t in tickers.split(",") if t.strip()]
+    else:
+        ticker_list = load_watchlist()
+    return _db.get_latest_scores(ticker_list)
+
+
 @app.get("/v1/thesis/{ticker}/export.pdf")
 @limiter.limit("10/minute")
 def v1_thesis_pdf(request: Request, ticker: str, current_user: str = Depends(get_current_user)):
