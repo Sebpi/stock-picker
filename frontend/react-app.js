@@ -1994,7 +1994,13 @@
         h("div", { className: "flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between" },
           h("div", { className: "min-w-0 flex-1" },
             h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Deep dive"),
-            h("h3", { className: "mt-1 text-2xl font-semibold" }, thesis.ticker, " Analysis"),
+            h("h3", { className: "mt-1 text-2xl font-semibold" },
+              thesis.ticker,
+              thesis.company_name && thesis.company_name !== thesis.ticker
+                ? h("span", { className: "ml-2 text-lg font-normal text-pulse-muted" }, thesis.company_name)
+                : null,
+              " Analysis"
+            ),
             h("p", { className: "mt-1 truncate text-sm text-pulse-muted" }, fmtDate(thesis.generated_at), thesis.thesis_id ? ` · thesis ${String(thesis.thesis_id).slice(0, 8)}` : "")
           ),
           h("a", { href: "#", onClick: exportPdf, className: "inline-flex min-h-11 w-full shrink-0 items-center justify-center rounded-lg border border-pulse-line px-3 text-sm text-pulse-ink sm:w-auto sm:min-h-10" }, "Export PDF")

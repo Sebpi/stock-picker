@@ -7567,10 +7567,18 @@ def v1_get_run(request: Request, run_id: str, current_user: str = Depends(get_cu
 def v1_latest_thesis(request: Request, ticker: str, current_user: str = Depends(get_current_user)):
     """Return the latest InvestmentThesis for a ticker."""
     import db as _db
-    thesis = _db.get_latest_thesis(ticker.upper())
+    symbol = ticker.upper()
+    thesis = _db.get_latest_thesis(symbol)
     if not thesis:
         raise HTTPException(status_code=404, detail=f"No thesis found for {ticker}. POST /v1/runs to generate one.")
-    return thesis.model_dump(mode="json")
+    data = thesis.model_dump(mode="json")
+    ticker_info = _db.get_ticker_info(symbol)
+    data["company_name"] = (
+        (ticker_info or {}).get("company_name")
+        or TICKER_NAMES.get(symbol)
+        or symbol
+    )
+    return data
 
 
 @app.get("/v1/thesis/{ticker}/history")
