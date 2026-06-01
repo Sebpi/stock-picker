@@ -1402,6 +1402,7 @@
     const [panelData, setPanelData] = useState(null);
     const [watchlist, setWatchlist] = useState([]);
     const [completedSet, setCompletedSet] = useState(new Set());
+    const [scoreMap, setScoreMap] = useState({});
 
     useEffect(() => {
       // names_only=true skips yfinance price fetches — returns bare ticker list instantly
@@ -1445,6 +1446,7 @@
       try {
         const data = await api(`/v1/thesis/${encodeURIComponent(target)}/latest`);
         setThesis(data); setTicker(target); setStatus(`Loaded ${target}.`);
+        if (data && data.composite_score != null) setScoreMap(prev => ({ ...prev, [target]: Number(data.composite_score) }));
         loadHistory(target); reconcile(data);
       } catch (err) { setStatus(err.message || "No thesis found."); } finally { setBusy(false); }
     }
@@ -1562,18 +1564,31 @@
         watchlist.length > 0 ? h("div", null,
           h("div", { className: "flex flex-wrap items-center gap-2 pb-3" },
             h("span", { className: "font-mono text-[10px] uppercase tracking-[0.18em] text-pulse-dim shrink-0" }, "Watchlist"),
-            watchlist.map(t => h("button", {
-              key: t,
-              onClick: () => { setTicker(t); loadLatest(t); },
-              className: cx(
-                "rounded-md border px-2.5 py-1 font-mono text-xs font-semibold transition",
-                ticker === t
-                  ? "border-pulse-cyan bg-pulse-cyan/10 text-pulse-cyan"
-                  : completedSet.has(t)
-                    ? "border-emerald-500/40 bg-emerald-500/5 text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
-                    : "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink"
-              )
-            }, completedSet.has(t) && ticker !== t ? `✓ ${t}` : t))
+            watchlist.map(t => {
+              const score = scoreMap[t];
+              const done = completedSet.has(t);
+              const isActive = ticker === t;
+              let chipClass;
+              if (isActive) {
+                chipClass = "border-pulse-cyan bg-pulse-cyan/10 text-pulse-cyan";
+              } else if (done && score != null) {
+                chipClass = score >= 70
+                  ? "border-emerald-500/50 bg-emerald-500/8 text-emerald-400 hover:border-emerald-400/70"
+                  : score >= 45
+                    ? "border-amber-500/50 bg-amber-500/8 text-amber-400 hover:border-amber-400/70"
+                    : "border-red-500/50 bg-red-500/8 text-red-400 hover:border-red-400/70";
+              } else if (done) {
+                chipClass = "border-emerald-500/40 bg-emerald-500/5 text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink";
+              } else {
+                chipClass = "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink";
+              }
+              return h("button", {
+                key: t,
+                onClick: () => { setTicker(t); loadLatest(t); },
+                title: score != null ? `Score: ${Math.round(score)}/100` : undefined,
+                className: cx("rounded-md border px-2.5 py-1 font-mono text-xs font-semibold transition", chipClass)
+              }, done && !isActive ? `✓ ${t}` : t);
+            })
           ),
           h("div", { className: "mb-3 border-t border-pulse-line/60" })
         ) : null,
