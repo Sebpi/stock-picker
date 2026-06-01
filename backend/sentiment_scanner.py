@@ -3,12 +3,14 @@ import datetime
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
 import yfinance as yf
 
 _FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+MAX_SCAN_WORKERS = int(os.getenv("SENTIMENT_SCAN_WORKERS", "8"))
 
 
 def _fetch_finnhub_headlines(ticker: str, days: int = 7) -> list[dict]:
@@ -161,13 +163,20 @@ def _classify_and_summarize(ticker: str, company_name: str, candidates: list[dic
 
 def analyze_ticker(ticker: str, with_summary: bool = False) -> dict:
     stock = yf.Ticker(ticker)
-    info = stock.info or {}
 
-    # Finnhub first (works from cloud IPs); yfinance fallback for local runs
-    headlines: list[dict] = _fetch_finnhub_headlines(ticker)
+    # Fetch news sources and stock info in parallel — all three are independent I/O
+    with ThreadPoolExecutor(max_workers=3) as inner:
+        finnhub_f = inner.submit(_fetch_finnhub_headlines, ticker)
+        info_f    = inner.submit(lambda: stock.info or {})
+        news_f    = inner.submit(lambda: stock.news or [])
+        finnhub_headlines = finnhub_f.result(timeout=15)
+        info      = info_f.result(timeout=15)
+        yf_news   = news_f.result(timeout=15)
+
+    headlines: list[dict] = finnhub_headlines or []
     if not headlines:
         try:
-            for item in (stock.news or [])[:8]:
+            for item in yf_news[:8]:
                 content = item.get("content") if isinstance(item.get("content"), dict) else {}
                 title = content.get("title") or item.get("title") or ""
                 url = (
@@ -250,30 +259,27 @@ def main():
         print(json.dumps({"watchlist": [], "results": []}, indent=2))
         return
 
-    results = []
-    for i, ticker in enumerate(watchlist):
-        if i > 0:
-            time.sleep(0.8)  # stay well under Yahoo Finance's rate limit
+    def _scan_one(t: str) -> dict:
         try:
-            results.append(analyze_ticker(ticker, with_summary=False))
+            return analyze_ticker(t, with_summary=False)
         except Exception as exc:
             err_str = str(exc)
-            if "429" in err_str or "Too Many" in err_str.lower():
-                # Rate-limited mid-scan: wait and retry once before giving up
-                time.sleep(15)
+            if "429" in err_str or "too many" in err_str.lower():
+                time.sleep(10)
                 try:
-                    results.append(analyze_ticker(ticker, with_summary=False))
-                    continue
-                except Exception:
-                    pass
-            results.append({
-                "ticker": ticker,
-                "name": ticker,
-                "sentiment": "error",
-                "sentiment_score": 0,
-                "error": err_str,
-            })
+                    return analyze_ticker(t, with_summary=False)
+                except Exception as exc2:
+                    err_str = str(exc2)
+            return {"ticker": t, "name": t, "sentiment": "error", "sentiment_score": 0, "error": err_str}
 
+    result_map: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=MAX_SCAN_WORKERS) as pool:
+        futures = {pool.submit(_scan_one, t): t for t in watchlist}
+        for future in as_completed(futures):
+            result_map[futures[future]] = future.result()
+
+    # Preserve watchlist order in output
+    results = [result_map[t] for t in watchlist if t in result_map]
     print(json.dumps({"watchlist": watchlist, "results": results}, indent=2))
 
 
