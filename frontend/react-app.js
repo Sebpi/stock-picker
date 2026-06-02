@@ -1910,7 +1910,7 @@
           return h(Card, { key: a.agent_id || i, className: "p-4" },
             h("div", { className: "flex items-start justify-between gap-3" },
               h("div", null,
-                h("div", { className: "font-semibold text-sm" }, (a.agent_id || "unknown agent").replace(/^agent[._]/i, "").replace(/_/g, " ")),
+                h("div", { className: "font-semibold text-sm" }, a.agent_id || "unknown agent"),
                 h("div", { className: "text-xs text-pulse-muted mt-1" }, a.last_run ? `Last run ${fmtDate(a.last_run)}` : "No run recorded")
               ),
               h(Pill, { className: stale ? "border-pulse-red/40 bg-pulse-red/10 text-pulse-red" : "border-pulse-green/40 bg-pulse-green/10 text-pulse-green" }, stale ? "STALE" : "FRESH")
@@ -2096,7 +2096,7 @@
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Agent scores"),
         h("div", { className: "mt-3 grid gap-2" },
           Object.entries(thesis.agent_scores || {}).map(([agent, value]) => h("div", { key: agent, className: "grid grid-cols-[80px_1fr_32px] items-center gap-2 sm:grid-cols-[112px_1fr_40px]" },
-            h("span", { className: "truncate text-[11px] text-pulse-muted sm:text-sm" }, agent.replace(/^agent[._]/i, "").replace(/_/g, " ")),
+            h("span", { className: "truncate text-[11px] text-pulse-muted sm:text-sm" }, agent.replace("agent.", "").replace(/_/g, " ")),
             h(ProgressBar, { value }),
             h("strong", { className: cx("font-mono text-right text-xs sm:text-sm", scoreTone(value)) }, Number(value || 0).toFixed(0))
           ))
