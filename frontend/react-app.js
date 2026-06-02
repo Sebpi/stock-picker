@@ -1623,10 +1623,10 @@
                 chipClass = "border-pulse-cyan bg-pulse-cyan/10 text-pulse-cyan";
               } else if (score != null) {
                 chipClass = score >= 70
-                  ? "border-emerald-500/50 bg-emerald-500/8 text-emerald-400 hover:border-emerald-400/70"
+                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:border-emerald-400/70"
                   : score >= 45
-                    ? "border-amber-500/50 bg-amber-500/8 text-amber-400 hover:border-amber-400/70"
-                    : "border-red-500/50 bg-red-500/8 text-red-400 hover:border-red-400/70";
+                    ? "border-amber-500/50 bg-amber-500/10 text-amber-400 hover:border-amber-400/70"
+                    : "border-red-500/50 bg-red-500/10 text-red-400 hover:border-red-400/70";
               } else {
                 chipClass = "border-pulse-line bg-pulse-bg text-pulse-muted hover:border-pulse-cyan/40 hover:text-pulse-ink";
               }
