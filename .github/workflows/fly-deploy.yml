@@ -66,11 +66,20 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
   smoke:
-    name: Post-deploy smoke
+    name: Post-deploy E2E smoke
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: deploy
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright + chromium
+        run: |
+          npm init -y >/dev/null
+          npm i playwright >/dev/null
+          npx playwright install --with-deps chromium
       - name: Wait for API health
         run: |
           for i in $(seq 1 30); do
@@ -85,6 +94,10 @@ jobs:
           curl -fsS https://stock-picker-sp.fly.dev/ >/dev/null
           curl -fsS https://stock-picker-sp.fly.dev/legacy >/dev/null
           curl -fsS https://stock-picker-sp.fly.dev/api/health | jq -e '.status=="ok"'
+      - name: Run E2E smoke
+        run: node tests/e2e/smoke.mjs
+        env:
+          TARGET_URL: https://stock-picker-sp.fly.dev
 
   owasp-zap:
     name: OWASP ZAP Baseline
