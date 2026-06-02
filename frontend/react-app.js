@@ -139,6 +139,42 @@
     );
   }
 
+  function NavSearchIcon() {
+    return h("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
+      h("circle", { cx: 11, cy: 11, r: 8 }),
+      h("line", { x1: 21, y1: 21, x2: 16.65, y2: 16.65 })
+    );
+  }
+
+  function NavBookmarkIcon() {
+    return h("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
+      h("path", { d: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" })
+    );
+  }
+
+  function NavSignalsIcon() {
+    return h("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
+      h("polyline", { points: "22 7 13.5 15.5 8.5 10.5 2 17" }),
+      h("polyline", { points: "16 7 22 7 22 13" })
+    );
+  }
+
+  function NavPortfolioIcon() {
+    return h("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
+      h("rect", { x: 2, y: 7, width: 20, height: 14, rx: 2, ry: 2 }),
+      h("path", { d: "M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" })
+    );
+  }
+
+  function NavGridIcon() {
+    return h("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
+      h("rect", { x: 3, y: 3, width: 7, height: 7 }),
+      h("rect", { x: 14, y: 3, width: 7, height: 7 }),
+      h("rect", { x: 3, y: 14, width: 7, height: 7 }),
+      h("rect", { x: 14, y: 14, width: 7, height: 7 })
+    );
+  }
+
   // ──────────────────────────────────────────────────────────────
   // Primitives
   // ──────────────────────────────────────────────────────────────
@@ -394,7 +430,19 @@
   // Shell
   // ──────────────────────────────────────────────────────────────
 
+  const BOTTOM_NAV = [
+    ["screener",        "Scan",    NavSearchIcon],
+    ["watchlist",       "Watch",   NavBookmarkIcon],
+    ["recommendations", "Signals", NavSignalsIcon],
+    ["portfolio",       "Port",    NavPortfolioIcon],
+  ];
+
   function Shell({ user, active, setActive, logout, theme, toggleTheme, children }) {
+    const [showMore, setShowMore] = useState(false);
+    const isPrimary = BOTTOM_NAV.some(([id]) => id === active);
+
+    function navigate(id) { setActive(id); setShowMore(false); }
+
     return h("div", { className: "min-h-screen pb-20 md:pb-0" },
       h("header", { className: "sticky top-0 z-30 border-b border-pulse-line bg-pulse-bg/86 px-3 pt-[max(.75rem,env(safe-area-inset-top))] backdrop-blur md:px-5" },
         h("div", { className: "mx-auto flex max-w-7xl items-center gap-3 py-3" },
@@ -411,7 +459,7 @@
           }, theme === "dark" ? h(SunIcon) : h(MoonIcon)),
           h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
         ),
-        h("nav", { className: "scrollbar-none mx-auto flex max-w-7xl gap-1 overflow-x-auto pb-2" },
+        h("nav", { className: "scrollbar-none mx-auto hidden max-w-7xl gap-1 overflow-x-auto pb-2 md:flex" },
           TABS.map(([id, label]) => h("button", {
             key: id, id: `tab-${id}`, "data-tab": id, onClick: () => setActive(id),
             className: cx("shrink-0 rounded-lg px-3 py-2 text-xs font-medium transition",
@@ -420,12 +468,33 @@
         )
       ),
       h("main", { className: "mx-auto max-w-7xl px-3 py-4 md:px-5 md:py-6" }, children),
-      h("nav", { className: "fixed inset-x-0 bottom-0 z-40 border-t border-pulse-line bg-pulse-bg/95 px-2 pb-[max(.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur md:hidden" },
+      h("nav", { className: "fixed inset-x-0 bottom-0 z-40 border-t border-pulse-line bg-pulse-bg/95 px-2 pb-[max(.5rem,env(safe-area-inset-bottom))] pt-1 backdrop-blur md:hidden" },
         h("div", { className: "grid grid-cols-5 gap-1" },
-          [["screener","Scan"],["watchlist","Watch"],["predictions","Preds"],["recommendations","Sig"],["portfolio","Port"]].map(([id, label]) => h("button", {
-            key: id, onClick: () => setActive(id),
-            className: cx("rounded-lg px-1 py-2 text-[10px] font-medium", active === id ? "bg-pulse-card text-pulse-cyan" : "text-pulse-muted")
-          }, label))
+          BOTTOM_NAV.map(([id, label, Icon]) => h("button", {
+            key: id, onClick: () => navigate(id),
+            className: cx("flex flex-col items-center gap-1 rounded-lg px-1 py-1.5 text-[10px] font-medium transition", active === id ? "text-pulse-cyan" : "text-pulse-muted")
+          }, h(Icon), label)),
+          h("button", {
+            onClick: () => setShowMore(true),
+            className: cx("flex flex-col items-center gap-1 rounded-lg px-1 py-1.5 text-[10px] font-medium transition", !isPrimary ? "text-pulse-cyan" : "text-pulse-muted")
+          }, h(NavGridIcon), "More")
+        )
+      ),
+      showMore && h("div", { className: "fixed inset-0 z-50 md:hidden" },
+        h("div", { className: "absolute inset-0 bg-black/70", onClick: () => setShowMore(false) }),
+        h("section", { className: "absolute inset-x-0 bottom-0 rounded-t-2xl border-t border-pulse-line bg-pulse-panel pb-[max(1.5rem,env(safe-area-inset-bottom))]" },
+          h("div", { className: "flex items-center justify-between border-b border-pulse-line px-4 py-3" },
+            h("span", { className: "text-sm font-semibold" }, "All screens"),
+            h("button", { onClick: () => setShowMore(false), className: "rounded-lg border border-pulse-line px-3 py-1 text-xs text-pulse-muted" }, "Close")
+          ),
+          h("div", { className: "grid grid-cols-2 gap-2 p-4" },
+            TABS.filter(([id]) => !BOTTOM_NAV.some(([bid]) => bid === id))
+              .map(([id, label]) => h("button", {
+                key: id, onClick: () => navigate(id),
+                className: cx("rounded-xl border px-3 py-3 text-left text-sm font-medium transition",
+                  active === id ? "border-pulse-cyan/40 bg-pulse-cyan/10 text-pulse-cyan" : "border-pulse-line bg-pulse-card text-pulse-ink")
+              }, label))
+          )
         )
       )
     );
@@ -1910,7 +1979,7 @@
           return h(Card, { key: a.agent_id || i, className: "p-4" },
             h("div", { className: "flex items-start justify-between gap-3" },
               h("div", null,
-                h("div", { className: "font-semibold text-sm" }, a.agent_id || "unknown agent"),
+                h("div", { className: "font-semibold text-sm" }, (a.agent_id || "unknown agent").replace(/^agent[._]/i, "").replace(/_/g, " ")),
                 h("div", { className: "text-xs text-pulse-muted mt-1" }, a.last_run ? `Last run ${fmtDate(a.last_run)}` : "No run recorded")
               ),
               h(Pill, { className: stale ? "border-pulse-red/40 bg-pulse-red/10 text-pulse-red" : "border-pulse-green/40 bg-pulse-green/10 text-pulse-green" }, stale ? "STALE" : "FRESH")
@@ -2096,7 +2165,7 @@
         h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Agent scores"),
         h("div", { className: "mt-3 grid gap-2" },
           Object.entries(thesis.agent_scores || {}).map(([agent, value]) => h("div", { key: agent, className: "grid grid-cols-[80px_1fr_32px] items-center gap-2 sm:grid-cols-[112px_1fr_40px]" },
-            h("span", { className: "truncate text-[11px] text-pulse-muted sm:text-sm" }, agent.replace("agent.", "").replace(/_/g, " ")),
+            h("span", { className: "truncate text-[11px] text-pulse-muted sm:text-sm" }, agent.replace(/^agent[._]/i, "").replace(/_/g, " ")),
             h(ProgressBar, { value }),
             h("strong", { className: cx("font-mono text-right text-xs sm:text-sm", scoreTone(value)) }, Number(value || 0).toFixed(0))
           ))
