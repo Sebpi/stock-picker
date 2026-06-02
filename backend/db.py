@@ -492,7 +492,7 @@ def get_latest_scores(tickers: list[str]) -> dict[str, float]:
             """,  # nosec B608 — placeholders is only '?,?,...'
             tickers,
         ).fetchall()
-    return {row["ticker"]: row["composite_score"] for row in rows}
+    return {row["ticker"]: row["composite_score"] for row in rows if row["composite_score"] is not None}
 
 
 def get_thesis_history(ticker: str, limit: int = 10) -> list[dict]:

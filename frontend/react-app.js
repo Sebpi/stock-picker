@@ -1455,7 +1455,7 @@
         api("/v1/thesis/scores").then(scores => {
           if (scores && typeof scores === "object") {
             setScoreMap(scores);
-            setCompletedSet(new Set(Object.keys(scores)));
+            setCompletedSet(new Set(Object.keys(scores).filter(k => scores[k] != null)));
           }
         }).catch(() => {});
 
