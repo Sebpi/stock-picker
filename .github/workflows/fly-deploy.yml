@@ -77,8 +77,7 @@ jobs:
           node-version: "20"
       - name: Install Playwright + chromium
         run: |
-          npm init -y >/dev/null
-          npm i playwright >/dev/null
+          npm ci
           npx playwright install --with-deps chromium
       - name: Wait for API health
         run: |
