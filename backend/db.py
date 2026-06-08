@@ -281,6 +281,37 @@ CREATE TABLE IF NOT EXISTS alert_log (
     status          TEXT,
     payload_json    TEXT
 );
+
+CREATE TABLE IF NOT EXISTS agent_accuracy (
+    agent_id            TEXT NOT NULL,
+    horizon             TEXT NOT NULL,
+    window_days         INTEGER NOT NULL DEFAULT 90,
+    n_evaluated         INTEGER DEFAULT 0,
+    n_direction_correct INTEGER DEFAULT 0,
+    direction_hit_rate  REAL,
+    avg_score           REAL,
+    avg_score_correct   REAL,
+    avg_score_wrong     REAL,
+    avg_forecast_error  REAL,
+    score_return_corr   REAL,
+    suggested_weight_adj REAL DEFAULT 0.0,
+    computed_at         TEXT,
+    PRIMARY KEY (agent_id, horizon, window_days)
+);
+
+CREATE TABLE IF NOT EXISTS score_bucket_performance (
+    bucket_label        TEXT NOT NULL,
+    score_min           REAL NOT NULL,
+    score_max           REAL NOT NULL,
+    horizon             TEXT NOT NULL,
+    window_days         INTEGER NOT NULL DEFAULT 90,
+    n_evaluated         INTEGER DEFAULT 0,
+    avg_realised_return REAL,
+    avg_forecast_return REAL,
+    direction_hit_rate  REAL,
+    computed_at         TEXT,
+    PRIMARY KEY (bucket_label, horizon, window_days)
+);
 """
 
 
@@ -1593,3 +1624,88 @@ def get_forecast_outcome_status(ticker: str | None = None) -> dict[str, Any]:
             pass
 
     return status
+
+
+# ---------------------------------------------------------------------------
+# Agent accuracy helpers (learning system — Phase 1)
+# ---------------------------------------------------------------------------
+
+def upsert_agent_accuracy(stat: dict) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_accuracy
+                (agent_id, horizon, window_days, n_evaluated, n_direction_correct,
+                 direction_hit_rate, avg_score, avg_score_correct, avg_score_wrong,
+                 avg_forecast_error, score_return_corr, suggested_weight_adj, computed_at)
+            VALUES (:agent_id, :horizon, :window_days, :n_evaluated, :n_direction_correct,
+                    :direction_hit_rate, :avg_score, :avg_score_correct, :avg_score_wrong,
+                    :avg_forecast_error, :score_return_corr, :suggested_weight_adj, :computed_at)
+            ON CONFLICT(agent_id, horizon, window_days) DO UPDATE SET
+                n_evaluated=excluded.n_evaluated,
+                n_direction_correct=excluded.n_direction_correct,
+                direction_hit_rate=excluded.direction_hit_rate,
+                avg_score=excluded.avg_score,
+                avg_score_correct=excluded.avg_score_correct,
+                avg_score_wrong=excluded.avg_score_wrong,
+                avg_forecast_error=excluded.avg_forecast_error,
+                score_return_corr=excluded.score_return_corr,
+                suggested_weight_adj=excluded.suggested_weight_adj,
+                computed_at=excluded.computed_at
+            """,
+            stat,
+        )
+
+
+def upsert_score_bucket(stat: dict) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO score_bucket_performance
+                (bucket_label, score_min, score_max, horizon, window_days,
+                 n_evaluated, avg_realised_return, avg_forecast_return,
+                 direction_hit_rate, computed_at)
+            VALUES (:bucket_label, :score_min, :score_max, :horizon, :window_days,
+                    :n_evaluated, :avg_realised_return, :avg_forecast_return,
+                    :direction_hit_rate, :computed_at)
+            ON CONFLICT(bucket_label, horizon, window_days) DO UPDATE SET
+                n_evaluated=excluded.n_evaluated,
+                avg_realised_return=excluded.avg_realised_return,
+                avg_forecast_return=excluded.avg_forecast_return,
+                direction_hit_rate=excluded.direction_hit_rate,
+                computed_at=excluded.computed_at
+            """,
+            stat,
+        )
+
+
+def get_agent_accuracy_all(window_days: int = 90) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT agent_id, horizon, window_days, n_evaluated, n_direction_correct,
+                   direction_hit_rate, avg_score, avg_score_correct, avg_score_wrong,
+                   avg_forecast_error, score_return_corr, suggested_weight_adj, computed_at
+            FROM agent_accuracy
+            WHERE window_days = ?
+            ORDER BY agent_id, horizon
+            """,
+            (window_days,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_score_buckets_all(window_days: int = 90) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT bucket_label, score_min, score_max, horizon, window_days,
+                   n_evaluated, avg_realised_return, avg_forecast_return,
+                   direction_hit_rate, computed_at
+            FROM score_bucket_performance
+            WHERE window_days = ?
+            ORDER BY horizon, score_min
+            """,
+            (window_days,),
+        ).fetchall()
+    return [dict(r) for r in rows]
