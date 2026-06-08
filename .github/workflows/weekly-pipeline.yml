@@ -23,12 +23,12 @@ jobs:
               cd /app &&
               echo === Trigger evaluation === &&
               curl -fsS -X POST http://127.0.0.1:8080/v1/evaluate \
-                -H \"x-service-key: ${STOCK_PICKER_SERVICE_KEY}\" || exit 1
+                -H \"Authorization: Bearer ${STOCK_PICKER_SERVICE_KEY}\" || exit 1
             '"
         shell: bash
 
       - name: Verify scheduler status
         run: |
           curl -fsS https://stock-picker-sp.fly.dev/v1/operations/status \
-            -H "x-service-key: ${{ secrets.STOCK_PICKER_SERVICE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.STOCK_PICKER_SERVICE_KEY }}" \
             | jq -e '.thesis_scheduler.enabled != null and .evaluation_scheduler.enabled != null'
