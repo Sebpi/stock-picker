@@ -11,6 +11,8 @@ ENV APP_VERSION=$APP_VERSION \
     GIT_SHA=$GIT_SHA \
     BUILD_TIME=$BUILD_TIME
 
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY backend/requirements.txt ./backend/requirements.txt
