@@ -1,10 +1,12 @@
 """
-agent_accuracy.py — Per-agent accuracy tracking for the learning system.
+agent_accuracy.py — Per-agent accuracy tracking and weight recalibration.
 
 Phase 1: Compute and persist accuracy stats by joining realized forecast
          outcomes back to the individual agent signals that contributed.
 
-Phase 2 (future): Auto-apply bounded weight adjustments weekly.
+Phase 2: Auto-apply bounded weight adjustments weekly using a blend factor.
+         HORIZON_WEIGHTS is mutated in-place; changes take effect on the next
+         thesis generation without restart.
 
 The key join is:
   forecast_outcome  (realized returns, per thesis/horizon)
@@ -13,11 +15,15 @@ The key join is:
 """
 from __future__ import annotations
 
+import copy
+import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import db
+from schemas import HORIZON_WEIGHTS
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,12 @@ BASELINE_HIT_RATE = 0.55   # expected floor for a useful agent
 MIN_SAMPLES = 5             # min evaluated outcomes before reporting
 MAX_WEIGHT_ADJ = 0.10       # cap ±10% per recalibration cycle
 WINDOWS = [30, 60, 90]      # lookback windows to compute (days)
+BLEND = 0.20                 # fraction of suggested adj applied per cycle
+WEIGHT_FLOOR_RATIO = 0.50    # min weight = 50% of default
+WEIGHT_CEIL_RATIO  = 2.00    # max weight = 200% of default
+
+# Snapshot defaults at import time so resets are always available
+_DEFAULT_WEIGHTS: dict[str, dict[str, float]] = copy.deepcopy(HORIZON_WEIGHTS)
 
 
 def _spearman(xs: list[float], ys: list[float]) -> float | None:
@@ -206,7 +218,7 @@ def _compute_score_buckets(window_days: int) -> list[dict]:
     return results
 
 
-def rebuild_all(windows: list[int] | None = None) -> dict[str, Any]:
+def rebuild_all(windows: list[int] | None = None, apply_adjustments: bool = False) -> dict[str, Any]:
     """Rebuild accuracy stats for all windows. Called after each evaluation cycle."""
     windows = windows or WINDOWS
     summary: dict[str, Any] = {"windows": {}}
@@ -219,6 +231,8 @@ def rebuild_all(windows: list[int] | None = None) -> dict[str, Any]:
             "n_score_buckets": len(bucket_result),
         }
     summary["computed_at"] = datetime.now(timezone.utc).isoformat()
+    if apply_adjustments:
+        summary["recalibration"] = apply_weight_adjustments()
     return summary
 
 
@@ -252,4 +266,132 @@ def get_learning_summary(window_days: int = 90) -> dict[str, Any]:
         "agent_stats": agent_stats,
         "score_buckets": bucket_stats,
         "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Weight recalibration
+# ---------------------------------------------------------------------------
+
+def apply_weight_adjustments(window_days: int = 90) -> dict[str, Any]:
+    """
+    Blend suggested_weight_adj from agent_accuracy into HORIZON_WEIGHTS.
+
+    new_weight = current * (1 + BLEND * suggested_adj)
+    Hard bounds: [50%, 200%] of the default weight snapshot.
+    Returns a summary and persists the calibration to DB.
+    """
+    stats = db.get_agent_accuracy_all(window_days)
+    if not stats:
+        return {"applied": False, "reason": "no_accuracy_data", "n_adjusted": 0}
+
+    deltas: dict[str, Any] = {}
+    n_adjusted = 0
+
+    for stat in stats:
+        agent_id = stat["agent_id"]
+        horizon = stat["horizon"]
+        adj = stat.get("suggested_weight_adj") or 0.0
+
+        if abs(adj) < 0.001:
+            continue
+        if (stat.get("n_evaluated") or 0) < MIN_SAMPLES:
+            continue
+
+        current_w = HORIZON_WEIGHTS.get(horizon, {}).get(agent_id)
+        default_w = _DEFAULT_WEIGHTS.get(horizon, {}).get(agent_id)
+
+        if current_w is None or default_w is None or default_w <= 0:
+            continue
+
+        raw_new = current_w * (1.0 + BLEND * adj)
+        new_w = round(max(default_w * WEIGHT_FLOOR_RATIO, min(default_w * WEIGHT_CEIL_RATIO, raw_new)), 6)
+
+        if abs(new_w - current_w) < 1e-8:
+            continue
+
+        HORIZON_WEIGHTS[horizon][agent_id] = new_w
+        n_adjusted += 1
+        deltas[f"{agent_id}|{horizon}"] = {
+            "agent_id": agent_id,
+            "horizon": horizon,
+            "default": round(default_w, 6),
+            "before": round(current_w, 6),
+            "after": round(new_w, 6),
+            "delta_pct": round((new_w - current_w) / current_w * 100, 1),
+        }
+
+    if n_adjusted == 0:
+        return {"applied": False, "reason": "no_material_adjustments", "n_adjusted": 0}
+
+    calibration_id = f"cal_{uuid.uuid4().hex}"
+    db.store_calibrated_weights({
+        "calibration_id": calibration_id,
+        "applied_at": datetime.now(timezone.utc).isoformat(),
+        "window_days": window_days,
+        "n_agents_adj": n_adjusted,
+        "weights_json": json.dumps(HORIZON_WEIGHTS),
+        "deltas_json": json.dumps(deltas),
+    })
+
+    logger.info("[learning] Weights recalibrated: %d agent/horizon pairs adjusted", n_adjusted)
+    return {
+        "applied": True,
+        "calibration_id": calibration_id,
+        "n_adjusted": n_adjusted,
+        "deltas": deltas,
+    }
+
+
+def load_calibrated_weights() -> bool:
+    """Load the latest calibrated weights from DB into HORIZON_WEIGHTS. Called at startup."""
+    row = db.get_latest_calibrated_weights()
+    if not row:
+        return False
+    try:
+        weights = json.loads(row["weights_json"])
+        for horizon, agent_weights in weights.items():
+            if horizon in HORIZON_WEIGHTS:
+                for agent_id, w in agent_weights.items():
+                    if agent_id in HORIZON_WEIGHTS[horizon]:
+                        HORIZON_WEIGHTS[horizon][agent_id] = float(w)
+        logger.info("[learning] Loaded calibrated weights from %s", row["applied_at"])
+        return True
+    except Exception as exc:
+        logger.warning("[learning] Failed to load calibrated weights: %s", exc)
+        return False
+
+
+def reset_to_default_weights() -> None:
+    """Restore HORIZON_WEIGHTS to the defaults snapshotted at module load."""
+    for horizon, agents in _DEFAULT_WEIGHTS.items():
+        for agent_id, w in agents.items():
+            HORIZON_WEIGHTS[horizon][agent_id] = w
+    logger.info("[learning] Weights reset to defaults")
+
+
+def get_weight_status() -> dict[str, Any]:
+    """Return current vs default weights with deltas. Used by /v1/learning/weights."""
+    calibration = db.get_latest_calibrated_weights()
+    history = db.list_calibration_history(10)
+    rows = []
+    for horizon in sorted(HORIZON_WEIGHTS):
+        for agent_id in sorted(HORIZON_WEIGHTS[horizon]):
+            current = HORIZON_WEIGHTS[horizon][agent_id]
+            default = _DEFAULT_WEIGHTS.get(horizon, {}).get(agent_id, current)
+            rows.append({
+                "agent_id": agent_id,
+                "horizon": horizon,
+                "default_weight": round(default, 6),
+                "current_weight": round(current, 6),
+                "delta_pct": round((current - default) / default * 100, 1) if default else 0.0,
+                "is_adjusted": abs(current - default) > 1e-8,
+            })
+    return {
+        "weights": rows,
+        "last_calibrated_at": calibration["applied_at"] if calibration else None,
+        "calibration_id": calibration["calibration_id"] if calibration else None,
+        "n_adjusted": sum(1 for r in rows if r["is_adjusted"]),
+        "calibration_history": history,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }

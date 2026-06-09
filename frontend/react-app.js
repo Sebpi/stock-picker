@@ -3383,6 +3383,9 @@
     const [window, setWindow] = useState(90);
     const [horizon, setHorizon] = useState("3m");
     const [rebuilding, setRebuilding] = useState(false);
+    const [weights, setWeights] = useState(null);
+    const [recalibrating, setRecalibrating] = useState(false);
+    const [resetting, setResetting] = useState(false);
 
     const load = (w) => {
       setLoading(true); setError(null);
@@ -3391,13 +3394,34 @@
         .catch(e => { setError(e.message || "Failed to load"); setLoading(false); });
     };
 
-    useEffect(() => { load(window); }, [window]);
+    const loadWeights = () => {
+      apiFetch("/v1/learning/weights")
+        .then(r => setWeights(r))
+        .catch(() => {});
+    };
+
+    useEffect(() => { load(window); loadWeights(); }, [window]);
 
     const rebuild = () => {
       setRebuilding(true);
       apiFetch("/v1/learning/rebuild", { method: "POST" })
         .then(() => { setTimeout(() => { setRebuilding(false); load(window); }, 3000); })
         .catch(() => setRebuilding(false));
+    };
+
+    const recalibrate = () => {
+      setRecalibrating(true);
+      apiFetch("/v1/learning/weights/recalibrate", { method: "POST" })
+        .then(() => { setTimeout(() => { setRecalibrating(false); loadWeights(); }, 3000); })
+        .catch(() => setRecalibrating(false));
+    };
+
+    const resetWeights = () => {
+      if (!confirm("Reset all agent weights to factory defaults?")) return;
+      setResetting(true);
+      apiFetch("/v1/learning/weights/reset", { method: "POST" })
+        .then(r => { setWeights(r.weights); setResetting(false); })
+        .catch(() => setResetting(false));
     };
 
     const fmtPct = (v, digits = 1) =>
@@ -3579,6 +3603,63 @@
                 )
               )
             )
+      ),
+
+      // Weight calibration section
+      h(Card, { className: "p-4" },
+        h("div", { className: "flex flex-wrap items-center justify-between gap-3 mb-3" },
+          h("div", null,
+            h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Agent weight calibration"),
+            h("p", { className: "text-xs text-pulse-muted mt-0.5" },
+              weights?.last_calibrated_at
+                ? `Last recalibrated ${new Date(weights.last_calibrated_at).toLocaleString()} · ${weights.n_adjusted ?? 0} weights adjusted`
+                : "No recalibration applied yet — factory defaults in use"
+            )
+          ),
+          h("div", { className: "flex gap-2" },
+            h("button", {
+              onClick: recalibrate,
+              disabled: recalibrating,
+              className: "px-3 py-1.5 rounded-lg border border-pulse-line text-xs font-mono text-pulse-muted hover:text-pulse-ink transition-colors disabled:opacity-50",
+            }, recalibrating ? "Recalibrating…" : "Recalibrate"),
+            h("button", {
+              onClick: resetWeights,
+              disabled: resetting,
+              className: "px-3 py-1.5 rounded-lg border border-red-500/30 text-xs font-mono text-red-400 hover:text-red-300 transition-colors disabled:opacity-50",
+            }, resetting ? "Resetting…" : "Reset to defaults")
+          )
+        ),
+        weights?.weights
+          ? h("div", { className: "overflow-x-auto" },
+              h("table", { className: "w-full text-xs font-mono" },
+                h("thead", null,
+                  h("tr", { className: "border-b border-pulse-line text-pulse-muted" },
+                    ["Agent", "Horizon", "Default", "Current", "Δ"].map(col =>
+                      h("th", { key: col, className: "text-left pb-2 pr-4 font-normal tracking-wide" }, col)
+                    )
+                  )
+                ),
+                h("tbody", null,
+                  weights.weights
+                    .filter(w => w.horizon === horizon)
+                    .sort((a, b) => Math.abs(b.delta_pct) - Math.abs(a.delta_pct))
+                    .map(w =>
+                      h("tr", { key: `${w.agent_id}|${w.horizon}`, className: cx("border-b border-pulse-line/40", w.is_adjusted && "bg-pulse-card/30") },
+                        h("td", { className: "py-1.5 pr-4 text-pulse-ink" }, w.agent_id.replace(/^agent\./, "")),
+                        h("td", { className: "py-1.5 pr-4 text-pulse-muted" }, w.horizon),
+                        h("td", { className: "py-1.5 pr-4 text-pulse-muted font-tnum" }, w.default_weight.toFixed(4)),
+                        h("td", { className: cx("py-1.5 pr-4 font-tnum", w.is_adjusted ? "text-pulse-ink font-semibold" : "text-pulse-muted") },
+                          w.current_weight.toFixed(4)
+                        ),
+                        h("td", { className: cx("py-1.5 pr-4 font-tnum font-semibold", !w.is_adjusted ? "text-pulse-dim" : w.delta_pct > 0 ? "text-emerald-400" : "text-red-400") },
+                          w.is_adjusted ? `${w.delta_pct > 0 ? "+" : ""}${w.delta_pct.toFixed(1)}%` : "—"
+                        )
+                      )
+                    )
+                )
+              )
+            )
+          : h("p", { className: "text-sm text-pulse-muted text-center py-4" }, "Loading weights…")
       ),
 
       // Note

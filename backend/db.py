@@ -312,6 +312,15 @@ CREATE TABLE IF NOT EXISTS score_bucket_performance (
     computed_at         TEXT,
     PRIMARY KEY (bucket_label, horizon, window_days)
 );
+
+CREATE TABLE IF NOT EXISTS calibrated_weights (
+    calibration_id  TEXT PRIMARY KEY,
+    applied_at      TEXT NOT NULL,
+    window_days     INTEGER NOT NULL DEFAULT 90,
+    n_agents_adj    INTEGER DEFAULT 0,
+    weights_json    TEXT NOT NULL,
+    deltas_json     TEXT
+);
 """
 
 
@@ -1707,5 +1716,54 @@ def get_score_buckets_all(window_days: int = 90) -> list[dict]:
             ORDER BY horizon, score_min
             """,
             (window_days,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Calibrated weights helpers (learning system — Phase 2)
+# ---------------------------------------------------------------------------
+
+def store_calibrated_weights(record: dict) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO calibrated_weights
+                (calibration_id, applied_at, window_days, n_agents_adj, weights_json, deltas_json)
+            VALUES (:calibration_id, :applied_at, :window_days, :n_agents_adj, :weights_json, :deltas_json)
+            ON CONFLICT(calibration_id) DO UPDATE SET
+                applied_at=excluded.applied_at,
+                n_agents_adj=excluded.n_agents_adj,
+                weights_json=excluded.weights_json,
+                deltas_json=excluded.deltas_json
+            """,
+            record,
+        )
+
+
+def get_latest_calibrated_weights() -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT calibration_id, applied_at, window_days, n_agents_adj, weights_json, deltas_json
+            FROM calibrated_weights
+            ORDER BY applied_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_calibration_history(limit: int = 10) -> list[dict]:
+    safe_limit = max(1, min(int(limit or 10), 50))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT calibration_id, applied_at, window_days, n_agents_adj
+            FROM calibrated_weights
+            ORDER BY applied_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
         ).fetchall()
     return [dict(r) for r in rows]

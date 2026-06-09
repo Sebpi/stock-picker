@@ -2560,6 +2560,18 @@ async def auto_evaluate():
     await run_evaluation_job("scheduler")
 
 
+async def auto_recalibrate_weights():
+    """Weekly weight recalibration — Monday 02:00 UTC."""
+    try:
+        import agent_accuracy as _aa
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _aa.apply_weight_adjustments)
+        logger.info("[Learning] Weekly weight recalibration: n_adjusted=%s applied=%s",
+                    result.get("n_adjusted"), result.get("applied"))
+    except Exception as exc:
+        logger.warning("[Learning] Weight recalibration failed: %s", exc)
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -2662,6 +2674,16 @@ async def startup():
             max_instances=1,
             coalesce=True,
         )
+    scheduler.add_job(
+        auto_recalibrate_weights,
+        "cron",
+        day_of_week="mon",
+        hour=2,
+        minute=0,
+        id="weight_recalibration",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
 
     # Start Finnhub real-time price feed (no-op if FINNHUB_API_KEY unset)
@@ -7949,6 +7971,42 @@ async def v1_learning_rebuild(
     return {"ok": True, "message": "Agent accuracy rebuild started in background"}
 
 
+@app.get("/v1/learning/weights")
+@limiter.limit("30/minute")
+def v1_learning_weights(
+    request: Request,
+    current_user: str = Depends(get_current_user),
+):
+    """Return current agent weights vs defaults, with per-agent delta info."""
+    import agent_accuracy as _aa
+    return _aa.get_weight_status()
+
+
+@app.post("/v1/learning/weights/recalibrate")
+@limiter.limit("5/hour")
+async def v1_learning_weights_recalibrate(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user),
+):
+    """Manually trigger a weight recalibration cycle (same as the Monday 02:00 job)."""
+    import agent_accuracy as _aa
+    background_tasks.add_task(_aa.apply_weight_adjustments)
+    return {"ok": True, "message": "Weight recalibration started in background"}
+
+
+@app.post("/v1/learning/weights/reset")
+@limiter.limit("5/hour")
+def v1_learning_weights_reset(
+    request: Request,
+    current_user: str = Depends(get_current_user),
+):
+    """Reset HORIZON_WEIGHTS to factory defaults."""
+    import agent_accuracy as _aa
+    _aa.reset_to_default_weights()
+    return {"ok": True, "message": "Agent weights reset to defaults", "weights": _aa.get_weight_status()}
+
+
 async def _init_multiagent_db():
     """Initialise the SQLite database for the multi-agent system."""
     try:
@@ -7961,3 +8019,11 @@ async def _init_multiagent_db():
         logger.info("[v1] Multi-agent SQLite DB initialised")
     except Exception as exc:
         logger.error("[v1] DB init failed: %s", exc)
+        return
+    try:
+        import agent_accuracy as _aa
+        loaded = _aa.load_calibrated_weights()
+        if loaded:
+            logger.info("[v1] Calibrated agent weights loaded from DB")
+    except Exception as exc:
+        logger.warning("[v1] Could not load calibrated weights: %s", exc)
