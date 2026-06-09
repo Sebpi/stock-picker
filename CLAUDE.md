@@ -2,23 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> Lives at `~/code/stock-picker`. Own git repo, remote `Sebpi/stock-picker` on GitHub. Deploys to the Fly app `stock-picker-sp`. (The `/tmp/stock-picker/` copy mentioned in `SOAR/CODEX_HANDOVER.md` was wiped — this is the canonical working tree now.)
+> Lives at `~/code/stock-picker`. Own git repo, remote `Sebpi/stock-picker` on GitHub. Deploys to the Fly app `stock-picker-sp`. Current version: **v3.8.0** (defined in `package.json`).
 
 ## Architecture
 
 StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-process FastAPI backend that also serves a hand-written React SPA loaded via CDN UMD — there is **no frontend build step**.
 
-### Backend — `backend/main.py` (single ~7k-line FastAPI app)
+### Backend — `backend/main.py` (single ~8k-line FastAPI app)
 - Python 3.12, FastAPI + uvicorn, JWT auth via `python-jose`, bcrypt password hashing, slowapi rate limiting, APScheduler for background jobs, Anthropic SDK for LLM calls, `yfinance`/`yahooquery` for market data, Twilio + SMTP for alerts, `reportlab`/`pypdf` for PDFs.
 - Storage is **dual-format on purpose**:
-  - SQLite at `$DATA_DIR/stockpicker.db` — multi-agent signals, thesis history, decision log (see `backend/db.py`). Also contains an `insider_transactions` table managed by `backend/insider_transactions.py` (CREATE TABLE IF NOT EXISTS, no migration script needed).
+  - SQLite at `$DATA_DIR/stockpicker.db` — multi-agent signals, thesis history, decision log, agent accuracy, calibrated weights (see `backend/db.py`). Also contains an `insider_transactions` table managed by `backend/insider_transactions.py` (CREATE TABLE IF NOT EXISTS, no migration script needed).
   - JSON files under `$DATA_DIR` for legacy UI compatibility: `users.json`, `watchlist.json`, `predictions.json`, `portfolio.json`, `paper_portfolio.json`, `alerts.json`, `settings.json`, `lockout_state.json`, `sentiment_agent_state.json`.
   - `db.py` auto-migrates a legacy `backend/stockpicker.db` into `$DATA_DIR` on first boot if the latter doesn't exist. JSON writes use a temp-file + rename atomic pattern (`_atomic_write`).
 - **`SECRET_KEY`** drives JWT signing. If unset, the app generates an ephemeral one and **all sessions invalidate on restart** — set it in `backend/.env` for any non-toy run.
 - Auth surface: bcrypt + JWT (HS256), per-account lockout (5 attempts → 15-min cool-off, persisted to `lockout_state.json`), password reset via email token, default `admin` user auto-created on first run with a **random password printed to stdout once**.
 - **Portal JWT integration (LENS shared-session):** `get_current_user` and `auth_middleware` both accept JWTs minted by `seb-portal /api/auth/jwt` when `PORTAL_JWT_SECRET` is set. Only tokens with `iss="seb-portal"` pass through; portal-routed identity is returned as `"portal:<sub>"` so audit logs can distinguish it from local logins. Portal users don't need a `users.json` entry.
 - Three middleware stacks on top of FastAPI: trusted-host (`ALLOWED_HOSTS`), CORS (`ALLOWED_ORIGINS`), and an HTTPS-redirect / origin-check pair gated by `REQUIRE_HTTPS`.
-- Ticker validation is centralised: `_validate_ticker()` enforces `^[A-Z0-9.\-]{1,10}$` — call this on every user-supplied ticker.
+- Ticker validation is centralised: `_validate_ticker()` enforces `^[A-Z0-9.\-]{1,10}$` — call this on every user-supplied ticker. `load_watchlist()` also validates tickers on read and logs a warning for any it skips.
 - A startup hook clears any `*_PROXY` env var pointing at a dead local port (port 9), to survive macOS leftover proxy envs.
 
 ### Multi-agent forecasting — `backend/agents/`
@@ -37,11 +37,27 @@ StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-pr
 - **`financial_distress`** (`backend/agents/financial_distress.py`) computes the sector-agnostic Altman Z''-Score (6.56·X1 + 3.26·X2 + 6.72·X3 + 1.05·X4) from balance sheet and income statement. Z'' > 2.60 = safe; < 1.10 = distress. Weighted 0.04 at 3m, 0.05 at 6m, 0.06 at 12m.
 - **`piotroski`** (`backend/agents/piotroski.py`) computes the 9-factor Piotroski F-Score across profitability (ROA, CFO, accruals), leverage/liquidity (debt trend, current ratio, dilution), and efficiency (gross margin, asset turns). F ≥ 8 → 75; F ≤ 1 → 28. Weighted 0.03 at 3m, 0.06 at 6m, 0.08 at 12m.
 - **Minimum 3 agents** must return successfully or the thesis is rejected (`MIN_AGENTS_REQUIRED`). Alert snapshot requires **≥5 of 11 agents** net-positive (`alert_min_positive_agents`). Score → 12-month return uses linear interpolation over the `SCORE_TO_12M_RETURN` anchor table.
-- `HORIZON_WEIGHTS` in `schemas.py` were rebalanced when `insider_activity` was added — the orchestrator's `_weighted_score` normalises by sum of usable weights, so the ratios matter, not the totals.
+- `HORIZON_WEIGHTS` in `schemas.py` defines per-agent weights per horizon. The orchestrator's `_weighted_score` normalises by sum of usable weights, so ratios matter, not totals. Weights can drift from their factory defaults over time as the learning system recalibrates them (see Learning system below) — current live weights are always in memory and persisted to the `calibrated_weights` SQLite table.
 - Two distinct models in play:
   - `ANTHROPIC_MODEL` (default `claude-haiku-4-5-20251001`) for routine predictions/screens.
   - `THESIS_MODEL` (default `claude-sonnet-4-6`) for the thesis narrative — higher quality, higher cost.
 - `PREDICTIONS_MAX_TOKENS` (default 8192) must be large enough for **all watchlist stocks in one response** — roughly 100 tokens per stock. Bump it before adding many tickers.
+
+### Learning system — `backend/agent_accuracy.py` + `backend/evaluation.py`
+The learning system measures how well each agent's directional calls translated into real returns, then automatically adjusts `HORIZON_WEIGHTS` over time.
+
+- **Forecast outcomes** — `db.store_thesis()` calls `record_forecast_outcome()`, which inserts one pending row per horizon into `forecast_outcome` for every new thesis. Horizons tracked: `1m` (30-day fast-track — uses 3m base_return_pct as direction proxy), `3m` (91d), `6m` (182d), `12m` (365d). The 1m row exists specifically to get the first accuracy signal ~30 days post-thesis rather than waiting 91 days.
+- **Evaluation** — `backend/evaluation.py` resolves matured rows: fetches the real price change via yfinance, computes `realised_return_pct`, `direction_match`, and benchmark-relative return. `HORIZON_DAYS = {"1m": 30, "3m": 91, "6m": 182, "12m": 365}`. Runs as a daily APScheduler job.
+- **Per-agent accuracy** (`agent_accuracy.py`) — `rebuild_all()` joins `forecast_outcome → investment_thesis → agent_signal` for 30/60/90-day windows, computing directional hit rate, Spearman score-return correlation, and a bounded `suggested_weight_adj` per (agent, horizon) pair. Results written to the `agent_accuracy` SQLite table. Baseline hit rate = 55%; agents above 60% are "strong", below 50% are "weak".
+- **Phase 2 recalibration** — `apply_weight_adjustments()` reads `suggested_weight_adj` and applies a blended update: `new = current × (1 + 0.20 × adj)`. Hard-capped at [50%, 200%] of the factory default per weight. Persisted to the `calibrated_weights` table. Runs as an APScheduler cron job every **Monday 02:00 UTC** (`auto_recalibrate_weights`). `load_calibrated_weights()` is called at startup after `init_db()` to restore the latest calibration.
+- **Score buckets** — `_compute_score_buckets()` tracks what composite score ranges (0–50, 50–60, …, 90–100) actually returned per horizon. Written to `score_bucket` table. Used by the Learning tab to show calibration gaps.
+- **API endpoints** (all require auth):
+  - `GET /v1/learning/summary?window_days=90` — full learning summary (hit rates, strong/weak agents, score buckets)
+  - `POST /v1/learning/rebuild` — recompute accuracy stats from raw data
+  - `GET /v1/learning/weights` — current vs default weights with delta %
+  - `POST /v1/learning/weights/recalibrate` — apply suggested adjustments immediately
+  - `POST /v1/learning/weights/reset` — restore factory defaults and clear calibration history
+- **Factory defaults** are snapshotted at import time in `_DEFAULT_WEIGHTS = copy.deepcopy(HORIZON_WEIGHTS)` so reset is always available.
 
 ### SEC EDGAR insider transactions — `backend/insider_transactions.py`
 - Fetches Form 4 filings via SEC EDGAR for any ticker. Rate-limited to 0.12s between requests (under SEC's 10 req/s cap). Requires `EDGAR_USER_AGENT` env var (defaults to a courtesy string if unset).
@@ -58,10 +74,12 @@ StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-pr
 - **Confidence calibration** — `compute_confidence_calibration` adds a `buckets` key to `/api/predictions/calibration`: per-confidence hit rate vs `CONFIDENCE_PRIOR_HIT_RATE` ({high: 0.75, medium: 0.62, low: 0.55}), MAE, and ECE (expected calibration error — lower is better, <0.05 ≈ well-calibrated). Rendered as `ConfidenceCalibrationTile` on the Predictions tab.
 
 ### Frontend — `frontend/`
-- `index.html` + `react-app.js` (~2.6k lines) is the active app; `app.js` / `legacy-app.js` / `legacy.html` are older fallbacks (`/legacy` route). The active SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
+- `index.html` + `react-app.js` (~3960 lines) is the entire active app. The SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
+- `frontend/react-app.js` contains a `FLAG_TOOLTIPS` constant covering all `QualityFlag` enum values. Quality flags are rendered as amber pills in the thesis detail view when present.
 - **Rebuilding Tailwind CSS:** run `./node_modules/.bin/tailwindcss -i tailwind.input.css -o frontend/tailwind.css --minify` from the repo root whenever you add new Tailwind classes to `react-app.js` or `index.html`. After regenerating: recompute the SRI hash (`python3 -c "import hashlib,base64,sys; d=open('frontend/tailwind.css','rb').read(); print('sha256-'+base64.b64encode(hashlib.sha256(d).digest()).decode())"`) and update the `integrity=` attribute in `index.html`. The config lives in `tailwind.config.js` at the repo root.
-- Version string in `index.html` (`<title>StockLens vX.Y.Z`) and the `?v=` cache-buster on `react-app.js` are hand-edited — there is no build that injects them.
+- The `?v=` cache-buster and page title in `index.html` use the `__APP_VERSION__` placeholder, which the server injects from `package.json` at runtime. **Version bumps only require updating `package.json`** — no hand-editing of `index.html` needed.
 - `fetch` uses `API = ""` (relative paths), so the SPA must be served from the same origin as the FastAPI backend in production.
+- The `/legacy` route (previously serving old UI files) now **301-redirects to `/`**. The files `frontend/app.js`, `frontend/legacy-app.js`, and `frontend/legacy.html` have been deleted.
 
 ### Deploy / runtime
 - `Dockerfile` is single-stage Python 3.12; no frontend build runs. `docker-entrypoint.sh` symlinks every JSON state file and the SQLite DB from `backend/` into `$DATA_DIR` (the Fly volume), copying seed values once if the volume is empty. Don't open these files via the symlink target during local dev if the volume isn't mounted — keep them where they are in `backend/` for local runs.
@@ -108,7 +126,9 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 - **Always check recent git commits** before making changes (`git log --oneline -15`) to avoid reverting work already merged.
 - **PR workflow:** squash-merge every PR, then delete the branch. GitHub auto-deletes on squash merge if the repo setting is on; otherwise `git push origin --delete <branch>`. Always rebase the working branch onto `origin/main` before opening a PR to avoid dirty merge state.
 - **State files vs symlinks.** In production, `backend/users.json` etc. are symlinks into `/app/data`. Editing them locally via the symlink path will silently write into your local `data/` directory once `DATA_DIR` is set — be deliberate about which copy you're touching when reproducing prod bugs.
-- **Version bumps are manual.** Change the `<title>` and the `?v=` query in `index.html` together; otherwise browsers serve stale `react-app.js`.
+- **Version bumps:** update `package.json` only — the version is injected at runtime into the page title and asset URLs via `__APP_VERSION__`. Run the version metadata tests (`python -m pytest tests/test_version_metadata.py`) to verify.
 - **Two LLM models, two cost profiles.** Generating predictions for a large watchlist on the Sonnet thesis model is significantly more expensive than the Haiku default — keep them separate.
-- **Two recommendation engines with different sources of truth.** `_build_recommendations` (Signals tab) reads `paper_portfolio.json` and prediction scores; `_build_recommendation_alert_snapshot` (Alerts) reads `portfolio.json` + the watchlist and uses the 10-agent thesis. Phase 1 unifies the "already held" check across both by including paper holdings in the alert snapshot's skip list; Phase 2 wires the market-regime gate into both. Alert snapshot requires ≥5 positive agents (5-of-10). Keep these two engines in sync if you add new BUY filters to one.
+- **Two recommendation engines with different sources of truth.** `_build_recommendations` (Signals tab) reads `paper_portfolio.json` and prediction scores; `_build_recommendation_alert_snapshot` (Alerts) reads `portfolio.json` + the watchlist and uses the multi-agent thesis. Phase 1 unifies the "already held" check across both by including paper holdings in the alert snapshot's skip list; Phase 2 wires the market-regime gate into both. Alert snapshot requires ≥5 positive agents. Keep these two engines in sync if you add new BUY filters to one.
+- **Learning system weight mutations are live.** `HORIZON_WEIGHTS` is mutated in-place by `apply_weight_adjustments()`. Changes take effect on the next thesis run without restart. If you're debugging unexpected scores, check `GET /v1/learning/weights` to see if weights have drifted from factory defaults. Use `POST /v1/learning/weights/reset` to restore defaults.
+- **1m forecast rows are direction proxies only.** The 1m `forecast_outcome` row created by `store_thesis()` uses the 3m `base_return_pct` as the direction proxy (not a real 1m forecast). It exists solely to feed accuracy data back to the learning system 30 days sooner. Don't treat `forecast_return_pct` on 1m rows as a genuine 1-month price target.
 - **Backtest harness lives in `backend/backtest_phase4.py`, NOT main.py.** Reachable via `/api/recommendations/backtest?lookback_days=90&sensitivity=true&refit_curve=true`. The harness reads `predictions.json` + yfinance prices and replays the Phase 1-3 BUY/SELL rules — it does **not** call the multi-agent orchestrator (too expensive over hundreds of dates). When you change a rule in `_build_recommendations`, mirror it in `backtest_phase4._simulate_exit` / the sizing block, or backtest results will silently drift from reality. The sensitivity sweep uses `_prefetch_market_data` to fetch SPY/VIX/tickers once and pass a `_market_cache` to each config — don't bypass this or the sweep will hit yfinance rate limits at 36× concurrency.
