@@ -321,6 +321,31 @@ CREATE TABLE IF NOT EXISTS calibrated_weights (
     weights_json    TEXT NOT NULL,
     deltas_json     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS earnings_events (
+    event_id            TEXT PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    company_name        TEXT,
+    report_date         TEXT,
+    accession           TEXT UNIQUE NOT NULL,
+    press_release_url   TEXT,
+    beat_miss           TEXT,
+    eps_actual          REAL,
+    eps_estimate        REAL,
+    eps_surprise_pct    REAL,
+    revenue_actual      REAL,
+    revenue_estimate    REAL,
+    guidance            TEXT,
+    thesis_impact       TEXT,
+    analysis_json       TEXT,
+    digest_sent         INTEGER DEFAULT 0,
+    reminder_sent       INTEGER DEFAULT 0,
+    detected_at         TEXT,
+    analysed_at         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_earnings_ticker_date
+    ON earnings_events(ticker, report_date DESC);
 """
 
 
@@ -377,6 +402,8 @@ def prune_agent_history() -> dict[str, int]:
         pred_snapshot_cur = conn.execute("DELETE FROM prediction_snapshot WHERE prediction_date < ?", (cutoff[:10],))
         pred_run_cur = conn.execute("DELETE FROM prediction_run WHERE started_at < ?", (cutoff,))
         pred_cal_cur = conn.execute("DELETE FROM prediction_calibration WHERE generated_at < ?", (cutoff,))
+        earnings_cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        earnings_cur = conn.execute("DELETE FROM earnings_events WHERE detected_at < ?", (earnings_cutoff,))
     return {
         "forecast_outcomes": outcome_cur.rowcount or 0,
         "investment_theses": thesis_cur.rowcount or 0,
@@ -1809,3 +1836,90 @@ def list_calibration_history(limit: int = 10) -> list[dict]:
             (safe_limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Earnings events helpers
+# ---------------------------------------------------------------------------
+
+def upsert_earnings_event(event: dict) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO earnings_events
+                (event_id, ticker, company_name, report_date, accession,
+                 press_release_url, beat_miss, eps_actual, eps_estimate,
+                 eps_surprise_pct, revenue_actual, revenue_estimate,
+                 guidance, thesis_impact, analysis_json, detected_at, analysed_at)
+            VALUES (:event_id, :ticker, :company_name, :report_date, :accession,
+                    :press_release_url, :beat_miss, :eps_actual, :eps_estimate,
+                    :eps_surprise_pct, :revenue_actual, :revenue_estimate,
+                    :guidance, :thesis_impact, :analysis_json, :detected_at, :analysed_at)
+            ON CONFLICT(accession) DO UPDATE SET
+                beat_miss=excluded.beat_miss,
+                eps_actual=excluded.eps_actual,
+                eps_estimate=excluded.eps_estimate,
+                eps_surprise_pct=excluded.eps_surprise_pct,
+                revenue_actual=excluded.revenue_actual,
+                revenue_estimate=excluded.revenue_estimate,
+                guidance=excluded.guidance,
+                thesis_impact=excluded.thesis_impact,
+                analysis_json=excluded.analysis_json,
+                analysed_at=excluded.analysed_at
+            """,
+            event,
+        )
+
+
+def get_earnings_event_by_accession(accession: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM earnings_events WHERE accession = ?", (accession,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_recent_earnings_events(ticker: str | None = None, days: int = 14) -> list[dict]:
+    """Return recent earnings events, newest first. Pass ticker=None for all watchlist."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, days))).isoformat()[:10]
+    with get_conn() as conn:
+        if ticker:
+            rows = conn.execute(
+                """
+                SELECT * FROM earnings_events
+                WHERE ticker = ? AND report_date >= ?
+                ORDER BY report_date DESC, detected_at DESC
+                LIMIT 50
+                """,
+                (ticker.upper(), cutoff),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM earnings_events
+                WHERE report_date >= ?
+                ORDER BY report_date DESC, detected_at DESC
+                LIMIT 100
+                """,
+                (cutoff,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_earnings_reminder_sent(event_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE earnings_events SET reminder_sent = 1 WHERE event_id = ?",
+            (event_id,),
+        )
+
+
+def mark_earnings_digest_sent(event_ids: list[str]) -> None:
+    if not event_ids:
+        return
+    placeholders = ",".join("?" * len(event_ids))
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE earnings_events SET digest_sent = 1 WHERE event_id IN ({placeholders})",  # nosec B608
+            event_ids,
+        )

@@ -30,6 +30,7 @@
     ["backtest", "Backtest"],
     ["recommendations", "Signals"],
     ["alerts", "Alerts"],
+    ["earnings", "Earnings"],
     ["portfolio", "Portfolio"],
     ["paper", "Paper P&L"],
     ["learning", "Learning"],
@@ -3173,6 +3174,7 @@
       backtest: h(Backtest),
       recommendations: h(Recommendations),
       alerts: h(Alerts),
+      earnings: h(EarningsIntelligence),
       portfolio: h(Portfolio, { openDetail }),
       paper: h(PaperPnL),
       learning: h(Learning),
@@ -3378,6 +3380,7 @@
     { tab: "Backtest", icon: "🔁", desc: "Replays the mechanical signal model against 4–6 weeks of historical data to measure directional accuracy. The Goal & Reward card breaks down accuracy by VIX regime, momentum regime, and prediction direction." },
     { tab: "Signals", icon: "📡", desc: "BUY/SELL recommendations generated from the latest predictions using Phase 1–5 portfolio construction rules: score floor, cooldown, market regime gate, position sizing, sector caps, and VaR budget." },
     { tab: "Alerts", icon: "🔔", desc: "Scheduled alert snapshots that fire WhatsApp/email notifications when a ticker crosses BUY/SELL thresholds. Requires ≥5 of 10 agents net-positive for a BUY alert." },
+    { tab: "Earnings", icon: "📊", desc: "Real-time earnings intelligence. Monitors SEC EDGAR 8-K Item 2.02 filings every 20 minutes. When an earnings press release is detected, Sonnet analyses beat/miss, EPS surprise, guidance, thesis impact, and cross-sector effects — then sends WhatsApp + email immediately. Also sends a morning reminder before markets open on earnings day." },
     { tab: "Portfolio", icon: "💼", desc: "Tracks your real portfolio via CSV or PDF import. Shows cost basis, current value, unrealised P&L per position. Reset and re-import if positions double." },
     { tab: "Paper P&L", icon: "📝", desc: "Simulated paper trading portfolio that auto-executes BUY/SELL signals from the Signals tab. Useful for tracking the model's hypothetical performance without real money." },
     { tab: "Learning", icon: "🧠", desc: "Live accuracy tracking for all 21 agents across 3m / 6m / 12m horizons. Shows directional hit rates, score calibration buckets, and current agent weights vs. factory defaults. Recalibrates automatically every Monday at 02:00 UTC." },
@@ -3392,6 +3395,199 @@
     { name: "Wikipedia", icon: "📖", desc: "Index constituent lists (S&P 500, NASDAQ 100, FTSE 100, FTSE 250) refreshed on startup. Falls back to a hardcoded seed list if Wikipedia is unreachable." },
     { name: "Anthropic Claude", icon: "🤖", desc: "Two models in use: Claude Haiku (fast, cheaper) for daily predictions and screener analysis; Claude Sonnet (higher quality, higher cost) for investment thesis narrative generation." },
   ];
+
+  // ──────────────────────────────────────────────────────────────
+  // Earnings Intelligence tab
+  // ──────────────────────────────────────────────────────────────
+
+  function EarningsIntelligence() {
+    const [events, setEvents] = React.useState([]);
+    const [calendar, setCalendar] = React.useState([]);
+    const [loading, setLoading] = React.useState(true);
+    const [calLoading, setCalLoading] = React.useState(true);
+    const [expanded, setExpanded] = React.useState(null);
+    const [checking, setChecking] = React.useState(false);
+    const [checkMsg, setCheckMsg] = React.useState("");
+
+    React.useEffect(() => {
+      api("/v1/earnings/recent?days=21")
+        .then(d => setEvents(d.events || []))
+        .catch(() => setEvents([]))
+        .finally(() => setLoading(false));
+      api("/v1/earnings/calendar?days_ahead=10")
+        .then(d => setCalendar(d.calendar || []))
+        .catch(() => setCalendar([]))
+        .finally(() => setCalLoading(false));
+    }, []);
+
+    function triggerCheck() {
+      setChecking(true);
+      setCheckMsg("");
+      api("/v1/earnings/check", { method: "POST" })
+        .then(() => { setCheckMsg("Check started — results will appear once filings are detected."); })
+        .catch(() => { setCheckMsg("Check failed — see server logs."); })
+        .finally(() => setChecking(false));
+    }
+
+    const beatColor = {
+      BEAT: "text-emerald-400 border-emerald-400/40 bg-emerald-400/10",
+      MISS: "text-red-400 border-red-400/40 bg-red-400/10",
+      IN_LINE: "text-pulse-muted border-pulse-line bg-pulse-panel",
+      UNKNOWN: "text-pulse-muted border-pulse-line bg-pulse-panel",
+    };
+    const signalColor = {
+      POSITIVE: "text-emerald-400 border-emerald-400/40 bg-emerald-400/10",
+      NEGATIVE: "text-red-400 border-red-400/40 bg-red-400/10",
+      NEUTRAL: "text-pulse-muted border-pulse-line bg-pulse-panel",
+    };
+    const guidanceColor = {
+      RAISED: "text-emerald-400",
+      MAINTAINED: "text-pulse-muted",
+      LOWERED: "text-red-400",
+      WITHDRAWN: "text-amber-400",
+      UNKNOWN: "text-pulse-muted",
+    };
+
+    return h("div", { className: "space-y-6 p-4 max-w-5xl mx-auto" },
+      h(SectionHead, {
+        title: "Earnings Intelligence",
+        kicker: "Real-time 8-K monitoring",
+        subtitle: "Monitors SEC EDGAR 8-K Item 2.02 filings for watchlist tickers. When an earnings press release is detected, Sonnet analyses beat/miss, guidance, thesis impact, and cross-sector effects — then sends a WhatsApp and email immediately.",
+        actions: [
+          h("button", {
+            onClick: triggerCheck,
+            disabled: checking,
+            className: cx(
+              "rounded border px-3 py-1.5 font-mono text-xs transition",
+              checking
+                ? "border-pulse-line text-pulse-muted cursor-not-allowed"
+                : "border-pulse-cyan/50 text-pulse-cyan hover:bg-pulse-cyan/10"
+            ),
+          }, checking ? "Checking..." : "Check Now"),
+        ],
+      }),
+
+      checkMsg && h("p", { className: "font-mono text-xs text-pulse-muted" }, checkMsg),
+
+      // Upcoming earnings calendar
+      h("div", null,
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-3" }, "Upcoming Earnings"),
+        calLoading
+          ? h("p", { className: "font-mono text-xs text-pulse-muted" }, "Loading calendar…")
+          : calendar.length === 0
+          ? h("p", { className: "font-mono text-xs text-pulse-muted" }, "No upcoming earnings in the next 10 days for your watchlist.")
+          : h("div", { className: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" },
+              calendar.map(item => h("div", {
+                key: item.ticker,
+                className: "rounded-lg border border-pulse-line bg-pulse-card px-4 py-3 space-y-1",
+              },
+                h("div", { className: "flex items-center justify-between" },
+                  h("span", { className: "font-mono text-sm font-semibold text-pulse-ink" }, item.ticker),
+                  h("span", { className: "font-mono text-[10px] text-pulse-muted" }, item.earnings_date),
+                ),
+                h("div", { className: "font-mono text-xs text-pulse-muted truncate" }, item.company_name),
+                item.eps_estimate != null && h("div", { className: "font-mono text-xs text-pulse-cyan" },
+                  `Est. EPS: $${Number(item.eps_estimate).toFixed(2)}`
+                ),
+                item.sector && h("div", { className: "font-mono text-[10px] text-pulse-muted" }, item.sector),
+              ))
+            )
+      ),
+
+      // Recent earnings events
+      h("div", null,
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-3" }, "Recent Earnings Reports"),
+        loading
+          ? h("p", { className: "font-mono text-xs text-pulse-muted" }, "Loading…")
+          : events.length === 0
+          ? h("div", { className: "rounded-lg border border-pulse-line bg-pulse-card px-4 py-8 text-center" },
+              h("p", { className: "font-mono text-sm text-pulse-muted" }, "No earnings reports detected yet."),
+              h("p", { className: "font-mono text-xs text-pulse-muted mt-1" }, "Click \"Check Now\" to scan for recent 8-K filings, or wait for the automatic check.")
+            )
+          : h("div", { className: "space-y-3" },
+              events.map(ev => {
+                const isOpen = expanded === ev.event_id;
+                const bm = ev.beat_miss || "UNKNOWN";
+                const si = ev.thesis_impact || "NEUTRAL";
+                const guid = ev.guidance || "UNKNOWN";
+                const signalEmoji = { POSITIVE: "✅", NEGATIVE: "❌", NEUTRAL: "➡️" }[si] || "";
+
+                return h("div", {
+                  key: ev.event_id,
+                  className: "rounded-lg border border-pulse-line bg-pulse-card",
+                },
+                  // Header row — always visible
+                  h("div", {
+                    className: "flex flex-wrap items-center gap-3 px-4 py-3 cursor-pointer hover:bg-pulse-panel/50 transition",
+                    onClick: () => setExpanded(isOpen ? null : ev.event_id),
+                  },
+                    h("span", { className: "font-mono text-sm font-semibold text-pulse-ink w-16 shrink-0" }, ev.ticker),
+                    h("span", { className: cx("inline-block rounded border px-2 py-0.5 font-mono text-[10px] font-semibold", beatColor[bm] || beatColor.UNKNOWN) }, bm),
+                    h("span", { className: cx("inline-block rounded border px-2 py-0.5 font-mono text-[10px] font-semibold", signalColor[si] || signalColor.NEUTRAL) },
+                      `${signalEmoji} ${si}`
+                    ),
+                    h("span", { className: cx("font-mono text-[10px]", guidanceColor[guid] || "text-pulse-muted") },
+                      `Guidance: ${guid}`
+                    ),
+                    ev.eps_actual != null && h("span", { className: "font-mono text-xs text-pulse-ink" },
+                      `EPS $${Number(ev.eps_actual).toFixed(2)}`
+                      + (ev.eps_estimate != null ? ` vs $${Number(ev.eps_estimate).toFixed(2)} est` : "")
+                      + (ev.eps_surprise_pct != null ? ` (${Number(ev.eps_surprise_pct) >= 0 ? "+" : ""}${Number(ev.eps_surprise_pct).toFixed(1)}%)` : "")
+                    ),
+                    h("span", { className: "ml-auto font-mono text-[10px] text-pulse-muted" }, ev.report_date || ""),
+                    h("span", { className: "font-mono text-[10px] text-pulse-muted" }, isOpen ? "▲" : "▼"),
+                  ),
+
+                  // Expanded detail
+                  isOpen && h("div", { className: "border-t border-pulse-line px-4 py-3 space-y-3" },
+                    ev.company_name && h("p", { className: "font-mono text-xs text-pulse-muted" }, ev.company_name),
+
+                    ev.pre_market_headline && h("p", { className: "font-mono text-sm font-medium text-pulse-ink" }, ev.pre_market_headline),
+
+                    ev.thesis_reasoning && h("p", { className: "font-mono text-xs text-pulse-muted leading-relaxed" }, ev.thesis_reasoning),
+
+                    ev.key_highlights && ev.key_highlights.length > 0 && h("div", null,
+                      h("p", { className: "font-mono text-[10px] uppercase tracking-wider text-pulse-cyan mb-1" }, "Key highlights"),
+                      h("ul", { className: "space-y-0.5" },
+                        ev.key_highlights.map((hl, i) =>
+                          h("li", { key: i, className: "font-mono text-xs text-pulse-muted" }, `• ${hl}`)
+                        )
+                      )
+                    ),
+
+                    ev.cross_sector_impacts && ev.cross_sector_impacts.length > 0 && h("div", null,
+                      h("p", { className: "font-mono text-[10px] uppercase tracking-wider text-pulse-cyan mb-1" }, "Cross-sector impact"),
+                      h("div", { className: "space-y-1" },
+                        ev.cross_sector_impacts.map((ci, i) =>
+                          h("div", { key: i, className: "flex items-start gap-2 font-mono text-xs" },
+                            h("span", { className: "font-semibold text-pulse-ink w-14 shrink-0" }, ci.ticker || ""),
+                            h("span", {
+                              className: cx(
+                                "rounded border px-1.5 py-0.5 text-[10px] shrink-0",
+                                ci.impact === "POSITIVE" ? "border-emerald-400/40 text-emerald-400" :
+                                ci.impact === "NEGATIVE" ? "border-red-400/40 text-red-400" :
+                                "border-pulse-line text-pulse-muted"
+                              )
+                            }, ci.impact || ""),
+                            h("span", { className: "text-pulse-muted" }, ci.reason || ""),
+                          )
+                        )
+                      )
+                    ),
+
+                    ev.press_release_url && h("a", {
+                      href: ev.press_release_url,
+                      target: "_blank",
+                      rel: "noopener noreferrer",
+                      className: "inline-block font-mono text-[10px] text-pulse-cyan hover:underline",
+                    }, "View SEC press release →"),
+                  )
+                );
+              })
+            )
+      ),
+    );
+  }
 
   function Learning() {
     const [data, setData] = useState(null);

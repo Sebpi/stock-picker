@@ -2577,6 +2577,46 @@ async def auto_recalibrate_weights():
         logger.warning("[Learning] Weight recalibration failed: %s", exc)
 
 
+_earnings_watcher_running = False
+
+async def auto_check_earnings():
+    """Check EDGAR for new earnings press releases every 20 min Mon-Fri."""
+    global _earnings_watcher_running
+    if _earnings_watcher_running:
+        return
+    _earnings_watcher_running = True
+    try:
+        import earnings_watcher as _ew
+        watchlist = load_watchlist()
+        if not watchlist:
+            return
+        loop = asyncio.get_event_loop()
+        new_events = await loop.run_in_executor(
+            None, lambda: _ew.check_all_watchlist(watchlist, since_days=3)
+        )
+        if new_events:
+            logger.info("[EarningsWatcher] Processed %d new earnings event(s)", len(new_events))
+    except Exception as exc:
+        logger.error("[EarningsWatcher] auto_check_earnings failed: %s", exc)
+    finally:
+        _earnings_watcher_running = False
+
+
+async def auto_earnings_morning_reminders():
+    """Send WhatsApp earnings reminders at 11:30 UTC (06:30 ET) Mon-Fri."""
+    try:
+        import earnings_watcher as _ew
+        watchlist = load_watchlist()
+        if not watchlist:
+            return
+        loop = asyncio.get_event_loop()
+        sent = await loop.run_in_executor(None, lambda: _ew.send_morning_reminders(watchlist))
+        if sent:
+            logger.info("[EarningsWatcher] Morning reminders sent: %d", sent)
+    except Exception as exc:
+        logger.error("[EarningsWatcher] Morning reminders failed: %s", exc)
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -2689,6 +2729,27 @@ async def startup():
         max_instances=1,
         coalesce=True,
     )
+    # Earnings intelligence jobs
+    scheduler.add_job(
+        auto_check_earnings,
+        "cron",
+        day_of_week="mon-fri",
+        hour="8-22",
+        minute="*/20",
+        id="earnings_watcher",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        auto_earnings_morning_reminders,
+        "cron",
+        day_of_week="mon-fri",
+        hour=11,
+        minute=30,
+        id="earnings_reminders",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
 
     # Start Finnhub real-time price feed (no-op if FINNHUB_API_KEY unset)
@@ -2701,6 +2762,7 @@ async def startup():
         print(f"[Thesis] Multi-agent thesis scheduled every {_thesis_interval} minutes.")
     if _eval_enabled:
         print(f"[Evaluation] Forecast evaluation scheduled every {_eval_interval} minutes.")
+    print("[Earnings] Earnings watcher runs every 20 min Mon-Fri 08:00-22:00 UTC.")
 
 async def shutdown():
     scheduler.shutdown()
@@ -8012,6 +8074,86 @@ def v1_learning_weights_reset(
     import agent_accuracy as _aa
     _aa.reset_to_default_weights()
     return {"ok": True, "message": "Agent weights reset to defaults", "weights": _aa.get_weight_status()}
+
+
+# ── Earnings Intelligence endpoints ───────────────────────────────────────────
+
+@app.get("/v1/earnings/recent")
+@limiter.limit("30/minute")
+def v1_earnings_recent(
+    request: Request,
+    ticker: Optional[str] = None,
+    days: int = 14,
+    current_user: str = Depends(get_current_user),
+):
+    """Return recent earnings events with LLM analysis. ticker=None returns all watchlist events."""
+    import db as _db
+    if ticker:
+        try:
+            ticker = _validate_ticker(ticker)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid ticker")
+    days = max(1, min(int(days), 90))
+    events = _db.get_recent_earnings_events(ticker, days=days)
+    result = []
+    for ev in events:
+        analysis = {}
+        try:
+            analysis = json.loads(ev.get("analysis_json") or "{}")
+        except Exception:
+            pass
+        result.append({
+            "event_id": ev["event_id"],
+            "ticker": ev["ticker"],
+            "company_name": ev.get("company_name"),
+            "report_date": ev.get("report_date"),
+            "beat_miss": ev.get("beat_miss", "UNKNOWN"),
+            "eps_actual": ev.get("eps_actual"),
+            "eps_estimate": ev.get("eps_estimate"),
+            "eps_surprise_pct": ev.get("eps_surprise_pct"),
+            "revenue_actual": ev.get("revenue_actual"),
+            "revenue_estimate": ev.get("revenue_estimate"),
+            "guidance": ev.get("guidance", "UNKNOWN"),
+            "thesis_impact": ev.get("thesis_impact", "NEUTRAL"),
+            "pre_market_headline": analysis.get("pre_market_headline"),
+            "thesis_reasoning": analysis.get("thesis_reasoning"),
+            "key_highlights": analysis.get("key_highlights", []),
+            "cross_sector_impacts": analysis.get("cross_sector_impacts", []),
+            "press_release_url": ev.get("press_release_url"),
+            "detected_at": ev.get("detected_at"),
+            "analysed_at": ev.get("analysed_at"),
+        })
+    return {"events": result, "count": len(result)}
+
+
+@app.get("/v1/earnings/calendar")
+@limiter.limit("10/minute")
+async def v1_earnings_calendar(
+    request: Request,
+    days_ahead: int = 7,
+    current_user: str = Depends(get_current_user),
+):
+    """Return upcoming earnings dates for watchlist tickers."""
+    import earnings_watcher as _ew
+    days_ahead = max(1, min(int(days_ahead), 30))
+    watchlist = load_watchlist()
+    loop = asyncio.get_event_loop()
+    upcoming = await loop.run_in_executor(
+        None, lambda: _ew.get_upcoming_earnings(watchlist, days_ahead=days_ahead)
+    )
+    return {"calendar": upcoming, "count": len(upcoming), "days_ahead": days_ahead}
+
+
+@app.post("/v1/earnings/check")
+@limiter.limit("5/hour")
+async def v1_earnings_check(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user),
+):
+    """Manually trigger an earnings filing check for the watchlist."""
+    background_tasks.add_task(auto_check_earnings)
+    return {"ok": True, "message": "Earnings check started in background"}
 
 
 async def _init_multiagent_db():
