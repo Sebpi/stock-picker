@@ -8,9 +8,9 @@ Flow per ticker:
   3. Fetch Exhibit 99.1 (earnings press release HTML) from the filing index
   4. Strip HTML, get plain text
   5. Get EPS/revenue estimates from yfinance
-  6. Call THESIS_MODEL (Sonnet) for structured JSON analysis
+  6. Call Opus 4.8 for structured JSON analysis
   7. Persist to earnings_events SQLite table
-  8. Send immediate WhatsApp + email notification
+  8. Send immediate email notification
 """
 from __future__ import annotations
 
@@ -300,7 +300,6 @@ def analyse_earnings(
             f'  "pre_market_headline": "<15-word headline>",\n'
             f'  "key_highlights": ["<bullet 1>", "<bullet 2>", "<bullet 3>"],\n'
             f'  "cross_sector_impacts": [{{"ticker": "TICKER", "impact": "POSITIVE|NEGATIVE|NEUTRAL", "reason": "<short>"}}],\n'
-            f'  "whatsapp_summary": "<2-3 line message with emoji, key metrics, signal>"\n'
             f'}}'
         )
 
@@ -397,15 +396,6 @@ def get_post_earnings_sentiment(ticker: str, company_name: str) -> dict[str, Any
 # Notification helpers (inline to avoid circular import from main.py)
 # ---------------------------------------------------------------------------
 
-def _send_whatsapp(msg: str) -> bool:
-    try:
-        from sentiment_agent import send_whatsapp as _wa
-        return bool(_wa(msg))
-    except Exception as exc:
-        logger.warning("[earnings_watcher] WhatsApp send failed: %s", exc)
-        return False
-
-
 def _send_email(subject: str, body: str) -> bool:
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
@@ -436,7 +426,7 @@ def _notify_earnings_result(
     analysis: dict | None,
     sentiment: dict | None = None,
 ) -> None:
-    """Send WhatsApp + email immediately after earnings analysis completes."""
+    """Send email immediately after earnings analysis completes."""
     ticker = event["ticker"]
     company = event.get("company_name", ticker)
     beat_miss = event.get("beat_miss", "UNKNOWN")
@@ -444,42 +434,23 @@ def _notify_earnings_result(
     thesis_impact = event.get("thesis_impact", "NEUTRAL")
     signal_emoji = {"POSITIVE": "✅", "NEGATIVE": "❌", "NEUTRAL": "➡️"}.get(thesis_impact, "")
 
-    if analysis and analysis.get("whatsapp_summary"):
-        wa_msg = analysis["whatsapp_summary"]
-    else:
-        eps_line = ""
-        if event.get("eps_actual") is not None and event.get("eps_estimate") is not None:
-            eps_line = f"\nEPS: ${event['eps_actual']:.2f} vs ${event['eps_estimate']:.2f} est"
-            if event.get("eps_surprise_pct") is not None:
-                eps_line += f" ({event['eps_surprise_pct']:+.1f}%)"
-        wa_msg = (
-            f"🔔 [{ticker}] Earnings: {beat_miss}{eps_line}\n"
-            f"Guidance: {guidance} | Signal: {thesis_impact} {signal_emoji}"
-        ).strip()
+    eps_line = ""
+    if event.get("eps_actual") is not None and event.get("eps_estimate") is not None:
+        eps_line = f"\nEPS: ${event['eps_actual']:.2f} vs ${event['eps_estimate']:.2f} est"
+        if event.get("eps_surprise_pct") is not None:
+            eps_line += f" ({event['eps_surprise_pct']:+.1f}%)"
 
-    # Append sentiment block if available
-    if sentiment and sentiment.get("score") is not None:
-        direction = sentiment.get("direction", "Neutral")
-        score = sentiment.get("score", 50)
-        price_chg = sentiment.get("price_change_pct")
-        sentiment_summary = sentiment.get("summary", "")
-        dir_emoji = "📈" if direction == "Bullish" else ("📉" if direction == "Bearish" else "➡️")
-        price_line = f"Up {price_chg:+.1f}% AH — " if price_chg and price_chg > 0 else (
-            f"Down {price_chg:.1f}% AH — " if price_chg and price_chg < 0 else ""
-        )
-        wa_msg += (
-            f"\n\n📊 Sentiment: {direction} ({score}/100) {dir_emoji}\n"
-            f"{price_line}{sentiment_summary}"
-        )
-
-    _send_whatsapp(wa_msg)
+    summary = (
+        f"🔔 [{ticker}] Earnings: {beat_miss}{eps_line}\n"
+        f"Guidance: {guidance} | Signal: {thesis_impact} {signal_emoji}"
+    ).strip()
 
     reasoning = (analysis or {}).get("thesis_reasoning", "")
     highlights = (analysis or {}).get("key_highlights", [])
     cross = (analysis or {}).get("cross_sector_impacts", [])
     headline = (analysis or {}).get("pre_market_headline", f"{ticker} earnings")
 
-    body = f"{headline}\n\n{company} ({ticker})\n{wa_msg}\n"
+    body = f"{headline}\n\n{company} ({ticker})\n{summary}\n"
     if reasoning:
         body += f"\nThesis impact:\n{reasoning}\n"
     if highlights:
@@ -583,7 +554,7 @@ def check_all_watchlist(watchlist: list[str], since_days: int = 3) -> list[dict]
 
 def send_morning_reminders(watchlist: list[str]) -> int:
     """
-    Send WhatsApp + email reminders for tickers reporting today or tomorrow.
+    Send email reminders for tickers reporting today or tomorrow.
     Returns count sent.
     """
     today = datetime.now(timezone.utc).date()
@@ -610,7 +581,6 @@ def send_morning_reminders(watchlist: list[str]) -> int:
         ).strip()
 
         try:
-            _send_whatsapp(msg)
             _send_email(
                 subject=f"[StockLens] Earnings {day_label}: {ticker} — {company}",
                 body=msg,

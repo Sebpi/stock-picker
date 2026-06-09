@@ -3380,7 +3380,7 @@
     { tab: "Backtest", icon: "🔁", desc: "Replays the mechanical signal model against 4–6 weeks of historical data to measure directional accuracy. The Goal & Reward card breaks down accuracy by VIX regime, momentum regime, and prediction direction." },
     { tab: "Signals", icon: "📡", desc: "BUY/SELL recommendations generated from the latest predictions using Phase 1–5 portfolio construction rules: score floor, cooldown, market regime gate, position sizing, sector caps, and VaR budget." },
     { tab: "Alerts", icon: "🔔", desc: "Scheduled alert snapshots that fire WhatsApp/email notifications when a ticker crosses BUY/SELL thresholds. Requires ≥5 of 10 agents net-positive for a BUY alert." },
-    { tab: "Earnings", icon: "📊", desc: "Real-time earnings intelligence. Monitors SEC EDGAR 8-K Item 2.02 filings every 20 minutes. When an earnings press release is detected, Sonnet analyses beat/miss, EPS surprise, guidance, thesis impact, and cross-sector effects — then sends WhatsApp + email immediately. Also sends a morning reminder before markets open on earnings day." },
+    { tab: "Earnings", icon: "📊", desc: "Real-time earnings intelligence. Monitors SEC EDGAR 8-K Item 2.02 filings every 20 minutes. When an earnings press release is detected, Opus 4.8 analyses beat/miss, EPS surprise, guidance, thesis impact, and cross-sector effects — then sends an email immediately. Also sends a morning reminder email before markets open on earnings day." },
     { tab: "Portfolio", icon: "💼", desc: "Tracks your real portfolio via CSV or PDF import. Shows cost basis, current value, unrealised P&L per position. Reset and re-import if positions double." },
     { tab: "Paper P&L", icon: "📝", desc: "Simulated paper trading portfolio that auto-executes BUY/SELL signals from the Signals tab. Useful for tracking the model's hypothetical performance without real money." },
     { tab: "Learning", icon: "🧠", desc: "Live accuracy tracking for all 21 agents across 3m / 6m / 12m horizons. Shows directional hit rates, score calibration buckets, and current agent weights vs. factory defaults. Recalibrates automatically every Monday at 02:00 UTC." },
@@ -3470,7 +3470,7 @@
       h(SectionHead, {
         title: "Earnings Intelligence",
         kicker: "Real-time 8-K monitoring",
-        subtitle: "Monitors SEC EDGAR 8-K Item 2.02 filings for watchlist tickers. When an earnings press release is detected, Sonnet analyses beat/miss, guidance, thesis impact, and cross-sector effects — then sends a WhatsApp and email immediately.",
+        subtitle: "Monitors SEC EDGAR 8-K Item 2.02 filings for watchlist tickers. When an earnings press release is detected, Opus 4.8 analyses beat/miss, guidance, thesis impact, and cross-sector effects — then sends an email immediately.",
         actions: [
           h("button", {
             onClick: sendTestEmail,
