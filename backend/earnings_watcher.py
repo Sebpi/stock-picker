@@ -265,10 +265,10 @@ def analyse_earnings(
     estimates: dict[str, Any],
     watchlist: list[str],
 ) -> dict[str, Any] | None:
-    """Call Sonnet with the press release and return a structured earnings analysis dict."""
+    """Call Opus 4.8 with the press release and return a structured earnings analysis dict."""
     try:
         import anthropic
-        model = os.getenv("THESIS_MODEL", "claude-sonnet-4-6")
+        model = os.getenv("EARNINGS_MODEL", "claude-opus-4-8")
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
         eps_est = estimates.get("eps_estimate")
@@ -320,6 +320,80 @@ def analyse_earnings(
 
 
 # ---------------------------------------------------------------------------
+# Post-earnings sentiment snapshot
+# ---------------------------------------------------------------------------
+
+def get_post_earnings_sentiment(ticker: str, company_name: str) -> dict[str, Any]:
+    """
+    Run a quick post-earnings sentiment snapshot using recent news + price action.
+    Returns {score, direction, price_change_pct, summary} or empty dict on failure.
+    """
+    try:
+        import anthropic
+        import yfinance as yf
+
+        # Recent price action (last 2 days)
+        hist = yf.Ticker(ticker).history(period="5d")
+        price_change_pct: float | None = None
+        if len(hist) >= 2:
+            prev_close = float(hist["Close"].iloc[-2])
+            last_close = float(hist["Close"].iloc[-1])
+            if prev_close > 0:
+                price_change_pct = round((last_close - prev_close) / prev_close * 100, 2)
+
+        # Recent news headlines
+        try:
+            news_items = yf.Ticker(ticker).news or []
+            headlines = "; ".join(
+                n.get("content", {}).get("title", "") or n.get("title", "")
+                for n in news_items[:8]
+                if (n.get("content", {}).get("title") or n.get("title", ""))
+            )
+        except Exception:
+            headlines = ""
+
+        price_line = (
+            f"Price change since last close: {price_change_pct:+.1f}%"
+            if price_change_pct is not None
+            else "Price data unavailable"
+        )
+
+        model = os.getenv("THESIS_MODEL", "claude-sonnet-4-6")
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+
+        prompt = (
+            f"You are a quantitative equity analyst. Provide a brief post-earnings sentiment "
+            f"snapshot for {ticker} ({company_name}). Return ONLY a JSON object.\n\n"
+            f"{price_line}\n"
+            f"Recent headlines: {headlines[:2000] or 'none available'}\n\n"
+            f"Return ONLY:\n"
+            f'{{\n'
+            f'  "score": <0-100 where 50=neutral, >60=bullish, <40=bearish>,\n'
+            f'  "direction": "Bullish|Bearish|Neutral",\n'
+            f'  "price_change_pct": <number or null>,\n'
+            f'  "summary": "<2-sentence market reaction summary>"\n'
+            f'}}'
+        )
+
+        resp = client.messages.create(
+            model=model,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw.strip())
+        result = json.loads(raw)
+        if price_change_pct is not None and result.get("price_change_pct") is None:
+            result["price_change_pct"] = price_change_pct
+        return result
+
+    except Exception as exc:
+        logger.warning("[earnings_watcher] Post-earnings sentiment failed for %s: %s", ticker, exc)
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Notification helpers (inline to avoid circular import from main.py)
 # ---------------------------------------------------------------------------
 
@@ -357,7 +431,11 @@ def _send_email(subject: str, body: str) -> bool:
         return False
 
 
-def _notify_earnings_result(event: dict, analysis: dict | None) -> None:
+def _notify_earnings_result(
+    event: dict,
+    analysis: dict | None,
+    sentiment: dict | None = None,
+) -> None:
     """Send WhatsApp + email immediately after earnings analysis completes."""
     ticker = event["ticker"]
     company = event.get("company_name", ticker)
@@ -378,6 +456,21 @@ def _notify_earnings_result(event: dict, analysis: dict | None) -> None:
             f"🔔 [{ticker}] Earnings: {beat_miss}{eps_line}\n"
             f"Guidance: {guidance} | Signal: {thesis_impact} {signal_emoji}"
         ).strip()
+
+    # Append sentiment block if available
+    if sentiment and sentiment.get("score") is not None:
+        direction = sentiment.get("direction", "Neutral")
+        score = sentiment.get("score", 50)
+        price_chg = sentiment.get("price_change_pct")
+        sentiment_summary = sentiment.get("summary", "")
+        dir_emoji = "📈" if direction == "Bullish" else ("📉" if direction == "Bearish" else "➡️")
+        price_line = f"Up {price_chg:+.1f}% AH — " if price_chg and price_chg > 0 else (
+            f"Down {price_chg:.1f}% AH — " if price_chg and price_chg < 0 else ""
+        )
+        wa_msg += (
+            f"\n\n📊 Sentiment: {direction} ({score}/100) {dir_emoji}\n"
+            f"{price_line}{sentiment_summary}"
+        )
 
     _send_whatsapp(wa_msg)
 
@@ -463,7 +556,15 @@ def check_and_analyse_ticker(
 
         _db.upsert_earnings_event(event)
         new_events.append(event)
-        _notify_earnings_result(event, analysis)
+
+        # Get post-earnings sentiment snapshot (best-effort; non-blocking)
+        sentiment: dict | None = None
+        try:
+            sentiment = get_post_earnings_sentiment(ticker, company_name) or None
+        except Exception as exc:
+            logger.warning("[earnings_watcher] Sentiment skipped for %s: %s", ticker, exc)
+
+        _notify_earnings_result(event, analysis, sentiment)
 
     return new_events
 
