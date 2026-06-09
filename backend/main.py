@@ -479,10 +479,8 @@ def serve_index():
 
 @app.get("/legacy", include_in_schema=False)
 def serve_legacy_index():
-    return FileResponse(
-        FRONTEND_DIR / "legacy.html",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
-    )
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/", status_code=301)
 
 @app.get("/static/{filename:path}", include_in_schema=False)
 def serve_static(filename: str):
@@ -1038,7 +1036,14 @@ async def get_info_with_timeout(ticker: str, timeout_sec: float = SEARCH_INFO_TI
 def load_watchlist() -> list[str]:
     if WATCHLIST_FILE.exists():
         try:
-            return json.loads(WATCHLIST_FILE.read_text())
+            raw = json.loads(WATCHLIST_FILE.read_text())
+            valid = []
+            for t in raw:
+                try:
+                    valid.append(_validate_ticker(t))
+                except Exception:
+                    logger.warning("Watchlist: skipping invalid ticker %r", t)
+            return valid
         except Exception as exc:
             logger.error("Corrupt watchlist file, returning empty: %s", exc)
     return []
@@ -2199,8 +2204,8 @@ async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: i
 
 # ── Email body builder ────────────────────────────────────────────────────────
 
-def _build_alert_email(buy_alerts: list, sell_alerts: list, time_str: str, preview: bool = False) -> tuple[str, str]:
-    """Return (subject, body) for a recommendation alert email."""
+def _build_alert_email(buy_alerts: list, sell_alerts: list, time_str: str, preview: bool = False) -> tuple[str, str, str]:
+    """Return (subject, body, sms_body) for a recommendation alert email."""
     buy_tickers  = ", ".join(a["ticker"] for a in buy_alerts)
     sell_tickers = ", ".join(a["ticker"] for a in sell_alerts)
     parts = []
@@ -6018,7 +6023,9 @@ async def _build_recommendations(progress: Optional[callable] = None):
     price_map = {}
     info_map  = {}
     for ticker, info in zip(all_tickers, infos):
-        if not isinstance(info, Exception):
+        if isinstance(info, Exception):
+            logger.warning("[recommendations] Price fetch failed for %s: %s", ticker, info)
+        else:
             price_map[ticker] = _price_from_info(info)
             info_map[ticker]  = info
     for ticker in paper_held:

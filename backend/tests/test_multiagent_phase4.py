@@ -217,12 +217,12 @@ def test_get_thesis_history_limit_clamp():
 # ---------------------------------------------------------------------------
 
 def test_all_quality_flags_have_tooltips():
-    # Read the JS source and check FLAG_TOOLTIPS covers every QualityFlag
-    js_path = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "app.js")
+    # Check FLAG_TOOLTIPS in react-app.js covers every QualityFlag value
+    js_path = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "react-app.js")
     with open(js_path, encoding="utf-8") as f:
         js = f.read()
     for flag in QualityFlag:
-        assert flag.value in js, f"Missing tooltip for {flag.value} in app.js"
+        assert flag.value in js, f"Missing tooltip for {flag.value} in react-app.js"
 
 
 # ---------------------------------------------------------------------------
