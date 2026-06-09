@@ -3364,6 +3364,7 @@
     { tab: "Alerts", icon: "🔔", desc: "Scheduled alert snapshots that fire WhatsApp/email notifications when a ticker crosses BUY/SELL thresholds. Requires ≥5 of 10 agents net-positive for a BUY alert." },
     { tab: "Portfolio", icon: "💼", desc: "Tracks your real portfolio via CSV or PDF import. Shows cost basis, current value, unrealised P&L per position. Reset and re-import if positions double." },
     { tab: "Paper P&L", icon: "📝", desc: "Simulated paper trading portfolio that auto-executes BUY/SELL signals from the Signals tab. Useful for tracking the model's hypothetical performance without real money." },
+    { tab: "Learning", icon: "🧠", desc: "Live accuracy tracking for all 21 agents across 3m / 6m / 12m horizons. Shows directional hit rates, score calibration buckets, and current agent weights vs. factory defaults. Recalibrates automatically every Monday at 02:00 UTC." },
     { tab: "Help", icon: "❓", desc: "This page." },
   ];
 
@@ -3785,6 +3786,37 @@
             ["VaR cap", "Portfolio 95% 1-month Value-at-Risk is capped at 8% (configurable). Uses pairwise correlations between holdings. New positions that would breach this cap are rejected."],
             ["Backtest accuracy", "The mechanical model (VIX + momentum + beta rules) accuracy on next-day direction. This is NOT the same as LLM prediction accuracy — check the LLM Accuracy card on the Backtest tab for the real figure."],
             ["Prediction cooldown", "After a SELL signal, a 21-day cooldown prevents an immediate re-buy on the same ticker (avoids buy/sell churn)."],
+          ].map(([term, def]) => h("div", { key: term, className: "rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2" },
+            h("div", { className: "font-semibold text-xs text-pulse-cyan mb-1" }, term),
+            h("p", { className: "text-xs text-pulse-muted leading-relaxed" }, def)
+          ))
+        )
+      ),
+
+      // Learning system
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" }, "Learning system"),
+        h("p", { className: "text-xs text-pulse-muted mb-4 leading-relaxed" },
+          "The system continuously measures how well each agent's signals translated into actual returns, then gradually adjusts how much weight each agent carries in the composite score. It improves passively over time — no configuration required."
+        ),
+        h("div", { className: "grid gap-3 sm:grid-cols-2" },
+          [
+            ["How accuracy is tracked",
+             "Every investment thesis generates forecast outcomes for 3m, 6m, and 12m horizons. Once those dates pass, the system fetches the real price change and records whether each agent's direction call (positive / negative) was correct. This join runs automatically after each weekly evaluation cycle."],
+            ["Directional hit rate",
+             "The key metric per agent. If an agent scored 'positive' and the stock went up (or 'negative' and it went down), that's a correct call. A useful agent should exceed the 55% baseline. Agents above 60% are classed as strong; below 50% as weak."],
+            ["Suggested weight adjustment",
+             "For agents with at least 5 evaluated outcomes, the system computes a bounded adjustment: (hit_rate − 55%) / 20% × 10%. This ranges from −10% to +10% per cycle. It's a suggestion — it's only applied when recalibration runs."],
+            ["Weekly recalibration",
+             "Every Monday at 02:00 UTC, a background job reads the latest suggested adjustments and applies a 20% blend to the current weights: new = current × (1 + 0.20 × adj). Each weight is hard-capped at 50%–200% of its factory default, so no single agent can dominate or be silenced."],
+            ["Score bucket calibration",
+             "Separate from per-agent accuracy, the system tracks what composite score ranges actually returned across all past theses. A thesis scored 80–90 should return more than one scored 50–60. Gaps between forecast and realised returns in the buckets reveal systematic over- or under-confidence."],
+            ["When data arrives",
+             "The first 3-month accuracy data appears ~91 days after the first thesis was generated. 6-month data appears ~182 days in, and 12-month data at ~365 days. Until then, the Learning tab shows the weight table at factory defaults and an empty accuracy section."],
+            ["Manual controls",
+             "The Learning tab has a Rebuild button (recomputes accuracy stats from raw data), a Recalibrate button (applies the suggested weight adjustments immediately), and a Reset to defaults button (reverts all weights back to factory values and clears calibration history)."],
+            ["Persistence across restarts",
+             "Calibrated weights are saved to the database after every recalibration cycle. On the next server restart or deploy, they are loaded back automatically before the first thesis runs, so improvements are never lost."],
           ].map(([term, def]) => h("div", { key: term, className: "rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2" },
             h("div", { className: "font-semibold text-xs text-pulse-cyan mb-1" }, term),
             h("p", { className: "text-xs text-pulse-muted leading-relaxed" }, def)
