@@ -15,7 +15,7 @@ import db
 
 logger = logging.getLogger(__name__)
 
-HORIZON_DAYS = {"3m": 91, "6m": 182, "12m": 365}
+HORIZON_DAYS = {"1m": 30, "3m": 91, "6m": 182, "12m": 365}
 BENCHMARK_TICKER = "^NDX"  # NASDAQ-100 as benchmark
 
 

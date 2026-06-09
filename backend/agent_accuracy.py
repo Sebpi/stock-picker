@@ -193,7 +193,7 @@ def _compute_score_buckets(window_days: int) -> list[dict]:
     now_str = datetime.now(timezone.utc).isoformat()
     results = []
 
-    for horizon in ("3m", "6m", "12m"):
+    for horizon in ("1m", "3m", "6m", "12m"):
         h_rows = [dict(r) for r in rows if r["horizon"] == horizon]
         for label, lo, hi in buckets:
             b = [r for r in h_rows if lo <= (r["composite_score"] or 0) < hi]

@@ -3463,7 +3463,7 @@
           )
         ),
         h("div", { className: "flex items-center gap-1 rounded-lg border border-pulse-line bg-pulse-panel p-1" },
-          ["3m", "6m", "12m"].map(hz =>
+          ["1m", "3m", "6m", "12m"].map(hz =>
             h("button", {
               key: hz,
               onClick: () => setHorizon(hz),

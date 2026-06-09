@@ -324,10 +324,40 @@ CREATE TABLE IF NOT EXISTS calibrated_weights (
 """
 
 
+def _backfill_1m_outcomes() -> int:
+    """Insert 1m forecast_outcome rows for any existing thesis that lacks one. Idempotent."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT fo.thesis_id, fo.ticker, fo.forecast_return_pct, fo.thesis_generated_at
+            FROM forecast_outcome fo
+            WHERE fo.horizon = '3m'
+              AND NOT EXISTS (
+                SELECT 1 FROM forecast_outcome fo2
+                WHERE fo2.thesis_id = fo.thesis_id AND fo2.horizon = '1m'
+              )
+            """
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO forecast_outcome
+                    (thesis_id, ticker, horizon, forecast_return_pct, thesis_generated_at)
+                VALUES (?, ?, '1m', ?, ?)
+                """,
+                (row["thesis_id"], row["ticker"],
+                 row["forecast_return_pct"], row["thesis_generated_at"]),
+            )
+    return len(rows)
+
+
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(DDL)
     prune_agent_history()
+    n = _backfill_1m_outcomes()
+    if n:
+        logger.info("Backfilled %d 1m forecast_outcome rows for existing theses", n)
     logger.info("SQLite DB initialised at %s", DB_PATH)
 
 
@@ -574,6 +604,18 @@ def record_forecast_outcome(thesis: InvestmentThesis) -> None:
                     forecast.base_return_pct,
                     thesis.generated_at.isoformat(),
                 ),
+            )
+        # 1m fast-track learning horizon: direction proxy from 3m forecast
+        three_m = thesis.forecast.get("3m")
+        if three_m is not None:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO forecast_outcome
+                    (thesis_id, ticker, horizon, forecast_return_pct, thesis_generated_at)
+                VALUES (?, ?, '1m', ?, ?)
+                """,
+                (thesis.thesis_id, thesis.ticker,
+                 three_m.base_return_pct, thesis.generated_at.isoformat()),
             )
 
 
@@ -1585,7 +1627,7 @@ def get_forecast_outcome_status(ticker: str | None = None) -> dict[str, Any]:
             params,
         ).fetchall()
 
-    horizon_days = {"3m": 91, "6m": 182, "12m": 365}
+    horizon_days = {"1m": 30, "3m": 91, "6m": 182, "12m": 365}
     now = datetime.now(timezone.utc)
     status: dict[str, Any] = {
         "ticker": ticker.upper() if ticker else None,
