@@ -70,8 +70,8 @@ class MultiAgentPhase3Tests(unittest.TestCase):
 
         status = db.get_forecast_outcome_status(self.ticker)
 
-        self.assertEqual(status["total"], 3)
-        self.assertEqual(status["pending"], 3)
+        self.assertEqual(status["total"], 4)  # 1m fast-track + 3m/6m/12m
+        self.assertEqual(status["pending"], 4)
         self.assertEqual(status["matured_pending"], 1)
         self.assertEqual(status["by_horizon"]["3m"]["matured_pending"], 1)
 
