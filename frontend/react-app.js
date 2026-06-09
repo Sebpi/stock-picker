@@ -23,6 +23,7 @@
     ["alerts", "Alerts"],
     ["portfolio", "Portfolio"],
     ["paper", "Paper P&L"],
+    ["learning", "Learning"],
     ["help", "Help"],
   ];
 
@@ -3158,6 +3159,7 @@
       alerts: h(Alerts),
       portfolio: h(Portfolio, { openDetail }),
       paper: h(PaperPnL),
+      learning: h(Learning),
       help: h(Help),
     };
 
@@ -3373,6 +3375,218 @@
     { name: "Wikipedia", icon: "📖", desc: "Index constituent lists (S&P 500, NASDAQ 100, FTSE 100, FTSE 250) refreshed on startup. Falls back to a hardcoded seed list if Wikipedia is unreachable." },
     { name: "Anthropic Claude", icon: "🤖", desc: "Two models in use: Claude Haiku (fast, cheaper) for daily predictions and screener analysis; Claude Sonnet (higher quality, higher cost) for investment thesis narrative generation." },
   ];
+
+  function Learning() {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [window, setWindow] = useState(90);
+    const [horizon, setHorizon] = useState("3m");
+    const [rebuilding, setRebuilding] = useState(false);
+
+    const load = (w) => {
+      setLoading(true); setError(null);
+      apiFetch(`/v1/learning/summary?window_days=${w}`)
+        .then(r => { setData(r); setLoading(false); })
+        .catch(e => { setError(e.message || "Failed to load"); setLoading(false); });
+    };
+
+    useEffect(() => { load(window); }, [window]);
+
+    const rebuild = () => {
+      setRebuilding(true);
+      apiFetch("/v1/learning/rebuild", { method: "POST" })
+        .then(() => { setTimeout(() => { setRebuilding(false); load(window); }, 3000); })
+        .catch(() => setRebuilding(false));
+    };
+
+    const fmtPct = (v, digits = 1) =>
+      v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(digits)}%`;
+    const fmtRate = (v) =>
+      v == null ? "—" : `${(v * 100).toFixed(0)}%`;
+    const hitColor = (v) =>
+      v == null ? "text-pulse-muted" : v >= 0.60 ? "text-emerald-400" : v < 0.50 ? "text-red-400" : "text-amber-400";
+    const adjColor = (v) =>
+      v == null || v === 0 ? "text-pulse-muted" : v > 0 ? "text-emerald-400" : "text-red-400";
+    const shortAgent = (id) => id.replace(/^agent\./, "");
+
+    const agentStats = data?.agent_stats?.filter(s => s.horizon === horizon) || [];
+    const buckets = data?.score_buckets?.filter(s => s.horizon === horizon) || [];
+
+    if (loading) return h("div", { className: "flex items-center justify-center py-20 text-pulse-muted text-sm" }, "Loading…");
+    if (error) return h("div", { className: "flex items-center justify-center py-20 text-red-400 text-sm" }, error);
+
+    return h("div", { className: "grid gap-6 pb-10" },
+      h(SectionHead, {
+        title: "System Learning",
+        kicker: "Live accuracy tracking",
+        subtitle: "Per-agent hit rates, score calibration, and suggested weight adjustments computed from realized forecast outcomes.",
+      }),
+
+      // Controls row
+      h("div", { className: "flex flex-wrap items-center gap-3" },
+        h("div", { className: "flex items-center gap-1 rounded-lg border border-pulse-line bg-pulse-panel p-1" },
+          ["30", "60", "90"].map(w =>
+            h("button", {
+              key: w,
+              onClick: () => setWindow(Number(w)),
+              className: cx(
+                "px-3 py-1 rounded text-xs font-mono transition-colors",
+                window === Number(w) ? "bg-pulse-cyan text-black font-bold" : "text-pulse-muted hover:text-pulse-ink"
+              ),
+            }, `${w}d`)
+          )
+        ),
+        h("div", { className: "flex items-center gap-1 rounded-lg border border-pulse-line bg-pulse-panel p-1" },
+          ["3m", "6m", "12m"].map(hz =>
+            h("button", {
+              key: hz,
+              onClick: () => setHorizon(hz),
+              className: cx(
+                "px-3 py-1 rounded text-xs font-mono transition-colors",
+                horizon === hz ? "bg-pulse-cyan text-black font-bold" : "text-pulse-muted hover:text-pulse-ink"
+              ),
+            }, hz)
+          )
+        ),
+        h("button", {
+          onClick: rebuild,
+          disabled: rebuilding,
+          className: "ml-auto px-3 py-1.5 rounded-lg border border-pulse-line text-xs font-mono text-pulse-muted hover:text-pulse-ink transition-colors disabled:opacity-50",
+        }, rebuilding ? "Rebuilding…" : "Rebuild stats"),
+        data?.computed_at && h("span", { className: "text-[10px] text-pulse-dim font-mono" },
+          `Updated ${new Date(data.computed_at).toLocaleString()}`
+        )
+      ),
+
+      // System summary cards
+      h("div", { className: "grid grid-cols-2 sm:grid-cols-4 gap-3" },
+        h(Card, { className: "p-4 text-center" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-muted mb-1" }, "System Hit Rate"),
+          h("div", { className: cx("text-2xl font-bold font-mono font-tnum", hitColor(data?.system_avg_hit_rate)) },
+            fmtRate(data?.system_avg_hit_rate)
+          ),
+          h("div", { className: "text-[10px] text-pulse-dim mt-1" }, `${window}d window · ${horizon}`)
+        ),
+        h(Card, { className: "p-4 text-center" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-muted mb-1" }, "Strong Agents"),
+          h("div", { className: "text-2xl font-bold font-mono font-tnum text-emerald-400" },
+            data?.strong_agents?.length ?? "—"
+          ),
+          h("div", { className: "text-[10px] text-pulse-dim mt-1" }, "≥60% hit rate")
+        ),
+        h(Card, { className: "p-4 text-center" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-muted mb-1" }, "Weak Agents"),
+          h("div", { className: "text-2xl font-bold font-mono font-tnum text-red-400" },
+            data?.weak_agents?.length ?? "—"
+          ),
+          h("div", { className: "text-[10px] text-pulse-dim mt-1" }, "<50% hit rate")
+        ),
+        h(Card, { className: "p-4 text-center" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-muted mb-1" }, "No Data Yet"),
+          h("div", { className: "text-2xl font-bold font-mono font-tnum text-pulse-muted" },
+            data?.insufficient_data_agents?.length ?? "—"
+          ),
+          h("div", { className: "text-[10px] text-pulse-dim mt-1" }, `<${5} outcomes`)
+        )
+      ),
+
+      // Per-agent accuracy table
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-3" },
+          `Agent accuracy — ${horizon} horizon · ${window}d window`
+        ),
+        agentStats.length === 0
+          ? h("p", { className: "text-sm text-pulse-muted text-center py-6" },
+              "No evaluated outcomes yet. Accuracy builds automatically as thesis forecasts mature (3m / 6m / 12m)."
+            )
+          : h("div", { className: "overflow-x-auto" },
+              h("table", { className: "w-full text-xs font-mono" },
+                h("thead", null,
+                  h("tr", { className: "border-b border-pulse-line text-pulse-muted" },
+                    ["Agent", "Outcomes", "Hit Rate", "Avg Score", "Correct Score", "Wrong Score", "Forecast Err", "Score Corr", "Suggested Adj"].map(col =>
+                      h("th", { key: col, className: "text-left pb-2 pr-4 font-normal tracking-wide" }, col)
+                    )
+                  )
+                ),
+                h("tbody", null,
+                  agentStats
+                    .sort((a, b) => (b.direction_hit_rate ?? 0) - (a.direction_hit_rate ?? 0))
+                    .map(s =>
+                      h("tr", { key: s.agent_id, className: "border-b border-pulse-line/40 hover:bg-pulse-card/50" },
+                        h("td", { className: "py-2 pr-4 text-pulse-ink" }, shortAgent(s.agent_id)),
+                        h("td", { className: "py-2 pr-4 text-pulse-muted font-tnum" }, s.n_evaluated),
+                        h("td", { className: cx("py-2 pr-4 font-tnum font-semibold", hitColor(s.direction_hit_rate)) },
+                          fmtRate(s.direction_hit_rate)
+                        ),
+                        h("td", { className: "py-2 pr-4 text-pulse-ink font-tnum" }, s.avg_score?.toFixed(0) ?? "—"),
+                        h("td", { className: "py-2 pr-4 text-emerald-400 font-tnum" }, s.avg_score_correct?.toFixed(0) ?? "—"),
+                        h("td", { className: "py-2 pr-4 text-red-400 font-tnum" }, s.avg_score_wrong?.toFixed(0) ?? "—"),
+                        h("td", { className: "py-2 pr-4 text-pulse-muted font-tnum" }, fmtPct(s.avg_forecast_error, 1)),
+                        h("td", { className: "py-2 pr-4 text-pulse-muted font-tnum" },
+                          s.score_return_corr != null ? s.score_return_corr.toFixed(2) : "—"
+                        ),
+                        h("td", { className: cx("py-2 pr-4 font-tnum font-semibold", adjColor(s.suggested_weight_adj)) },
+                          s.suggested_weight_adj !== 0 && s.suggested_weight_adj != null
+                            ? `${s.suggested_weight_adj > 0 ? "+" : ""}${(s.suggested_weight_adj * 100).toFixed(0)}%`
+                            : "—"
+                        )
+                      )
+                    )
+                )
+              )
+            )
+      ),
+
+      // Score bucket performance table
+      h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-1" },
+          `Score bucket calibration — ${horizon} horizon · ${window}d window`
+        ),
+        h("p", { className: "text-xs text-pulse-muted mb-3" },
+          "What each composite score range actually returned vs. what was forecast. Gaps here drive recalibration."
+        ),
+        buckets.length === 0
+          ? h("p", { className: "text-sm text-pulse-muted text-center py-6" }, "No data yet.")
+          : h("div", { className: "overflow-x-auto" },
+              h("table", { className: "w-full text-xs font-mono" },
+                h("thead", null,
+                  h("tr", { className: "border-b border-pulse-line text-pulse-muted" },
+                    ["Score range", "Outcomes", "Avg realised", "Avg forecast", "Gap", "Dir. hit rate"].map(col =>
+                      h("th", { key: col, className: "text-left pb-2 pr-4 font-normal tracking-wide" }, col)
+                    )
+                  )
+                ),
+                h("tbody", null,
+                  buckets.map(b => {
+                    const gap = b.avg_realised_return != null && b.avg_forecast_return != null
+                      ? b.avg_realised_return - b.avg_forecast_return : null;
+                    return h("tr", { key: b.bucket_label, className: "border-b border-pulse-line/40" },
+                      h("td", { className: "py-2 pr-4 text-pulse-ink" }, b.bucket_label),
+                      h("td", { className: "py-2 pr-4 text-pulse-muted font-tnum" }, b.n_evaluated),
+                      h("td", { className: cx("py-2 pr-4 font-tnum font-semibold", (b.avg_realised_return ?? 0) >= 0 ? "text-emerald-400" : "text-red-400") },
+                        fmtPct(b.avg_realised_return)
+                      ),
+                      h("td", { className: "py-2 pr-4 text-pulse-muted font-tnum" }, fmtPct(b.avg_forecast_return)),
+                      h("td", { className: cx("py-2 pr-4 font-tnum", gap == null ? "text-pulse-muted" : gap >= 0 ? "text-emerald-400" : "text-red-400") },
+                        fmtPct(gap)
+                      ),
+                      h("td", { className: cx("py-2 pr-4 font-tnum", hitColor(b.direction_hit_rate)) },
+                        fmtRate(b.direction_hit_rate)
+                      )
+                    );
+                  })
+                )
+              )
+            )
+      ),
+
+      // Note
+      !data?.system_avg_hit_rate && h("div", { className: "rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-400" },
+        "Accuracy data accumulates automatically as thesis forecasts mature. The first 3-month outcomes will be available 91 days after the first thesis was generated. Check back then for live stats."
+      )
+    );
+  }
 
   function Help() {
     const [openAgent, setOpenAgent] = useState(null);

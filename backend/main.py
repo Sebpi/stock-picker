@@ -2532,6 +2532,14 @@ async def run_evaluation_job(source: str = "manual") -> int:
                 )
             except Exception as _cal_exc:
                 logger.warning("[Evaluation] Calibration auto-rebuild failed: %s", _cal_exc)
+        # Rebuild agent accuracy stats whenever new thesis outcomes are evaluated
+        if thesis_count > 0:
+            try:
+                import agent_accuracy as _aa
+                _aa.rebuild_all()
+                logger.info("[Evaluation] Agent accuracy stats rebuilt")
+            except Exception as _aa_exc:
+                logger.warning("[Evaluation] Agent accuracy rebuild failed: %s", _aa_exc)
         _reset_bg_failures("evaluation")
         return thesis_count + prediction_count
     except Exception as exc:
@@ -7913,6 +7921,32 @@ async def v1_evaluate(
 
     background_tasks.add_task(run_evaluation_job, "manual")
     return {"ok": True, "message": "Evaluation job started in background"}
+
+
+@app.get("/v1/learning/summary")
+@limiter.limit("30/minute")
+def v1_learning_summary(
+    request: Request,
+    window_days: int = 90,
+    current_user: str = Depends(get_current_user),
+):
+    """Return per-agent accuracy stats and score-bucket performance for the learning system."""
+    import agent_accuracy as _aa
+    window_days = max(7, min(int(window_days), 365))
+    return _aa.get_learning_summary(window_days=window_days)
+
+
+@app.post("/v1/learning/rebuild")
+@limiter.limit("5/hour")
+async def v1_learning_rebuild(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user),
+):
+    """Trigger a full rebuild of agent accuracy stats (all windows)."""
+    import agent_accuracy as _aa
+    background_tasks.add_task(_aa.rebuild_all)
+    return {"ok": True, "message": "Agent accuracy rebuild started in background"}
 
 
 async def _init_multiagent_db():
