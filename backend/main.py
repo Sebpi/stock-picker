@@ -8156,6 +8156,101 @@ async def v1_earnings_check(
     return {"ok": True, "message": "Earnings check started in background"}
 
 
+@app.post("/v1/earnings/test-notification")
+@limiter.limit("5/hour")
+def v1_earnings_test_notification(
+    request: Request,
+    current_user: str = Depends(get_current_user),
+):
+    """Send a mock earnings notification to verify WhatsApp + email are wired up correctly."""
+    twilio_sid  = os.getenv("TWILIO_ACCOUNT_SID", "")
+    twilio_tok  = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_from = os.getenv("TWILIO_FROM_NUMBER", "")
+    twilio_to   = os.getenv("TWILIO_TO_NUMBER", "")
+    missing_twilio = [k for k, v in {
+        "TWILIO_ACCOUNT_SID": twilio_sid,
+        "TWILIO_AUTH_TOKEN":  twilio_tok,
+        "TWILIO_FROM_NUMBER": twilio_from,
+        "TWILIO_TO_NUMBER":   twilio_to,
+    }.items() if not v]
+
+    smtp_user   = os.getenv("SMTP_USER", "")
+    smtp_pass   = os.getenv("SMTP_PASS", "")
+    alert_email = os.getenv("ALERT_EMAIL", "")
+    missing_email = [k for k, v in {
+        "SMTP_USER":   smtp_user,
+        "SMTP_PASS":   smtp_pass,
+        "ALERT_EMAIL": alert_email,
+    }.items() if not v]
+
+    try:
+        from sentiment_agent import send_whatsapp as _wa
+    except Exception:
+        _wa = None
+
+    msg = (
+        "🧪 [StockLens] Earnings Test Notification\n\n"
+        "🔔 [ORCL] Earnings: BEAT\n"
+        "EPS: $1.73 vs $1.58 est (+9.6%)\n"
+        "Rev: $15.9B vs $15.1B est (+5.3%)\n"
+        "Guidance: RAISED | Signal: POSITIVE ✅\n\n"
+        "📊 Sentiment: Bullish (82/100) 📈\n"
+        "Up 7.1% AH — strong cloud revenue beat driving after-hours rally.\n"
+        "Market pricing in guidance raise as durable.\n\n"
+        "Cross-sector: MSFT (POSITIVE) — validates cloud demand; "
+        "SAP (NEUTRAL) — limited overlap.\n\n"
+        "This is a test — no real filing detected."
+    )
+
+    wa_sent = False
+    wa_error = None
+    if missing_twilio:
+        wa_error = f"Missing Fly secrets: {', '.join(missing_twilio)}"
+    elif _wa:
+        try:
+            wa_sent = bool(_wa(msg))
+            if not wa_sent:
+                wa_error = (
+                    "send_whatsapp returned False — check Twilio logs and ensure "
+                    "your phone number has joined the sandbox by messaging "
+                    "+14155238886 with your sandbox keyword"
+                )
+        except Exception as exc:
+            wa_error = str(exc)
+
+    email_sent = False
+    email_error = None
+    if missing_email:
+        email_error = f"Missing Fly secrets: {', '.join(missing_email)}"
+    else:
+        email_sent = send_email(
+            subject="[StockLens] Earnings Test Notification — ORCL BEAT ✅",
+            body=msg,
+        )
+        if not email_sent:
+            email_error = "send_email returned False — check SMTP credentials"
+
+    result: dict = {
+        "ok": True,
+        "whatsapp_sent": wa_sent,
+        "email_sent": email_sent,
+        "message": msg,
+    }
+    if wa_error:
+        result["whatsapp_error"] = wa_error
+    if email_error:
+        result["email_error"] = email_error
+    if missing_twilio or missing_email:
+        result["setup_guide"] = (
+            "Set missing secrets on Fly with: "
+            "flyctl secrets set TWILIO_ACCOUNT_SID=ACxxx TWILIO_AUTH_TOKEN=xxx "
+            "TWILIO_FROM_NUMBER='whatsapp:+14155238886' "
+            "TWILIO_TO_NUMBER='whatsapp:+44XXXXXXXXX' "
+            "-a stock-picker-sp"
+        )
+    return result
+
+
 async def _init_multiagent_db():
     """Initialise the SQLite database for the multi-agent system."""
     try:
