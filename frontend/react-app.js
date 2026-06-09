@@ -3408,6 +3408,8 @@
     const [expanded, setExpanded] = React.useState(null);
     const [checking, setChecking] = React.useState(false);
     const [checkMsg, setCheckMsg] = React.useState("");
+    const [testing, setTesting] = React.useState(false);
+    const [testResult, setTestResult] = React.useState(null);
 
     React.useEffect(() => {
       api("/v1/earnings/recent?days=21")
@@ -3427,6 +3429,22 @@
         .then(() => { setCheckMsg("Check started — results will appear once filings are detected."); })
         .catch(() => { setCheckMsg("Check failed — see server logs."); })
         .finally(() => setChecking(false));
+    }
+
+    function sendTestEmail() {
+      setTesting(true);
+      setTestResult(null);
+      api("/v1/earnings/test-notification", { method: "POST" })
+        .then(d => {
+          if (d.email_sent) {
+            setTestResult({ ok: true, msg: "Test email sent — check your inbox." });
+          } else {
+            const err = d.email_error || d.whatsapp_error || "Email not sent — check SMTP secrets on Fly.";
+            setTestResult({ ok: false, msg: err });
+          }
+        })
+        .catch(() => setTestResult({ ok: false, msg: "Request failed — check server logs." }))
+        .finally(() => setTesting(false));
     }
 
     const beatColor = {
@@ -3455,6 +3473,16 @@
         subtitle: "Monitors SEC EDGAR 8-K Item 2.02 filings for watchlist tickers. When an earnings press release is detected, Sonnet analyses beat/miss, guidance, thesis impact, and cross-sector effects — then sends a WhatsApp and email immediately.",
         actions: [
           h("button", {
+            onClick: sendTestEmail,
+            disabled: testing,
+            className: cx(
+              "rounded border px-3 py-1.5 font-mono text-xs transition",
+              testing
+                ? "border-pulse-line text-pulse-muted cursor-not-allowed"
+                : "border-amber-400/50 text-amber-400 hover:bg-amber-400/10"
+            ),
+          }, testing ? "Sending..." : "Send Test Email"),
+          h("button", {
             onClick: triggerCheck,
             disabled: checking,
             className: cx(
@@ -3467,6 +3495,7 @@
         ],
       }),
 
+      testResult && h("p", { className: cx("font-mono text-xs", testResult.ok ? "text-emerald-400" : "text-red-400") }, testResult.msg),
       checkMsg && h("p", { className: "font-mono text-xs text-pulse-muted" }, checkMsg),
 
       // Upcoming earnings calendar
