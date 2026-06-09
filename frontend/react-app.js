@@ -3389,13 +3389,13 @@
 
     const load = (w) => {
       setLoading(true); setError(null);
-      apiFetch(`/v1/learning/summary?window_days=${w}`)
+      api(`/v1/learning/summary?window_days=${w}`)
         .then(r => { setData(r); setLoading(false); })
         .catch(e => { setError(e.message || "Failed to load"); setLoading(false); });
     };
 
     const loadWeights = () => {
-      apiFetch("/v1/learning/weights")
+      api("/v1/learning/weights")
         .then(r => setWeights(r))
         .catch(() => {});
     };
@@ -3404,14 +3404,14 @@
 
     const rebuild = () => {
       setRebuilding(true);
-      apiFetch("/v1/learning/rebuild", { method: "POST" })
+      api("/v1/learning/rebuild", { method: "POST" })
         .then(() => { setTimeout(() => { setRebuilding(false); load(window); }, 3000); })
         .catch(() => setRebuilding(false));
     };
 
     const recalibrate = () => {
       setRecalibrating(true);
-      apiFetch("/v1/learning/weights/recalibrate", { method: "POST" })
+      api("/v1/learning/weights/recalibrate", { method: "POST" })
         .then(() => { setTimeout(() => { setRecalibrating(false); loadWeights(); }, 3000); })
         .catch(() => setRecalibrating(false));
     };
@@ -3419,7 +3419,7 @@
     const resetWeights = () => {
       if (!confirm("Reset all agent weights to factory defaults?")) return;
       setResetting(true);
-      apiFetch("/v1/learning/weights/reset", { method: "POST" })
+      api("/v1/learning/weights/reset", { method: "POST" })
         .then(r => { setWeights(r.weights); setResetting(false); })
         .catch(() => setResetting(false));
     };
