@@ -2368,7 +2368,8 @@
       h("div", { className: "grid gap-3 sm:grid-cols-2" },
         h(ListCard, { title: "Drivers", items: thesis.drivers, tone: "text-pulse-green" }),
         h(ListCard, { title: "Risks", items: thesis.risks, tone: "text-pulse-red" })
-      )
+      ),
+      h(EarningsReportPanel, { ticker: thesis.ticker })
     );
   }
 
@@ -2389,6 +2390,295 @@
     return h(Card, { className: "p-4" },
       h("div", { className: cx("font-mono text-[10px] uppercase tracking-[0.24em]", tone) }, title),
       list.length ? h("ul", { className: "mt-3 grid gap-2 text-sm leading-relaxed text-pulse-muted" }, list.map((item, i) => h("li", { key: i }, item))) : h("p", { className: "mt-3 text-sm text-pulse-muted" }, "None recorded.")
+    );
+  }
+
+  function EarningsReportPanel({ ticker }) {
+    const [phase, setPhase] = useState("idle");
+    const [report, setReport] = useState(null);
+    const [err, setErr] = useState("");
+
+    async function load(force) {
+      setPhase("loading"); setErr("");
+      try {
+        const data = await api(`/api/earnings/${encodeURIComponent(ticker)}/report${force ? "?force=true" : ""}`);
+        setReport(data); setPhase("loaded");
+      } catch (e) { setErr(e.message); setPhase("error"); }
+    }
+
+    if (phase === "idle") return h(Card, { className: "p-4" },
+      h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Earnings Report"),
+      h("div", { className: "mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between" },
+        h("p", { className: "text-sm text-pulse-muted" }, "Post-earnings deep dive: quarterly trend, margins, technicals, market sentiment, and analyst reactions."),
+        h(Button, { kind: "primary", onClick: () => load(false) }, "Generate Report")
+      )
+    );
+
+    if (phase === "loading") return h(Card, { className: "p-4" },
+      h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Earnings Report"),
+      h("p", { className: "mt-3 text-sm text-pulse-muted" }, "Fetching quarterly data, technicals, and synthesising report — this takes 15-30s...")
+    );
+
+    if (phase === "error") return h(Card, { className: "p-4" },
+      h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Earnings Report"),
+      h("p", { className: "mt-3 text-sm text-pulse-red" }, "Error: " + err),
+      h(Button, { kind: "ghost", onClick: () => load(false), className: "mt-3" }, "Retry")
+    );
+
+    const r = report || {};
+    const n = r.narrative || {};
+    const qs = r.quarterly_results || [];
+    const ac = r.analyst_consensus || {};
+    const actions = r.recent_analyst_actions || [];
+    const nq = r.next_quarter_estimates || {};
+    const vm = r.valuation || {};
+    const tm = r.trailing_metrics || {};
+    const tech = r.technicals || {};
+    const sent = r.market_sentiment || {};
+
+    function pctFmt(v) {
+      if (v == null || !Number.isFinite(Number(v))) return "—";
+      const n = Number(v); return (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
+    }
+    function priceFmt(v) {
+      if (v == null || !Number.isFinite(Number(v))) return "—";
+      return "$" + Number(v).toFixed(2);
+    }
+    function numFmt(v, dec) {
+      if (v == null || !Number.isFinite(Number(v))) return "—";
+      return Number(v).toFixed(dec ?? 1);
+    }
+    function toneForPct(v) {
+      if (v == null) return "text-pulse-muted";
+      return Number(v) >= 0 ? "text-pulse-green" : "text-pulse-red";
+    }
+    function kvRow(label, value, tone) {
+      return h("div", { key: label, className: "flex justify-between text-xs" },
+        h("span", { className: "text-pulse-muted" }, label),
+        h("span", { className: cx("font-mono", tone || "text-pulse-ink") }, value)
+      );
+    }
+
+    const trendLabel = { uptrend: "Uptrend ↑", downtrend: "Downtrend ↓", above_200d: "Above 200D", below_200d: "Below 200D" };
+    const trendTone  = { uptrend: "text-pulse-green", downtrend: "text-pulse-red", above_200d: "text-pulse-cyan", below_200d: "text-pulse-amber" };
+
+    return h("div", { className: "grid gap-3" },
+
+      // ── Header + executive summary ────────────────────────────────────
+      h(Card, { className: "p-4" },
+        h("div", { className: "flex items-center justify-between flex-wrap gap-2" },
+          h("div", null,
+            h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Earnings Report"),
+            h("p", { className: "mt-0.5 text-xs text-pulse-muted" },
+              r.company_name || ticker,
+              r.cached
+                ? h("span", null, " · cached ", r.cached_at ? new Date(r.cached_at).toLocaleString() : "")
+                : h("span", null, " · ", new Date(r.generated_at || Date.now()).toLocaleString())
+            )
+          ),
+          h("button", { onClick: () => load(true), className: "text-xs text-pulse-dim hover:text-pulse-ink border border-pulse-line rounded-lg px-3 py-1" }, "Refresh")
+        ),
+        n.executive_summary && h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted border-t border-pulse-line pt-3" }, n.executive_summary)
+      ),
+
+      // ── Quarterly trend table ─────────────────────────────────────────
+      qs.length > 0 && h(Card, { className: "overflow-hidden p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, "Quarterly Results"),
+        h("div", { className: "overflow-x-auto" },
+          h("table", { className: "w-full text-xs" },
+            h("thead", null, h("tr", { className: "border-b border-pulse-line" },
+              ["Period","EPS","Surprise","Revenue","Rev YoY","Op Margin"].map(c =>
+                h("th", { key: c, className: "pb-2 pr-4 text-left font-mono text-[10px] text-pulse-dim uppercase tracking-wider whitespace-nowrap" }, c)
+              )
+            )),
+            h("tbody", null, qs.map((q, i) => {
+              const beat = q.beat === true, miss = q.beat === false;
+              const epsTone = beat ? "text-pulse-green" : miss ? "text-pulse-red" : "text-pulse-muted";
+              return h("tr", { key: i, className: "border-b border-pulse-line/50 hover:bg-pulse-panel/40" },
+                h("td", { className: "py-2 pr-4 font-mono text-pulse-ink whitespace-nowrap" }, q.period || "—"),
+                h("td", { className: cx("py-2 pr-4 font-semibold whitespace-nowrap", epsTone) },
+                  q.eps_actual != null ? `${beat ? "▲ " : miss ? "▼ " : ""}$${Number(q.eps_actual).toFixed(2)}` : "—"
+                ),
+                h("td", { className: cx("py-2 pr-4 font-mono whitespace-nowrap", epsTone) },
+                  q.eps_surprise_pct != null ? pctFmt(q.eps_surprise_pct) : "—"
+                ),
+                h("td", { className: "py-2 pr-4 font-mono text-pulse-ink whitespace-nowrap" },
+                  q.revenue_actual_bn != null ? `$${Number(q.revenue_actual_bn).toFixed(1)}B` : "—"
+                ),
+                h("td", { className: cx("py-2 pr-4 font-mono whitespace-nowrap", toneForPct(q.revenue_yoy_pct)) },
+                  q.revenue_yoy_pct != null ? pctFmt(q.revenue_yoy_pct) : "—"
+                ),
+                h("td", { className: "py-2 pr-4 font-mono text-pulse-muted whitespace-nowrap" },
+                  q.operating_margin_pct != null ? `${Number(q.operating_margin_pct).toFixed(1)}%` : "—"
+                )
+              );
+            }))
+          )
+        )
+      ),
+
+      // ── Metrics row: trailing / valuation / consensus ─────────────────
+      h("div", { className: "grid gap-3 sm:grid-cols-3" },
+        h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, "Trailing 12M"),
+          h("div", { className: "grid gap-2" }, [
+            kvRow("Revenue",     tm.revenue_bn     != null ? `$${tm.revenue_bn}B` : "—"),
+            kvRow("Rev Growth",  tm.revenue_growth_pct != null ? pctFmt(tm.revenue_growth_pct) : "—", toneForPct(tm.revenue_growth_pct)),
+            kvRow("Gross Margin",tm.gross_margin_pct != null ? `${tm.gross_margin_pct}%` : "—"),
+            kvRow("Op Margin",   tm.operating_margin_pct != null ? `${tm.operating_margin_pct}%` : "—"),
+            kvRow("Net Margin",  tm.net_margin_pct != null ? `${tm.net_margin_pct}%` : "—"),
+            kvRow("EPS (TTM)",   tm.eps_trailing != null ? priceFmt(tm.eps_trailing) : "—"),
+          ])
+        ),
+        h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, "Valuation"),
+          h("div", { className: "grid gap-2" }, [
+            kvRow("Price",     priceFmt(vm.current_price)),
+            kvRow("P/E (TTM)", vm.pe_trailing != null ? `${numFmt(vm.pe_trailing, 1)}×` : "—"),
+            kvRow("P/E (fwd)", vm.pe_forward  != null ? `${numFmt(vm.pe_forward,  1)}×` : "—"),
+            kvRow("Mkt Cap",   vm.market_cap_bn != null ? `$${vm.market_cap_bn}B` : "—"),
+            kvRow("52W High",  priceFmt(vm.week52_high)),
+            kvRow("52W Low",   priceFmt(vm.week52_low)),
+          ])
+        ),
+        h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, "Street Consensus"),
+          h("div", { className: "grid gap-2" }, [
+            kvRow("Rating",     (ac.rating || "—").replace(/_/g, " ").toUpperCase()),
+            kvRow("Mean Target",priceFmt(ac.target_mean)),
+            kvRow("High Target",priceFmt(ac.target_high)),
+            kvRow("Low Target", priceFmt(ac.target_low)),
+            kvRow("Upside",     ac.upside_to_target_pct != null ? pctFmt(ac.upside_to_target_pct) : "—", toneForPct(ac.upside_to_target_pct)),
+            kvRow("# Analysts", ac.analyst_count != null ? String(ac.analyst_count) : "—"),
+          ])
+        )
+      ),
+
+      // ── Technicals row ────────────────────────────────────────────────
+      (Object.keys(tech).length > 0 || n.technical_snapshot) && h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, "Technical Analysis"),
+        h("div", { className: "grid gap-4 sm:grid-cols-2" },
+          h("div", { className: "grid gap-2" }, [
+            tech.trend && kvRow("Trend", trendLabel[tech.trend] || tech.trend, trendTone[tech.trend]),
+            kvRow("RSI-14", tech.rsi_14 != null ? `${numFmt(tech.rsi_14, 0)}${tech.rsi_14 > 70 ? " overbought" : tech.rsi_14 < 30 ? " oversold" : ""}` : "—",
+              tech.rsi_14 > 70 ? "text-pulse-red" : tech.rsi_14 < 30 ? "text-pulse-green" : "text-pulse-muted"
+            ),
+            kvRow("1M Return",  tech.return_1m_pct != null ? pctFmt(tech.return_1m_pct) : "—", toneForPct(tech.return_1m_pct)),
+            kvRow("3M Return",  tech.return_3m_pct != null ? pctFmt(tech.return_3m_pct) : "—", toneForPct(tech.return_3m_pct)),
+            kvRow("52W Position", tech.week52_position_pct != null ? `${numFmt(tech.week52_position_pct, 0)}%ile` : "—"),
+            kvRow("Vs MA20",    tech.ma20_vs_price  != null ? pctFmt(tech.ma20_vs_price)  : "—", toneForPct(tech.ma20_vs_price)),
+            kvRow("Vs MA50",    tech.ma50_vs_price  != null ? pctFmt(tech.ma50_vs_price)  : "—", toneForPct(tech.ma50_vs_price)),
+            kvRow("Vs MA200",   tech.ma200_vs_price != null ? pctFmt(tech.ma200_vs_price) : "—", toneForPct(tech.ma200_vs_price)),
+          ].filter(Boolean)),
+          h("div", { className: "grid gap-2" }, [
+            tech.post_earnings_day0_pct != null && kvRow("Day 0 Reaction", pctFmt(tech.post_earnings_day0_pct), toneForPct(tech.post_earnings_day0_pct)),
+            tech.post_earnings_day1_pct != null && kvRow("Day 1 Follow",   pctFmt(tech.post_earnings_day1_pct), toneForPct(tech.post_earnings_day1_pct)),
+            tech.earnings_day_volume_ratio != null && kvRow("Earnings Volume", `${numFmt(tech.earnings_day_volume_ratio, 1)}× avg`),
+            n.technical_snapshot && h("div", { key: "tech-narrative", className: "mt-2 pt-2 border-t border-pulse-line col-span-1" },
+              h("p", { className: "text-sm leading-relaxed text-pulse-muted" }, n.technical_snapshot)
+            ),
+          ].filter(Boolean))
+        )
+      ),
+
+      // ── Market Sentiment row ──────────────────────────────────────────
+      (Object.keys(sent).length > 0 || n.market_sentiment) && h(Card, { className: "p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, "Market Sentiment"),
+        h("div", { className: "grid gap-4 sm:grid-cols-2" },
+          h("div", { className: "grid gap-2" }, [
+            sent.post_earnings_reaction && kvRow("Post-Earnings Reaction",
+              sent.post_earnings_reaction.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
+              sent.post_earnings_reaction.includes("positive") ? "text-pulse-green" : sent.post_earnings_reaction.includes("negative") ? "text-pulse-red" : "text-pulse-amber"
+            ),
+            kvRow("Positioning", sent.positioning ? sent.positioning.replace(/_/g, " ") : "—"),
+            kvRow("Short % Float", sent.short_pct_float != null ? `${sent.short_pct_float}%` : "—",
+              sent.short_pct_float > 15 ? "text-pulse-red" : sent.short_pct_float < 5 ? "text-pulse-green" : "text-pulse-muted"
+            ),
+            kvRow("Days to Cover",sent.days_to_cover != null ? `${sent.days_to_cover}d` : "—"),
+            kvRow("Inst. Ownership", sent.inst_ownership_pct != null ? `${sent.inst_ownership_pct}%` : "—"),
+          ].filter(Boolean)),
+          n.market_sentiment && h("div", null,
+            h("p", { className: "text-sm leading-relaxed text-pulse-muted" }, n.market_sentiment),
+            sent.recent_news_titles && sent.recent_news_titles.length > 0 && h("div", { className: "mt-3 pt-3 border-t border-pulse-line" },
+              h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim mb-2" }, "Recent Headlines"),
+              h("ul", { className: "grid gap-1" }, sent.recent_news_titles.slice(0, 5).map((title, i) =>
+                h("li", { key: i, className: "text-xs text-pulse-muted leading-relaxed" }, "· " + title)
+              ))
+            )
+          )
+        )
+      ),
+
+      // ── Narrative sections ────────────────────────────────────────────
+      (n.headline_read || n.margins_and_growth || n.guidance_read) && h("div", { className: "grid gap-3 sm:grid-cols-3" },
+        n.headline_read && h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Headline Read"),
+          h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted" }, n.headline_read)
+        ),
+        n.margins_and_growth && h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Margins & Growth"),
+          h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted" }, n.margins_and_growth)
+        ),
+        n.guidance_read && h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Guidance"),
+          h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted" }, n.guidance_read)
+        )
+      ),
+
+      // ── Bull / Bear ───────────────────────────────────────────────────
+      (n.bull_case || n.bear_case) && h("div", { className: "grid gap-3 sm:grid-cols-2" },
+        n.bull_case && h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-green" }, "Post-Earnings Bull Case"),
+          h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted" }, n.bull_case)
+        ),
+        n.bear_case && h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-red" }, "Post-Earnings Bear Case"),
+          h("p", { className: "mt-3 text-sm leading-relaxed text-pulse-muted" }, n.bear_case)
+        )
+      ),
+
+      // ── Analyst reactions + next quarter ─────────────────────────────
+      h("div", { className: "grid gap-3 sm:grid-cols-2" },
+        h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Analyst Reactions"),
+          n.analyst_sentiment && h("p", { className: "mt-3 mb-3 text-sm leading-relaxed text-pulse-muted" }, n.analyst_sentiment),
+          actions.length > 0 ? h("div", { className: "grid gap-1.5" }, actions.map((a, i) => {
+            const isUp   = a.action === "upgrade"   || a.action === "reiterated";
+            const isDown = a.action === "downgrade";
+            const dotCls = isUp ? "bg-pulse-green" : isDown ? "bg-pulse-red" : "bg-pulse-amber";
+            return h("div", { key: i, className: "flex items-start gap-2 text-xs" },
+              h("span", { className: cx("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", dotCls) }),
+              h("div", null,
+                h("span", { className: "font-semibold text-pulse-ink" }, a.firm),
+                h("span", { className: "text-pulse-muted" }, " ", a.action),
+                (a.from_grade && a.to_grade) && h("span", { className: "text-pulse-dim" }, " ", a.from_grade, " → ", a.to_grade),
+                h("span", { className: "ml-1 text-pulse-dim" }, a.date)
+              )
+            );
+          })) : h("p", { className: "text-xs text-pulse-dim mt-2" }, "No rating actions in last 90 days.")
+        ),
+        h(Card, { className: "p-4" },
+          h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim mb-3" }, "Watch Into Next Quarter"),
+          (n.key_watch_items || []).length > 0 && h("ul", { className: "grid gap-2 text-sm text-pulse-muted" },
+            (n.key_watch_items || []).map((item, i) =>
+              h("li", { key: i, className: "flex gap-2" },
+                h("span", { className: "shrink-0 font-mono text-pulse-cyan" }, String(i + 1) + "."),
+                h("span", null, item)
+              )
+            )
+          ),
+          Object.keys(nq).length > 0 && h("div", { className: "mt-4 border-t border-pulse-line pt-3" },
+            h("div", { className: "font-mono text-[10px] uppercase tracking-[0.2em] text-pulse-dim mb-2" }, "Next Quarter Estimates"),
+            h("div", { className: "grid gap-1" }, [
+              nq.date                       && kvRow("Earnings Date",   nq.date),
+              nq.eps_estimate_mean          && kvRow("EPS Consensus",   priceFmt(nq.eps_estimate_mean)),
+              (nq.eps_estimate_low && nq.eps_estimate_high) && kvRow("EPS Range", `${priceFmt(nq.eps_estimate_low)} – ${priceFmt(nq.eps_estimate_high)}`),
+              nq.revenue_mean_bn            && kvRow("Revenue Est.",    `$${nq.revenue_mean_bn}B`),
+              (nq.revenue_low_bn && nq.revenue_high_bn) && kvRow("Revenue Range", `$${nq.revenue_low_bn}B – $${nq.revenue_high_bn}B`),
+            ].filter(Boolean))
+          )
+        )
+      )
     );
   }
 
