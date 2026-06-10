@@ -276,9 +276,14 @@ class SentimentNewsAgent(BaseAgent):
         except Exception:
             pass
 
+        # URL-encode the ticker before interpolating into feed URLs (defense in
+        # depth — the orchestrator validates tickers, but encode at the boundary).
+        from urllib.parse import quote
+        q_ticker = quote(ticker, safe="")
+
         # 3. Yahoo Finance RSS (no key required)
         rss_items = SentimentNewsAgent._fetch_rss(
-            f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US",
+            f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={q_ticker}&region=US&lang=en-US",
             ticker, "Yahoo RSS",
         )
         if rss_items:
@@ -286,7 +291,7 @@ class SentimentNewsAgent(BaseAgent):
 
         # 4. Finviz RSS
         finviz_items = SentimentNewsAgent._fetch_rss(
-            f"https://finviz.com/rss.ashx?t={ticker}",
+            f"https://finviz.com/rss.ashx?t={q_ticker}",
             ticker, "Finviz RSS",
         )
         return finviz_items

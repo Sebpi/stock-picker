@@ -2187,32 +2187,48 @@ def create_refresh_token(user_id: str) -> str:
 
 
 def rotate_refresh_token(raw_token: str) -> tuple[str, str] | None:
-    """Consume old token, issue new one. Returns (new_raw_token, user_id) or None if invalid."""
+    """Consume old token, issue new one. Returns (new_raw_token, user_id) or None if invalid.
+
+    The whole rotation — validate, revoke old, mint new, link chain — runs in a
+    SINGLE transaction with an atomic conditional revoke. If two requests race
+    with the same token, only the one whose UPDATE actually flips `revoked`
+    proceeds; the other sees 0 rows changed and is rejected. This is the token-
+    reuse / theft-detection guarantee, so it must stay atomic.
+    """
     token_hash = _hash_token(raw_token)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
     with get_conn() as conn:
         row = conn.execute(
             "SELECT token_id, user_id, expires_at, revoked FROM refresh_tokens WHERE token_hash = ?",
             (token_hash,),
         ).fetchone()
-        if not row or row["revoked"] or row["expires_at"] < now:
+        if not row or row["revoked"] or row["expires_at"] < now_iso:
             return None
-        conn.execute(
-            "UPDATE refresh_tokens SET revoked = 1 WHERE token_id = ?",
+        # Atomic conditional revoke: only succeeds if still un-revoked. Loser of
+        # a race changes 0 rows and is rejected (reuse detection).
+        cur = conn.execute(
+            "UPDATE refresh_tokens SET revoked = 1 WHERE token_id = ? AND revoked = 0",
             (row["token_id"],),
         )
-    new_raw = create_refresh_token(row["user_id"])
-    # Record replacement chain
-    new_hash = _hash_token(new_raw)
-    with get_conn() as conn:
-        new_row = conn.execute(
-            "SELECT token_id FROM refresh_tokens WHERE token_hash = ?", (new_hash,)
-        ).fetchone()
-        if new_row:
-            conn.execute(
-                "UPDATE refresh_tokens SET replaced_by = ? WHERE token_id = ?",
-                (new_row["token_id"], row["token_id"]),
-            )
+        if cur.rowcount != 1:
+            return None
+        # Mint the replacement within the same transaction.
+        new_raw = secrets.token_urlsafe(48)
+        new_hash = _hash_token(new_raw)
+        new_token_id = str(uuid.uuid4())
+        expires = (now + timedelta(days=_REFRESH_TOKEN_DAYS)).isoformat()
+        conn.execute(
+            """
+            INSERT INTO refresh_tokens (token_id, user_id, token_hash, created_at, expires_at, revoked)
+            VALUES (?, ?, ?, ?, ?, 0)
+            """,
+            (new_token_id, row["user_id"], new_hash, now_iso, expires),
+        )
+        conn.execute(
+            "UPDATE refresh_tokens SET replaced_by = ? WHERE token_id = ?",
+            (new_token_id, row["token_id"]),
+        )
     return new_raw, row["user_id"]
 
 
