@@ -124,6 +124,8 @@ class MultiAgentPhase1Tests(unittest.TestCase):
 
         db.init_db()
         original_get_orchestrator = main._get_orchestrator
+        original_service_key = main._SERVICE_KEY
+        main._SERVICE_KEY = "svc-test-key"
         main.app.dependency_overrides[main.get_current_user] = lambda: "unit-test"
 
         class FakeOrchestrator:
@@ -133,7 +135,9 @@ class MultiAgentPhase1Tests(unittest.TestCase):
         try:
             main._get_orchestrator = lambda: FakeOrchestrator()
 
-            client = TestClient(main.app, headers={"host": "localhost"})
+            # auth_middleware now backstops /v1/* — supply a transport credential
+            # (the dependency override still provides the fake user identity).
+            client = TestClient(main.app, headers={"host": "localhost", "Authorization": "Bearer svc-test-key"})
             response = client.post("/v1/runs", json={"tickers": [self.ticker.lower()], "run_fresh": False})
 
             self.assertEqual(response.status_code, 200, response.text)
@@ -148,6 +152,7 @@ class MultiAgentPhase1Tests(unittest.TestCase):
             self.assertEqual(persisted_body["completed"], [self.ticker])
         finally:
             main._get_orchestrator = original_get_orchestrator
+            main._SERVICE_KEY = original_service_key
             main.app.dependency_overrides.clear()
 
     def test_service_key_can_authenticate_v1_integration_calls(self):

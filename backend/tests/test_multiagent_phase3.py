@@ -83,9 +83,12 @@ class MultiAgentPhase3Tests(unittest.TestCase):
         db.create_thesis_run(self.run_id, [self.ticker], run_fresh=False, requested_by="unit-test")
         db.update_thesis_run(self.run_id, status="partial", completed=[], failed=[self.ticker])
 
+        original_service_key = main._SERVICE_KEY
+        main._SERVICE_KEY = "svc-test-key"
         main.app.dependency_overrides[main.get_current_user] = lambda: "unit-test"
         try:
-            client = TestClient(main.app, headers={"host": "localhost"})
+            # auth_middleware now backstops /v1/* — supply a transport credential.
+            client = TestClient(main.app, headers={"host": "localhost", "Authorization": "Bearer svc-test-key"})
 
             runs = client.get("/v1/runs?limit=5")
             self.assertEqual(runs.status_code, 200, runs.text)
@@ -101,16 +104,20 @@ class MultiAgentPhase3Tests(unittest.TestCase):
             self.assertIn("forecast_outcomes", body)
             self.assertTrue(any(r["run_id"] == self.run_id for r in body["recent_failures"]))
         finally:
+            main._SERVICE_KEY = original_service_key
             main.app.dependency_overrides.clear()
 
     def test_sync_evaluate_endpoint_reports_evaluated_count(self):
         import main
 
         original = evaluation.evaluate_pending_outcomes
+        original_service_key = main._SERVICE_KEY
+        main._SERVICE_KEY = "svc-test-key"
         main.app.dependency_overrides[main.get_current_user] = lambda: "unit-test"
         try:
             evaluation.evaluate_pending_outcomes = lambda: 7
-            client = TestClient(main.app, headers={"host": "localhost"})
+            # auth_middleware now backstops /v1/* — supply a transport credential.
+            client = TestClient(main.app, headers={"host": "localhost", "Authorization": "Bearer svc-test-key"})
             response = client.post("/v1/evaluate?sync=true")
 
             self.assertEqual(response.status_code, 200, response.text)
@@ -120,6 +127,7 @@ class MultiAgentPhase3Tests(unittest.TestCase):
             self.assertEqual(body["scheduler"]["last_evaluated_count"], 7)
         finally:
             evaluation.evaluate_pending_outcomes = original
+            main._SERVICE_KEY = original_service_key
             main.app.dependency_overrides.clear()
 
 
