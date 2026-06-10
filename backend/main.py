@@ -389,6 +389,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(h
         username: str = payload.get("sub", "")
         if username and username in load_users():
             return username
+        # Also accept multi-user (SQLite app_users) tokens.
+        if username:
+            import db as _db
+            app_user = _db.get_user_by_username(username)
+            if app_user and app_user["is_active"]:
+                return app_user["username"]
         # Local JWT decoded but user vanished — fall through to portal check
         # rather than raising, to keep portal-only users working.
     except JWTError:
@@ -519,6 +525,12 @@ async def auth_middleware(request: Request, call_next):
         username = payload.get("sub", "")
         if username and username in load_users():
             return await call_next(request)
+        # Also accept multi-user (SQLite app_users) tokens.
+        if username:
+            import db as _db
+            app_user = _db.get_user_by_username(username)
+            if app_user and app_user["is_active"]:
+                return await call_next(request)
         # Decoded but user vanished — fall through to portal check.
     except JWTError:
         pass
@@ -3208,19 +3220,38 @@ async def shutdown():
 @app.post("/api/auth/login")
 @limiter.limit("10/minute")
 async def login(req: LoginRequest, request: Request):
+    import db as _db
     raw_username = req.username.strip()
     lock_key = _norm_username(raw_username)
     _check_lockout(lock_key)
+    client_ip = request.client.host if request.client else "unknown"
+    # Legacy users.json path (admin login — unchanged).
     users = load_users()
     ukey, user = _lookup_user_ci(users, raw_username)
-    if not user or not _verify_pw(req.password, user["hashed_password"]):
-        _record_failed_login(lock_key)
-        logger.warning("LOGIN_FAIL username=%s ip=%s", lock_key, request.client.host if request.client else "unknown")
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    _clear_failed_logins(lock_key)
-    logger.info("LOGIN_OK username=%s ip=%s", ukey, request.client.host if request.client else "unknown")
-    token = create_access_token(ukey)
-    return {"access_token": token, "token_type": "bearer"}
+    if user and _verify_pw(req.password, user["hashed_password"]):
+        _clear_failed_logins(lock_key)
+        logger.info("LOGIN_OK username=%s ip=%s", ukey, client_ip)
+        token = create_access_token(ukey)
+        return {"access_token": token, "token_type": "bearer"}
+    # Multi-user SQLite path (registered accounts).
+    app_user = _db.get_user_by_username(raw_username)
+    if app_user and _verify_pw(req.password, app_user["password_hash"]):
+        if not app_user["is_active"]:
+            raise HTTPException(status_code=403, detail="Account disabled")
+        _clear_failed_logins(lock_key)
+        _db.update_user(app_user["user_id"], last_login_at=datetime.now(timezone.utc).isoformat())
+        logger.info("LOGIN_OK username=%s ip=%s (multi-user)", app_user["username"], client_ip)
+        access_token = create_short_access_token(app_user["username"])
+        refresh_token = _db.create_refresh_token(app_user["user_id"])
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "expires_in": _ACCESS_TOKEN_MINUTES * 60,
+        }
+    _record_failed_login(lock_key)
+    logger.warning("LOGIN_FAIL username=%s ip=%s", lock_key, client_ip)
+    raise HTTPException(status_code=401, detail="Invalid username or password")
 
 @app.post("/api/auth/forgot-password")
 @limiter.limit("5/minute")
@@ -3323,7 +3354,7 @@ async def register(req: RegisterRequest, request: Request, background_tasks: Bac
     user = _db.create_user(req.username, req.email, pw_hash)
     token = _db.create_email_verification_token(user["user_id"])
     app_url = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
-    verify_link = f"{app_url}/api/auth/verify-email?token={token}"
+    verify_link = f"{app_url}/?verify_token={token}"
     background_tasks.add_task(
         send_email,
         "StockLens - Verify your email",
