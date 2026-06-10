@@ -3416,7 +3416,7 @@
         .then(d => setEvents(d.events || []))
         .catch(() => setEvents([]))
         .finally(() => setLoading(false));
-      api("/v1/earnings/calendar?days_ahead=10")
+      api("/v1/earnings/calendar?days_ahead=30")
         .then(d => setCalendar(d.calendar || []))
         .catch(() => setCalendar([]))
         .finally(() => setCalLoading(false));
