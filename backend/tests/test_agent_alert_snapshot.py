@@ -75,6 +75,7 @@ class TestAgentAlertSnapshotBuys(unittest.IsolatedAsyncioTestCase):
             "initial_float": 10_000.0,
             "alert_buy_min_score": 72,
             "alert_sell_max_score": 42,
+            "regime_gate_enabled": False,  # disable live yfinance calls in tests
         }
         if settings:
             _settings.update(settings)
@@ -181,6 +182,7 @@ class TestAgentAlertSnapshotSells(unittest.IsolatedAsyncioTestCase):
             "initial_float": 10_000.0,
             "alert_buy_min_score": 72,
             "alert_sell_max_score": 42,
+            "regime_gate_enabled": False,  # disable live yfinance calls in tests
         }
         if settings:
             _settings.update(settings)
@@ -287,6 +289,7 @@ class TestAgentAlertSnapshotFloatRespected(unittest.IsolatedAsyncioTestCase):
                     "initial_float": float_val,
                     "alert_buy_min_score": 72,
                     "alert_sell_max_score": 42,
+                    "regime_gate_enabled": False,  # disable live yfinance calls in tests
                 }),
                 patch("agents.orchestrator.OrchestratorAgent.run_thesis", side_effect=_fake_run_thesis),
             ):
