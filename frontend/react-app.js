@@ -34,6 +34,7 @@
     ["portfolio", "Portfolio"],
     ["paper", "Paper P&L"],
     ["learning", "Learning"],
+    ["account", "Account"],
     ["help", "Help"],
   ];
 
@@ -321,82 +322,259 @@
   }
 
   // ──────────────────────────────────────────────────────────────
-  // Login
+  // Login / Register
   // ──────────────────────────────────────────────────────────────
 
   function Login({ onLogin }) {
     const params = new URLSearchParams(window.location.search);
     const resetToken = params.get("reset_token");
+    const verifyToken = params.get("verify_token");
     const [mode, setMode] = useState(resetToken ? "reset" : "login");
-    const [username, setUsername] = useState("admin");
+    const [username, setUsername] = useState("");
+    const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [newPassword, setNewPassword] = useState("");
     const [confirm, setConfirm] = useState("");
-    const [message, setMessage] = useState("");
+    const [message, setMessage] = useState({ text: "", ok: false });
     const [busy, setBusy] = useState(false);
+
+    // Auto-verify email if ?verify_token= is in URL
+    useEffect(() => {
+      if (!verifyToken) return;
+      api(`/api/auth/verify-email?token=${encodeURIComponent(verifyToken)}`)
+        .then(() => {
+          window.history.replaceState(null, "", "/");
+          setMessage({ text: "Email verified! You can now sign in.", ok: true });
+        })
+        .catch(() => setMessage({ text: "Verification link is invalid or expired.", ok: false }));
+    }, [verifyToken]);
 
     async function submitLogin(e) {
       e.preventDefault();
-      setBusy(true); setMessage("");
+      setBusy(true); setMessage({ text: "", ok: false });
       try {
         const data = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
         setToken(data.access_token);
         onLogin();
-      } catch (err) { setMessage(err.message || "Could not sign in."); } finally { setBusy(false); }
+      } catch (err) { setMessage({ text: err.message || "Could not sign in.", ok: false }); } finally { setBusy(false); }
+    }
+
+    async function submitRegister(e) {
+      e.preventDefault();
+      if (password !== confirm) { setMessage({ text: "Passwords do not match.", ok: false }); return; }
+      if (password.length < 12) { setMessage({ text: "Password must be at least 12 characters.", ok: false }); return; }
+      setBusy(true); setMessage({ text: "", ok: false });
+      try {
+        await api("/api/auth/register", { method: "POST", body: JSON.stringify({ username, email, password }) });
+        setMessage({ text: "Account created! Check your email to verify your address, then sign in.", ok: true });
+        setMode("login");
+      } catch (err) { setMessage({ text: err.message || "Could not create account.", ok: false }); } finally { setBusy(false); }
     }
 
     async function forgot(e) {
       e.preventDefault();
-      setBusy(true); setMessage("");
+      setBusy(true); setMessage({ text: "", ok: false });
       try {
         const data = await api("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ username }) });
-        setMessage(data.message || "If that username exists, a reset link has been sent.");
-      } catch (err) { setMessage(err.message || "Could not request reset."); } finally { setBusy(false); }
+        setMessage({ text: data.message || "If that username exists, a reset link has been sent.", ok: true });
+      } catch (err) { setMessage({ text: err.message || "Could not request reset.", ok: false }); } finally { setBusy(false); }
     }
 
     async function reset(e) {
       e.preventDefault();
-      if (newPassword !== confirm) { setMessage("Passwords do not match."); return; }
-      setBusy(true); setMessage("");
+      if (newPassword !== confirm) { setMessage({ text: "Passwords do not match.", ok: false }); return; }
+      setBusy(true); setMessage({ text: "", ok: false });
       try {
         await api("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ token: resetToken, new_password: newPassword }) });
         window.history.replaceState(null, "", "/");
         setMode("login");
-        setMessage("Password updated. Please sign in.");
-      } catch (err) { setMessage(err.message || "Could not reset password."); } finally { setBusy(false); }
+        setMessage({ text: "Password updated. Please sign in.", ok: true });
+      } catch (err) { setMessage({ text: err.message || "Could not reset password.", ok: false }); } finally { setBusy(false); }
     }
+
+    const msg = message.text ? h("p", { className: `text-sm ${message.ok ? "text-pulse-cyan" : "text-pulse-amber"}` }, message.text) : null;
+
+    const header = h("div", { className: "mb-6 flex items-center gap-3" },
+      h("img", { src: "/static/logo.svg", className: "h-10 w-10", alt: "" }),
+      h("div", null,
+        h("h1", { className: "text-xl font-semibold" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
+        h("p", { className: "text-xs text-pulse-muted" }, mode === "register" ? "Create your account" : "Sign in to continue")
+      )
+    );
 
     return h("main", { id: "login-overlay", className: "flex min-h-screen items-center justify-center px-4 py-10" },
       h(Card, { className: "w-full max-w-sm p-6" },
-        h("div", { className: "mb-6 flex items-center gap-3" },
-          h("img", { src: "/static/logo.svg", className: "h-10 w-10", alt: "" }),
-          h("div", null,
-            h("h1", { className: "text-xl font-semibold" }, "Stock", h("span", { className: "bg-gradient-to-r from-pulse-cyan to-pulse-magenta bg-clip-text text-transparent" }, "Lens")),
-            h("p", { className: "text-xs text-pulse-muted" }, "React mobile-first")
-          )
-        ),
+        header,
         mode === "login" ? h("form", { onSubmit: submitLogin, className: "grid gap-3" },
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Username"),
           h(TextInput, { id: "login-username", value: username, onChange: e => setUsername(e.target.value), autoComplete: "username" }),
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Password"),
           h(TextInput, { id: "login-password", value: password, onChange: e => setPassword(e.target.value), type: "password", autoComplete: "current-password" }),
-          message ? h("p", { className: "text-sm text-pulse-amber" }, message) : null,
+          msg,
           h(Button, { id: "btn-login", kind: "primary", disabled: busy, type: "submit", className: "mt-2" }, busy ? "Signing in..." : "Sign in"),
-          h("button", { type: "button", onClick: () => { setMode("forgot"); setMessage(""); }, className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Forgot password?")
+          h("div", { className: "flex justify-between mt-1" },
+            h("button", { type: "button", onClick: () => { setMode("forgot"); setMessage({ text: "", ok: false }); }, className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Forgot password?"),
+            h("button", { type: "button", onClick: () => { setMode("register"); setMessage({ text: "", ok: false }); setUsername(""); setPassword(""); }, className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Create account")
+          )
+        ) : mode === "register" ? h("form", { onSubmit: submitRegister, className: "grid gap-3" },
+          h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Username"),
+          h(TextInput, { id: "reg-username", value: username, onChange: e => setUsername(e.target.value), autoComplete: "username" }),
+          h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Email"),
+          h(TextInput, { id: "reg-email", value: email, onChange: e => setEmail(e.target.value), type: "email", autoComplete: "email" }),
+          h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Password"),
+          h(TextInput, { id: "reg-password", value: password, onChange: e => setPassword(e.target.value), type: "password", autoComplete: "new-password" }),
+          h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Confirm password"),
+          h(TextInput, { id: "reg-confirm", value: confirm, onChange: e => setConfirm(e.target.value), type: "password", autoComplete: "new-password" }),
+          h("p", { className: "text-[11px] text-pulse-dim" }, "Min 12 characters. A verification email will be sent."),
+          msg,
+          h(Button, { id: "btn-register", kind: "primary", disabled: busy, type: "submit", className: "mt-1" }, busy ? "Creating account..." : "Create account"),
+          h("button", { type: "button", onClick: () => { setMode("login"); setMessage({ text: "", ok: false }); }, className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Already have an account? Sign in")
         ) : mode === "forgot" ? h("form", { onSubmit: forgot, className: "grid gap-3" },
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Username"),
           h(TextInput, { value: username, onChange: e => setUsername(e.target.value) }),
-          message ? h("p", { className: "text-sm text-pulse-amber" }, message) : null,
+          msg,
           h(Button, { kind: "primary", disabled: busy, type: "submit", className: "mt-2" }, busy ? "Sending..." : "Send reset link"),
-          h("button", { type: "button", onClick: () => { setMode("login"); setMessage(""); }, className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Back to sign in")
+          h("button", { type: "button", onClick: () => { setMode("login"); setMessage({ text: "", ok: false }); }, className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Back to sign in")
         ) : h("form", { onSubmit: reset, className: "grid gap-3" },
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "New password"),
           h(TextInput, { value: newPassword, onChange: e => setNewPassword(e.target.value), type: "password" }),
           h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Confirm password"),
           h(TextInput, { value: confirm, onChange: e => setConfirm(e.target.value), type: "password" }),
-          message ? h("p", { className: "text-sm text-pulse-amber" }, message) : null,
+          msg,
           h(Button, { kind: "primary", disabled: busy, type: "submit", className: "mt-2" }, busy ? "Updating..." : "Set password")
         )
+      )
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Account
+  // ──────────────────────────────────────────────────────────────
+
+  function Account() {
+    const [profile, setProfile] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState({ text: "", ok: false });
+    const [mfaSetup, setMfaSetup] = useState(null);
+    const [totpCode, setTotpCode] = useState("");
+    const [disableCode, setDisableCode] = useState("");
+    const [showDisable, setShowDisable] = useState(false);
+
+    useEffect(() => {
+      api("/api/auth/me").then(setProfile).catch(() => setMsg({ text: "Could not load profile.", ok: false }));
+    }, []);
+
+    async function startMfaSetup() {
+      setBusy(true); setMsg({ text: "", ok: false });
+      try { const data = await api("/api/auth/mfa/setup", { method: "POST" }); setMfaSetup(data); }
+      catch (err) { setMsg({ text: err.message || "Could not start MFA setup.", ok: false }); }
+      finally { setBusy(false); }
+    }
+
+    async function verifyMfa(e) {
+      e.preventDefault();
+      setBusy(true); setMsg({ text: "", ok: false });
+      try {
+        await api("/api/auth/mfa/verify", { method: "POST", body: JSON.stringify({ code: totpCode }) });
+        setMsg({ text: "MFA enabled! Keep your authenticator app safe.", ok: true });
+        setMfaSetup(null); setTotpCode("");
+        const d = await api("/api/auth/me"); setProfile(d);
+      } catch (err) { setMsg({ text: err.message || "Invalid code — try again.", ok: false }); }
+      finally { setBusy(false); }
+    }
+
+    async function disableMfa(e) {
+      e.preventDefault();
+      setBusy(true); setMsg({ text: "", ok: false });
+      try {
+        await api("/api/auth/mfa/disable", { method: "POST", body: JSON.stringify({ code: disableCode }) });
+        setMsg({ text: "MFA disabled.", ok: true });
+        setShowDisable(false); setDisableCode("");
+        const d = await api("/api/auth/me"); setProfile(d);
+      } catch (err) { setMsg({ text: err.message || "Invalid code.", ok: false }); }
+      finally { setBusy(false); }
+    }
+
+    async function logoutAll() {
+      setBusy(true); setMsg({ text: "", ok: false });
+      try {
+        await api("/api/auth/logout-all", { method: "POST" });
+        setMsg({ text: "All other sessions revoked.", ok: true });
+      } catch (err) { setMsg({ text: err.message || "Could not revoke sessions.", ok: false }); }
+      finally { setBusy(false); }
+    }
+
+    if (!profile) return h("div", { className: "flex items-center justify-center py-20 text-pulse-muted" }, "Loading...");
+
+    const tierColor = { free: "text-pulse-dim", pro: "text-pulse-cyan", premium: "text-pulse-magenta" }[profile.tier] || "text-pulse-dim";
+    const msgEl = msg.text ? h("p", { className: `text-sm ${msg.ok ? "text-pulse-cyan" : "text-pulse-amber"}` }, msg.text) : null;
+
+    return h("div", { className: "mx-auto max-w-xl space-y-4 px-4 py-6" },
+      h(Card, { className: "p-5" },
+        h("h2", { className: "mb-4 font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Profile"),
+        h("div", { className: "space-y-2 text-sm" },
+          h("div", { className: "flex justify-between" },
+            h("span", { className: "text-pulse-muted" }, "Username"),
+            h("span", { className: "font-mono" }, profile.username)
+          ),
+          profile.email && h("div", { className: "flex justify-between" },
+            h("span", { className: "text-pulse-muted" }, "Email"),
+            h("span", { className: "font-mono text-xs break-all" }, profile.email)
+          ),
+          h("div", { className: "flex justify-between" },
+            h("span", { className: "text-pulse-muted" }, "Tier"),
+            h("span", { className: `font-mono font-semibold uppercase ${tierColor}` }, profile.tier || "free")
+          ),
+          h("div", { className: "flex justify-between" },
+            h("span", { className: "text-pulse-muted" }, "Email verified"),
+            h("span", { className: profile.email_verified ? "text-pulse-green" : "text-pulse-amber" }, profile.email_verified ? "Yes" : "Pending")
+          ),
+          h("div", { className: "flex justify-between" },
+            h("span", { className: "text-pulse-muted" }, "Two-factor auth"),
+            h("span", { className: profile.mfa_enabled ? "text-pulse-green" : "text-pulse-dim" }, profile.mfa_enabled ? "Enabled" : "Disabled")
+          )
+        ),
+        msgEl ? h("div", { className: "mt-3" }, msgEl) : null
+      ),
+      h(Card, { className: "p-5" },
+        h("h2", { className: "mb-3 font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Two-Factor Authentication"),
+        profile.mfa_enabled
+          ? h("div", { className: "space-y-3" },
+              h("p", { className: "text-sm text-pulse-muted" }, "MFA is active. Use your authenticator app when signing in."),
+              !showDisable
+                ? h(Button, { onClick: () => setShowDisable(true), className: "text-xs" }, "Disable MFA")
+                : h("form", { onSubmit: disableMfa, className: "grid gap-2 mt-2" },
+                    h("p", { className: "text-xs text-pulse-amber" }, "Enter the 6-digit code from your authenticator to confirm:"),
+                    h(TextInput, { value: disableCode, onChange: e => setDisableCode(e.target.value), maxLength: 6, placeholder: "000000" }),
+                    h("div", { className: "flex gap-2" },
+                      h(Button, { kind: "primary", disabled: busy, type: "submit", className: "text-xs" }, busy ? "Disabling..." : "Confirm disable"),
+                      h(Button, { onClick: () => { setShowDisable(false); setDisableCode(""); }, className: "text-xs" }, "Cancel")
+                    )
+                  )
+            )
+          : h("div", { className: "space-y-3" },
+              !mfaSetup
+                ? h("div", { className: "space-y-2" },
+                    h("p", { className: "text-sm text-pulse-muted" }, "Protect your account with any TOTP app (Google Authenticator, Authy, 1Password, etc.)."),
+                    h(Button, { onClick: startMfaSetup, disabled: busy, className: "text-xs" }, busy ? "Loading..." : "Set up MFA")
+                  )
+                : h("div", { className: "space-y-3" },
+                    h("p", { className: "text-sm text-pulse-muted" }, "Copy this URI into your authenticator app, or enter the key manually:"),
+                    h("div", { className: "rounded-lg bg-pulse-panel p-3 font-mono text-[10px] break-all leading-relaxed text-pulse-cyan select-all" }, mfaSetup.provisioning_uri),
+                    mfaSetup.secret && h("p", { className: "text-xs text-pulse-muted" }, "Secret key: ", h("span", { className: "font-mono text-pulse-dim select-all" }, mfaSetup.secret)),
+                    h("form", { onSubmit: verifyMfa, className: "grid gap-2 mt-2" },
+                      h("label", { className: "text-xs uppercase tracking-wide text-pulse-muted" }, "Enter 6-digit code from app"),
+                      h(TextInput, { value: totpCode, onChange: e => setTotpCode(e.target.value), maxLength: 6, placeholder: "000000" }),
+                      h(Button, { kind: "primary", disabled: busy, type: "submit", className: "text-xs" }, busy ? "Verifying..." : "Verify & enable"),
+                      h("button", { type: "button", onClick: () => setMfaSetup(null), className: "text-sm text-pulse-muted hover:text-pulse-cyan" }, "Cancel")
+                    )
+                  )
+            )
+      ),
+      h(Card, { className: "p-5" },
+        h("h2", { className: "mb-3 font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Sessions"),
+        h("p", { className: "mb-3 text-sm text-pulse-muted" }, "Sign out all other active sessions and revoke all refresh tokens."),
+        h(Button, { onClick: logoutAll, disabled: busy, className: "text-xs" }, busy ? "Revoking..." : "Sign out all devices")
       )
     );
   }
@@ -3183,6 +3361,7 @@
       portfolio: h(Portfolio, { openDetail }),
       paper: h(PaperPnL),
       learning: h(Learning),
+      account: h(Account),
       help: h(Help),
     };
 
