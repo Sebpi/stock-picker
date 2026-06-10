@@ -1279,6 +1279,8 @@ _screen_universe_cache: dict[str, tuple[list[dict], datetime]] = {}
 _sentiment_cache: dict[str, dict] = {}  # key → {"ts": datetime, "data": dict}
 _SENTIMENT_WATCHLIST_TTL = 1800   # 30 min
 _SENTIMENT_TICKER_TTL   = 900     # 15 min
+_earnings_calendar_cache: dict[int, dict] = {}  # days_ahead → {"data": list, "fetched_at": datetime}
+_EARNINGS_CALENDAR_TTL = 14400    # 4 hours — dates don't change intraday
 _PREWARM_BATCH = 25          # tickers per batch
 _PREWARM_DELAY = 1.2         # seconds between batches (avoids yfinance rate-limit)
 # Match the cache TTL to the prewarm cadence (6h, see scheduler in startup()).
@@ -8140,12 +8142,29 @@ async def v1_earnings_calendar(
     """Return upcoming earnings dates for watchlist tickers."""
     import earnings_watcher as _ew
     days_ahead = max(1, min(int(days_ahead), 30))
+    now = datetime.now(timezone.utc)
+    entry = _earnings_calendar_cache.get(days_ahead)
+    if entry and (now - entry["fetched_at"]).total_seconds() < _EARNINGS_CALENDAR_TTL:
+        return {
+            "calendar": entry["data"],
+            "count": len(entry["data"]),
+            "days_ahead": days_ahead,
+            "cached": True,
+            "cached_at": entry["fetched_at"].isoformat(),
+        }
     watchlist = load_watchlist()
     loop = asyncio.get_event_loop()
     upcoming = await loop.run_in_executor(
         None, lambda: _ew.get_upcoming_earnings(watchlist, days_ahead=days_ahead)
     )
-    return {"calendar": upcoming, "count": len(upcoming), "days_ahead": days_ahead}
+    _earnings_calendar_cache[days_ahead] = {"data": upcoming, "fetched_at": now}
+    return {
+        "calendar": upcoming,
+        "count": len(upcoming),
+        "days_ahead": days_ahead,
+        "cached": False,
+        "cached_at": now.isoformat(),
+    }
 
 
 @app.post("/v1/earnings/check")
