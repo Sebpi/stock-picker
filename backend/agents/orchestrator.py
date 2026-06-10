@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
 # Minimum agents required for a usable thesis
 MIN_AGENTS_REQUIRED = 3
 
-# Score → base 12m return mapping (linear interpolation between anchors)
-SCORE_TO_12M_RETURN = [
+# Score → base 12m return mapping (linear interpolation between anchors).
+# Rebuilt quarterly by rebuild_score_return_table() from realised score-bucket data.
+SCORE_TO_12M_RETURN: list[tuple[float, float]] = [
     (0, -30.0),
     (30, -15.0),
     (50, -2.0),
@@ -43,6 +44,7 @@ SCORE_TO_12M_RETURN = [
     (80, 18.0),
     (100, 28.0),
 ]
+_SCORE_TO_12M_DEFAULT = list(SCORE_TO_12M_RETURN)  # snapshot for fallback
 
 ANTHROPIC_MODEL_THESIS = os.getenv("THESIS_MODEL", "claude-sonnet-4-6")
 THESIS_MAX_TOKENS = int(os.getenv("THESIS_MAX_TOKENS", "2048"))
@@ -60,6 +62,48 @@ def _interpolate(score: float, table: list[tuple[float, float]]) -> float:
             frac = (score - s0) / (s1 - s0)
             return round(r0 + frac * (r1 - r0), 2)
     return 0.0
+
+
+def rebuild_score_return_table(min_samples: int = 10) -> bool:
+    """
+    Rebuild SCORE_TO_12M_RETURN from realised score-bucket data in the DB.
+    Anchors with fewer than min_samples observations keep their default value.
+    Called by the weekly recalibration job. Returns True if the table was updated.
+    """
+    global SCORE_TO_12M_RETURN
+    try:
+        buckets = db.get_score_buckets_all(window_days=365)
+    except Exception as exc:
+        logger.warning("[orchestrator] rebuild_score_return_table: DB read failed: %s", exc)
+        return False
+
+    realised: dict[str, float] = {}
+    for b in buckets:
+        if b.get("horizon") == "12m" and (b.get("n_evaluated") or 0) >= min_samples:
+            realised[b["bucket_label"]] = b["avg_realised_return"]
+
+    if not realised:
+        return False
+
+    bucket_midpoints = {
+        "0-50": 25.0, "50-60": 55.0, "60-70": 65.0,
+        "70-80": 75.0, "80-90": 85.0, "90-100": 95.0,
+    }
+    default_map = dict(_SCORE_TO_12M_DEFAULT)
+
+    new_points: list[tuple[float, float]] = []
+    for label, midpoint in bucket_midpoints.items():
+        if label in realised:
+            new_points.append((midpoint, realised[label]))
+
+    if len(new_points) < 3:
+        return False
+
+    # Merge with original boundary anchors so interpolation stays sane at extremes
+    new_table = [(0.0, _SCORE_TO_12M_DEFAULT[0][1]), *sorted(new_points), (100.0, _SCORE_TO_12M_DEFAULT[-1][1])]
+    SCORE_TO_12M_RETURN = new_table
+    logger.info("[orchestrator] SCORE_TO_12M_RETURN rebuilt from %d realised buckets", len(new_points))
+    return True
 
 
 def _horizon_return(score: float, horizon: str) -> tuple[float, float, float]:
@@ -196,6 +240,17 @@ class OrchestratorAgent:
             )
 
         composite = weighted.get("12m", 50.0)
+
+        # Conflict score: std dev of usable agent scores normalised to [0,1].
+        # 0 = full consensus, 1 = maximum disagreement across agents.
+        usable_scores = [s.score for s in signals.values() if s.is_usable]
+        conflict_score = round(
+            statistics.stdev(usable_scores) / 50.0
+            if len(usable_scores) > 1 else 0.0,
+            3,
+        )
+        conflict_score = max(0.0, min(1.0, conflict_score))
+
         agent_scores = {aid: round(s.score, 1) for aid, s in signals.items()}
         agent_meta = {
             aid: {
@@ -247,6 +302,7 @@ class OrchestratorAgent:
             narrative={k: v for k, v in narrative.items() if not k.startswith("_")},
             quality_flags=thesis_flags,
             decision_log=log,
+            conflict_score=conflict_score,
         )
 
         # ---- Persist ----

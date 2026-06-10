@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS forecast_outcome (
     outcome_id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     thesis_id           TEXT NOT NULL,
     ticker              TEXT NOT NULL,
-    horizon             TEXT NOT NULL,  -- 3m | 6m | 12m
+    horizon             TEXT NOT NULL,  -- 1m | 3m | 6m | 12m
     forecast_return_pct REAL,
     realised_return_pct REAL,
     benchmark_return_pct REAL,
@@ -157,7 +157,8 @@ CREATE TABLE IF NOT EXISTS forecast_outcome (
     direction_match     INTEGER,        -- 1=correct, 0=wrong, NULL=pending
     forecast_error      REAL,
     evaluated_at        TEXT,
-    thesis_generated_at TEXT
+    thesis_generated_at TEXT,
+    is_direction_proxy  INTEGER DEFAULT 0  -- 1 for 1m rows: uses 3m return as proxy, not a real 1m forecast
 );
 
 CREATE TABLE IF NOT EXISTS prediction_run (
@@ -367,8 +368,8 @@ def _backfill_1m_outcomes() -> int:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO forecast_outcome
-                    (thesis_id, ticker, horizon, forecast_return_pct, thesis_generated_at)
-                VALUES (?, ?, '1m', ?, ?)
+                    (thesis_id, ticker, horizon, forecast_return_pct, thesis_generated_at, is_direction_proxy)
+                VALUES (?, ?, '1m', ?, ?, 1)
                 """,
                 (row["thesis_id"], row["ticker"],
                  row["forecast_return_pct"], row["thesis_generated_at"]),
@@ -379,6 +380,11 @@ def _backfill_1m_outcomes() -> int:
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(DDL)
+        # Idempotent migration: add is_direction_proxy if missing (existing DBs pre-this commit)
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(forecast_outcome)").fetchall()}
+        if "is_direction_proxy" not in existing_cols:
+            conn.execute("ALTER TABLE forecast_outcome ADD COLUMN is_direction_proxy INTEGER DEFAULT 0")
+            logger.info("Migrated forecast_outcome: added is_direction_proxy column")
     prune_agent_history()
     n = _backfill_1m_outcomes()
     if n:
@@ -632,14 +638,15 @@ def record_forecast_outcome(thesis: InvestmentThesis) -> None:
                     thesis.generated_at.isoformat(),
                 ),
             )
-        # 1m fast-track learning horizon: direction proxy from 3m forecast
+        # 1m fast-track learning horizon: direction proxy from 3m forecast.
+        # is_direction_proxy=1 — forecast_return_pct here is the 3m value, not a real 1m forecast.
         three_m = thesis.forecast.get("3m")
         if three_m is not None:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO forecast_outcome
-                    (thesis_id, ticker, horizon, forecast_return_pct, thesis_generated_at)
-                VALUES (?, ?, '1m', ?, ?)
+                    (thesis_id, ticker, horizon, forecast_return_pct, thesis_generated_at, is_direction_proxy)
+                VALUES (?, ?, '1m', ?, ?, 1)
                 """,
                 (thesis.thesis_id, thesis.ticker,
                  three_m.base_return_pct, thesis.generated_at.isoformat()),

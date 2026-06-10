@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agents import BaseAgent
 from schemas import Confidence, Direction, Evidence, Materiality, QualityFlag
 
+import db
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,23 @@ class EarningsSurpriseAgent(BaseAgent):
 
     def _run(self, ticker: str, run_id: str, as_of: datetime):
         ticker = ticker.upper()
+
+        # Look up upcoming earnings date from the earnings_events DB cache.
+        # If earnings is within 5 days, signal is high materiality (pre-print tension).
+        # If earnings just passed (0–3 days ago), confidence is temporarily lower (surprise not priced in yet).
+        days_to_earnings: int | None = None
+        try:
+            upcoming = db.get_recent_earnings_events(ticker, days=45)
+            if upcoming:
+                next_event = upcoming[0]
+                report_date_str = next_event.get("report_date")
+                if report_date_str:
+                    from datetime import date
+                    rd = date.fromisoformat(str(report_date_str)[:10])
+                    days_to_earnings = (rd - as_of.date()).days
+        except Exception as exc:
+            logger.debug("[earnings_surprise] %s: earnings date lookup failed: %s", ticker, exc)
+
         t = yf.Ticker(ticker)
 
         earnings_hist = self._timed_fetch(lambda: t.earnings_history, f"{ticker}/earnings_history")
@@ -231,6 +249,24 @@ class EarningsSurpriseAgent(BaseAgent):
         else:
             confidence = Confidence.LOW
 
+        # Adjust for proximity to earnings date.
+        earnings_proximity_note: str | None = None
+        if days_to_earnings is not None:
+            if 0 < days_to_earnings <= 5:
+                # Pre-print window: materiality is higher, signal is most actionable
+                if materiality != Materiality.HIGH:
+                    materiality = Materiality.HIGH
+                earnings_proximity_note = f"Earnings in {days_to_earnings}d — signal at peak relevance"
+                notes.append(earnings_proximity_note)
+            elif -3 <= days_to_earnings <= 0:
+                # Just reported: surprise not yet reflected; confidence temporarily lower
+                confidence = Confidence.LOW
+                earnings_proximity_note = f"Earnings just reported ({abs(days_to_earnings)}d ago) — surprise impact still settling"
+                notes.append(earnings_proximity_note)
+            elif 6 <= days_to_earnings <= 21:
+                earnings_proximity_note = f"Earnings in {days_to_earnings}d"
+                notes.append(earnings_proximity_note)
+
         flags: list[QualityFlag] = []
         if n_quarters < 2:
             flags.append(QualityFlag.LOW_COVERAGE)
@@ -252,6 +288,7 @@ class EarningsSurpriseAgent(BaseAgent):
                 "base_score":         round(base_score, 2),
                 "magnitude_adj":      round(mag_adj, 2),
                 "revision_adj":       round(rev_adj, 2),
+                "days_to_earnings":   days_to_earnings,
                 "narrative":          narrative,
             },
             evidence=[

@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -295,7 +296,8 @@ def apply_weight_adjustments(window_days: int = 90) -> dict[str, Any]:
 
         if abs(adj) < 0.001:
             continue
-        if (stat.get("n_evaluated") or 0) < MIN_SAMPLES:
+        n_eval = stat.get("n_evaluated") or 0
+        if n_eval < MIN_SAMPLES:
             continue
 
         current_w = HORIZON_WEIGHTS.get(horizon, {}).get(agent_id)
@@ -304,7 +306,10 @@ def apply_weight_adjustments(window_days: int = 90) -> dict[str, Any]:
         if current_w is None or default_w is None or default_w <= 0:
             continue
 
-        raw_new = current_w * (1.0 + BLEND * adj)
+        # Bayesian-scaled blend: fewer samples → slower drift toward suggested adjustment.
+        # Agents with sparse data converge back toward default faster than well-observed ones.
+        effective_blend = BLEND / math.sqrt(max(1, n_eval / MIN_SAMPLES))
+        raw_new = current_w * (1.0 + effective_blend * adj)
         new_w = round(max(default_w * WEIGHT_FLOOR_RATIO, min(default_w * WEIGHT_CEIL_RATIO, raw_new)), 6)
 
         if abs(new_w - current_w) < 1e-8:
