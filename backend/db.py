@@ -449,6 +449,44 @@ CREATE TABLE IF NOT EXISTS user_settings (
     PRIMARY KEY(user_id, key),
     FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS user_transactions (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    portfolio   TEXT NOT NULL DEFAULT 'real',
+    type        TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    name        TEXT,
+    qty         REAL NOT NULL,
+    price       REAL NOT NULL,
+    trade_date  TEXT,
+    timestamp   TEXT NOT NULL,
+    source      TEXT,
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_transactions ON user_transactions(user_id, portfolio, timestamp);
+
+CREATE TABLE IF NOT EXISTS user_alerts (
+    id                TEXT PRIMARY KEY,
+    user_id           TEXT NOT NULL,
+    timestamp         TEXT NOT NULL,
+    ticker            TEXT NOT NULL,
+    name              TEXT,
+    price             REAL,
+    action            TEXT,
+    signals           TEXT,
+    score_value       INTEGER,
+    confidence        TEXT,
+    projected_12m_pct REAL,
+    projected_24m_pct REAL,
+    reasoning         TEXT,
+    notified_email    INTEGER NOT NULL DEFAULT 0,
+    notified_sms      INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_alerts_user ON user_alerts(user_id, timestamp DESC);
 """
 
 
@@ -2386,6 +2424,131 @@ def set_user_setting(user_id: str, key: str, value: str) -> None:
             """,
             (user_id, key, value, now),
         )
+
+
+# ── Per-user transactions (portfolio & paper portfolio) ──────────────────────
+
+def add_user_transaction(user_id: str, portfolio: str, tx: dict) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_transactions
+                (id, user_id, portfolio, type, ticker, name, qty, price, trade_date, timestamp, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tx["id"], user_id, portfolio,
+                tx["type"], tx["ticker"], tx.get("name"),
+                float(tx["qty"]), float(tx["price"]),
+                tx.get("date"), tx["timestamp"], tx.get("source"),
+            ),
+        )
+
+
+def get_user_transactions(user_id: str, portfolio: str = "real") -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, type, ticker, name, qty, price, trade_date AS date, timestamp, source
+            FROM user_transactions
+            WHERE user_id = ? AND portfolio = ?
+            ORDER BY timestamp ASC
+            """,
+            (user_id, portfolio),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_user_transaction(user_id: str, tx_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM user_transactions WHERE user_id = ? AND id = ?",
+            (user_id, tx_id),
+        )
+    return cur.rowcount > 0
+
+
+def clear_user_transactions(user_id: str, portfolio: str = "real") -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM user_transactions WHERE user_id = ? AND portfolio = ?",
+            (user_id, portfolio),
+        )
+
+
+# ── Per-user alerts ──────────────────────────────────────────────────────────
+
+def append_user_alert(user_id: str, record: dict) -> None:
+    import json as _json
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO user_alerts
+                (id, user_id, timestamp, ticker, name, price, action, signals,
+                 score_value, confidence, projected_12m_pct, projected_24m_pct,
+                 reasoning, notified_email, notified_sms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["id"], user_id, record["timestamp"],
+                record["ticker"], record.get("name"), record.get("price"),
+                record.get("action"), _json.dumps(record.get("signals", [])),
+                record.get("score_value"), record.get("confidence"),
+                record.get("projected_12m_pct"), record.get("projected_24m_pct"),
+                record.get("reasoning"),
+                int(bool(record.get("notified_email"))),
+                int(bool(record.get("notified_sms"))),
+            ),
+        )
+        conn.execute(
+            """
+            DELETE FROM user_alerts WHERE user_id = ? AND id NOT IN (
+                SELECT id FROM user_alerts WHERE user_id = ? ORDER BY timestamp DESC LIMIT 500
+            )
+            """,
+            (user_id, user_id),
+        )
+
+
+def get_user_alerts(user_id: str, limit: int = 500) -> list[dict]:
+    import json as _json
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, timestamp, ticker, name, price, action, signals,
+                   score_value, confidence, projected_12m_pct, projected_24m_pct,
+                   reasoning, notified_email, notified_sms
+            FROM user_alerts WHERE user_id = ?
+            ORDER BY timestamp DESC LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["signals"] = _json.loads(d.get("signals") or "[]")
+        except Exception:
+            d["signals"] = []
+        d["notified_email"] = bool(d.get("notified_email"))
+        d["notified_sms"] = bool(d.get("notified_sms"))
+        result.append(d)
+    return result
+
+
+def clear_user_alerts(user_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM user_alerts WHERE user_id = ?", (user_id,))
+
+
+# ── Active users (for scheduler) ─────────────────────────────────────────────
+
+def get_all_active_users_with_email() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT user_id, username, email FROM app_users WHERE is_active = 1",
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── APNs device tokens ───────────────────────────────────────────────────────
