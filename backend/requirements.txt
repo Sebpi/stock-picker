@@ -15,3 +15,5 @@ slowapi==0.1.9
 tenacity==9.1.2
 reportlab==4.5.0
 websocket-client==1.8.0
+pyotp==2.9.0
+stripe==12.2.0

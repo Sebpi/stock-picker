@@ -38,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import bcrypt as _bcrypt
 from jose import JWTError, jwt
+import pyotp
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -151,6 +152,13 @@ _PORTAL_JWT_SECRET = (os.getenv("PORTAL_JWT_SECRET") or "").strip()
 _PORTAL_JWT_ISSUER = "seb-portal"
 _ALGORITHM  = "HS256"
 _TOKEN_HOURS = 24
+_ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))   # short-lived access tokens
+_STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+_STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+_APNS_KEY_ID = os.getenv("APNS_KEY_ID", "")
+_APNS_TEAM_ID = os.getenv("APNS_TEAM_ID", "")
+_APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "")
+_APNS_KEY_PATH = os.getenv("APNS_KEY_PATH", "")
 
 def _hash_pw(password: str) -> str:
     return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt(rounds=12)).decode()
@@ -173,7 +181,12 @@ if _legacy_users.exists() and not USERS_FILE.exists():
 _reset_tokens: dict[str, tuple[str, datetime]] = {}
 
 # Auth public routes — no JWT required
-_AUTH_PUBLIC = {"/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password", "/api/health", "/api/version"}
+_AUTH_PUBLIC = {
+    "/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password",
+    "/api/health", "/api/version",
+    "/api/auth/register", "/api/auth/verify-email", "/api/auth/refresh",
+    "/api/billing/stripe/webhook",
+}
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001").strip() or "claude-haiku-4-5-20251001"
 STOCK_RESEARCH_MAX_TOKENS = max(256, int(os.getenv("STOCK_RESEARCH_MAX_TOKENS", "6000")))
 RECOMMEND_MAX_TOKENS = max(256, int(os.getenv("RECOMMEND_MAX_TOKENS", "800")))
@@ -247,6 +260,12 @@ def save_users(users: dict):
 def create_access_token(username: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=_TOKEN_HOURS)
     return jwt.encode({"sub": username, "exp": expire}, _SECRET_KEY, algorithm=_ALGORITHM)
+
+
+def create_short_access_token(subject: str) -> str:
+    """15-minute access token for multi-user auth flow."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=_ACCESS_TOKEN_MINUTES)
+    return jwt.encode({"sub": subject, "exp": expire, "typ": "access"}, _SECRET_KEY, algorithm=_ALGORITHM)
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(http_bearer)) -> str:
     """Verify the bearer token against (in order):
@@ -2639,6 +2658,37 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class MfaSetupVerifyRequest(BaseModel):
+    code: str
+
+
+class DeviceTokenRequest(BaseModel):
+    device_token: str
+    platform: str = "ios"
+
+
+class UserWatchlistAddRequest(BaseModel):
+    ticker: str
+
+
+class UserPortfolioUpsertRequest(BaseModel):
+    ticker: str
+    shares: float
+    cost_basis: Optional[float] = None
+    purchase_date: Optional[str] = None
+    paper: bool = False
+
+
 async def startup():
     _load_lockout_state()
     # Refresh index constituent lists from Wikipedia
@@ -2854,7 +2904,372 @@ async def change_password(req: ChangePasswordRequest, current_user: str = Depend
 
 @app.get("/api/auth/me")
 async def me(current_user: str = Depends(get_current_user)):
+    import db as _db
+    app_user = _db.get_user_by_username(current_user)
+    if app_user:
+        return {
+            "username": current_user,
+            "user_id": app_user["user_id"],
+            "email": app_user["email"],
+            "role": app_user["role"],
+            "tier": app_user["tier"],
+            "email_verified": bool(app_user["email_verified"]),
+            "mfa_enabled": bool(app_user["mfa_enabled"]),
+            "monthly_thesis_count": app_user["monthly_thesis_count"],
+        }
     return {"username": current_user}
+
+
+# ── Multi-user auth endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/auth/register")
+@limiter.limit("5/minute")
+async def register(req: RegisterRequest, request: Request, background_tasks: BackgroundTasks):
+    import db as _db
+    if len(req.username) < 3 or len(req.username) > 30:
+        raise HTTPException(status_code=400, detail="Username must be 3-30 characters")
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", req.username):
+        raise HTTPException(status_code=400, detail="Username may only contain letters, numbers, _ and -")
+    if len(req.password) < 12:
+        raise HTTPException(status_code=400, detail="Password must be at least 12 characters")
+    if not re.match(r"^[^@]+@[^@]+\.[^@]+$", req.email):
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    if _db.get_user_by_username(req.username):
+        raise HTTPException(status_code=409, detail="Username already taken")
+    if _db.get_user_by_email(req.email):
+        raise HTTPException(status_code=409, detail="Email already registered")
+    pw_hash = _hash_pw(req.password)
+    user = _db.create_user(req.username, req.email, pw_hash)
+    token = _db.create_email_verification_token(user["user_id"])
+    app_url = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
+    verify_link = f"{app_url}/api/auth/verify-email?token={token}"
+    background_tasks.add_task(
+        send_email,
+        "StockLens - Verify your email",
+        f"Welcome! Click to verify your email:\n\n{verify_link}\n\nLink valid for 24 hours.",
+        to_email=req.email,
+    )
+    logger.info("REGISTER_OK username=%s email=%s", req.username, req.email)
+    return {"ok": True, "user_id": user["user_id"], "message": "Verification email sent"}
+
+
+@app.get("/api/auth/verify-email")
+async def verify_email(token: str):
+    import db as _db
+    user_id = _db.consume_email_verification_token(token)
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+    logger.info("EMAIL_VERIFIED user_id=%s", user_id)
+    return {"ok": True, "message": "Email verified. You can now log in."}
+
+
+@app.post("/api/auth/refresh")
+@limiter.limit("30/minute")
+async def refresh_token_endpoint(req: RefreshRequest, request: Request):
+    import db as _db
+    result = _db.rotate_refresh_token(req.refresh_token)
+    if not result:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    new_raw, user_id = result
+    user = _db.get_user_by_id(user_id)
+    if not user or not user["is_active"]:
+        raise HTTPException(status_code=401, detail="Account disabled")
+    access_token = create_short_access_token(user["username"])
+    return {
+        "access_token": access_token,
+        "refresh_token": new_raw,
+        "token_type": "bearer",
+        "expires_in": _ACCESS_TOKEN_MINUTES * 60,
+    }
+
+
+@app.post("/api/auth/logout-all")
+async def logout_all(current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if user:
+        _db.revoke_all_refresh_tokens(user["user_id"])
+    return {"ok": True}
+
+
+# MFA endpoints
+
+@app.post("/api/auth/mfa/setup")
+async def mfa_setup(current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user["mfa_enabled"]:
+        raise HTTPException(status_code=400, detail="MFA already enabled")
+    secret = pyotp.random_base32()
+    _db.update_user(user["user_id"], mfa_secret=secret)
+    totp = pyotp.TOTP(secret)
+    provisioning_uri = totp.provisioning_uri(name=user["email"], issuer_name="StockLens")
+    return {"secret": secret, "provisioning_uri": provisioning_uri}
+
+
+@app.post("/api/auth/mfa/verify")
+async def mfa_verify(req: MfaSetupVerifyRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user or not user.get("mfa_secret"):
+        raise HTTPException(status_code=400, detail="MFA setup not started")
+    totp = pyotp.TOTP(user["mfa_secret"])
+    if not totp.verify(req.code, valid_window=1):
+        raise HTTPException(status_code=400, detail="Invalid TOTP code")
+    _db.update_user(user["user_id"], mfa_enabled=1)
+    logger.info("MFA_ENABLED user_id=%s", user["user_id"])
+    return {"ok": True}
+
+
+@app.post("/api/auth/mfa/disable")
+async def mfa_disable(req: MfaSetupVerifyRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user or not user.get("mfa_enabled"):
+        raise HTTPException(status_code=400, detail="MFA not enabled")
+    totp = pyotp.TOTP(user["mfa_secret"])
+    if not totp.verify(req.code, valid_window=1):
+        raise HTTPException(status_code=400, detail="Invalid TOTP code")
+    _db.update_user(user["user_id"], mfa_enabled=0, mfa_secret=None)
+    return {"ok": True}
+
+
+# ── User management endpoints ─────────────────────────────────────────────────
+
+@app.get("/v1/users")
+async def list_users_endpoint(
+    limit: int = 100, offset: int = 0,
+    current_user: str = Depends(get_current_user),
+):
+    import db as _db
+    users = load_users()
+    user_obj = users.get(current_user, {})
+    if user_obj.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    rows = _db.list_users(limit=min(limit, 500), offset=offset)
+    safe = [{k: v for k, v in r.items() if k not in ("password_hash", "mfa_secret")} for r in rows]
+    return {"users": safe, "count": len(safe)}
+
+
+@app.get("/v1/users/me")
+async def users_me(current_user: str = Depends(get_current_user)):
+    import db as _db
+    app_user = _db.get_user_by_username(current_user)
+    if not app_user:
+        return {"username": current_user, "tier": "admin", "role": "admin"}
+    return {k: v for k, v in app_user.items() if k not in ("password_hash", "mfa_secret")}
+
+
+@app.get("/v1/users/me/watchlist")
+async def user_watchlist_get(current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    return {"tickers": _db.get_user_watchlist(user["user_id"])}
+
+
+@app.post("/v1/users/me/watchlist")
+async def user_watchlist_add(req: UserWatchlistAddRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    ticker = _validate_ticker(req.ticker)
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    ok, reason = _db.add_to_user_watchlist(user["user_id"], ticker)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+    return {"ok": True, "reason": reason}
+
+
+@app.delete("/v1/users/me/watchlist/{ticker}")
+async def user_watchlist_remove(ticker: str, current_user: str = Depends(get_current_user)):
+    import db as _db
+    ticker = _validate_ticker(ticker)
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    removed = _db.remove_from_user_watchlist(user["user_id"], ticker)
+    return {"ok": removed}
+
+
+@app.get("/v1/users/me/portfolio")
+async def user_portfolio_get(paper: bool = False, current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    return {"positions": _db.get_user_portfolio(user["user_id"], paper=paper)}
+
+
+@app.post("/v1/users/me/portfolio")
+async def user_portfolio_upsert(req: UserPortfolioUpsertRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    ticker = _validate_ticker(req.ticker)
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    _db.upsert_user_portfolio_position(
+        user["user_id"], ticker, req.shares,
+        cost_basis=req.cost_basis, purchase_date=req.purchase_date, paper=req.paper,
+    )
+    return {"ok": True}
+
+
+@app.delete("/v1/users/me/portfolio/{ticker}")
+async def user_portfolio_remove(ticker: str, paper: bool = False, current_user: str = Depends(get_current_user)):
+    import db as _db
+    ticker = _validate_ticker(ticker)
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    removed = _db.remove_user_portfolio_position(user["user_id"], ticker, paper=paper)
+    return {"ok": removed}
+
+
+@app.get("/v1/users/me/settings")
+async def user_settings_get(current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        return {"settings": {}}
+    return {"settings": _db.get_user_settings(user["user_id"])}
+
+
+@app.put("/v1/users/me/settings/{key}")
+async def user_settings_set(key: str, value: str = Body(...), current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    _db.set_user_setting(user["user_id"], key[:64], str(value)[:1024])
+    return {"ok": True}
+
+
+# ── APNs device token endpoints ───────────────────────────────────────────────
+
+@app.post("/v1/users/me/device-tokens")
+async def register_device_token_endpoint(req: DeviceTokenRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    if user["tier"] not in ("pro", "premium"):
+        raise HTTPException(status_code=403, detail="Push notifications require Pro or Premium tier")
+    if not re.match(r"^[a-f0-9]{64}$", req.device_token.lower()):
+        raise HTTPException(status_code=400, detail="Invalid APNs device token format")
+    _db.register_device_token(user["user_id"], req.device_token, req.platform)
+    return {"ok": True}
+
+
+@app.delete("/v1/users/me/device-tokens/{device_token}")
+async def unregister_device_token_endpoint(device_token: str, current_user: str = Depends(get_current_user)):
+    import db as _db
+    user = _db.get_user_by_username(current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in multi-user table")
+    removed = _db.unregister_device_token(user["user_id"], device_token)
+    return {"ok": removed}
+
+
+# ── Stripe billing endpoints ──────────────────────────────────────────────────
+
+@app.post("/api/billing/stripe/webhook")
+async def stripe_webhook(request: Request):
+    if not _STRIPE_SECRET_KEY or not _STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    import stripe as stripe_lib
+    stripe_lib.api_key = _STRIPE_SECRET_KEY
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    try:
+        event = stripe_lib.Webhook.construct_event(payload, sig, _STRIPE_WEBHOOK_SECRET)
+    except Exception as exc:
+        logger.warning("STRIPE_WEBHOOK_INVALID sig=%s err=%s", sig[:20], exc)
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    import db as _db
+    etype = event["type"]
+    if etype in ("customer.subscription.created", "customer.subscription.updated"):
+        sub = event["data"]["object"]
+        customer_id = sub.get("customer")
+        status = sub.get("status")
+        plan_id = (sub.get("items", {}).get("data") or [{}])[0].get("price", {}).get("lookup_key", "free")
+        tier = "premium" if "premium" in plan_id else "pro" if "pro" in plan_id else "free"
+        if status not in ("active", "trialing"):
+            tier = "free"
+        with _db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM app_users WHERE stripe_customer_id = ?", (customer_id,)
+            ).fetchone()
+        if row:
+            _db.update_user(row["user_id"], tier=tier)
+            logger.info("STRIPE_TIER_UPDATE customer=%s tier=%s", customer_id, tier)
+    elif etype == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        customer_id = sub.get("customer")
+        with _db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM app_users WHERE stripe_customer_id = ?", (customer_id,)
+            ).fetchone()
+        if row:
+            _db.update_user(row["user_id"], tier="free")
+            logger.info("STRIPE_SUB_CANCELLED customer=%s", customer_id)
+    return {"ok": True}
+
+
+# ── APNs push helper (used by earnings scheduler) ─────────────────────────────
+
+async def _send_apns_push(device_token: str, title: str, body: str, data: dict | None = None) -> bool:
+    """Send a single APNs push notification via HTTP/2. Returns True on success."""
+    if not all([_APNS_KEY_ID, _APNS_TEAM_ID, _APNS_BUNDLE_ID, _APNS_KEY_PATH]):
+        return False
+    try:
+        from pathlib import Path as _Path
+        import time as _time
+        key_data = _Path(_APNS_KEY_PATH).read_text()
+        now = int(_time.time())
+        header_payload = {"alg": "ES256", "kid": _APNS_KEY_ID}
+        claims = {"iss": _APNS_TEAM_ID, "iat": now}
+        from jose import jwt as _jwt
+        apns_jwt = _jwt.encode(claims, key_data, algorithm="ES256", headers=header_payload)
+        url = f"https://api.push.apple.com/3/device/{device_token}"
+        payload = {
+            "aps": {
+                "alert": {"title": title, "body": body},
+                "sound": "default",
+                "badge": 1,
+            }
+        }
+        if data:
+            payload["data"] = data
+        headers = {
+            "authorization": f"bearer {apns_jwt}",
+            "apns-topic": _APNS_BUNDLE_ID,
+            "apns-push-type": "alert",
+        }
+        async with httpx.AsyncClient(http2=True) as client:
+            resp = await client.post(url, json=payload, headers=headers, timeout=10)
+        return resp.status_code == 200
+    except Exception as exc:
+        logger.warning("APNS_PUSH_FAIL token=%s err=%s", device_token[:16], exc)
+        return False
+
+
+async def _broadcast_earnings_push(ticker: str, company: str, report_date: str) -> None:
+    """Push earnings reminder to all eligible device tokens for this ticker."""
+    import db as _db
+    tokens = _db.get_all_active_device_tokens()
+    title = f"{ticker} Earnings"
+    body = f"{company} reports on {report_date}"
+    results = await asyncio.gather(
+        *[_send_apns_push(t["device_token"], title, body, {"ticker": ticker}) for t in tokens],
+        return_exceptions=True,
+    )
+    sent = sum(1 for r in results if r is True)
+    logger.info("APNS_BROADCAST ticker=%s sent=%d/%d", ticker, sent, len(tokens))
+
 
 # ── Existing endpoints ────────────────────────────────────────────────────────
 
