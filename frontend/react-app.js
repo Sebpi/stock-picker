@@ -3942,6 +3942,7 @@
     const [loading, setLoading] = React.useState(true);
     const [calLoading, setCalLoading] = React.useState(true);
     const [expanded, setExpanded] = React.useState(null);
+    const [calExpanded, setCalExpanded] = React.useState(null);
     const [checking, setChecking] = React.useState(false);
     const [checkMsg, setCheckMsg] = React.useState("");
     const [testing, setTesting] = React.useState(false);
@@ -4044,17 +4045,26 @@
           : h("div", { className: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" },
               calendar.map(item => h("div", {
                 key: item.ticker,
-                className: "rounded-lg border border-pulse-line bg-pulse-card px-4 py-3 space-y-1",
+                className: "rounded-lg border border-pulse-line bg-pulse-card overflow-hidden",
               },
-                h("div", { className: "flex items-center justify-between" },
-                  h("span", { className: "font-mono text-sm font-semibold text-pulse-ink" }, item.ticker),
-                  h("span", { className: "font-mono text-[10px] text-pulse-muted" }, item.earnings_date),
+                h("div", { className: "px-4 py-3 space-y-1" },
+                  h("div", { className: "flex items-center justify-between" },
+                    h("span", { className: "font-mono text-sm font-semibold text-pulse-ink" }, item.ticker),
+                    h("span", { className: "font-mono text-[10px] text-pulse-muted" }, item.earnings_date),
+                  ),
+                  h("div", { className: "font-mono text-xs text-pulse-muted truncate" }, item.company_name),
+                  item.eps_estimate != null && h("div", { className: "font-mono text-xs text-pulse-cyan" },
+                    `Est. EPS: $${Number(item.eps_estimate).toFixed(2)}`
+                  ),
+                  item.sector && h("div", { className: "font-mono text-[10px] text-pulse-muted" }, item.sector),
+                  h("button", {
+                    onClick: () => setCalExpanded(calExpanded === item.ticker ? null : item.ticker),
+                    className: "mt-2 font-mono text-[10px] text-pulse-cyan hover:underline",
+                  }, calExpanded === item.ticker ? "▲ hide report" : "▼ deep report")
                 ),
-                h("div", { className: "font-mono text-xs text-pulse-muted truncate" }, item.company_name),
-                item.eps_estimate != null && h("div", { className: "font-mono text-xs text-pulse-cyan" },
-                  `Est. EPS: $${Number(item.eps_estimate).toFixed(2)}`
-                ),
-                item.sector && h("div", { className: "font-mono text-[10px] text-pulse-muted" }, item.sector),
+                calExpanded === item.ticker && h("div", { className: "border-t border-pulse-line p-4" },
+                  h(EarningsReportPanel, { ticker: item.ticker })
+                )
               ))
             )
       ),
@@ -4146,6 +4156,9 @@
                       rel: "noopener noreferrer",
                       className: "inline-block font-mono text-[10px] text-pulse-cyan hover:underline",
                     }, "View SEC press release →"),
+                    h("div", { className: "pt-3 border-t border-pulse-line mt-3" },
+                      h(EarningsReportPanel, { ticker: ev.ticker })
+                    ),
                   )
                 );
               })
