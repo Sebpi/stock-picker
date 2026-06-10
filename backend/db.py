@@ -4,9 +4,11 @@ All tables defined here; JSON files remain for backward-compat with existing UI.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import sqlite3
 import uuid
@@ -347,6 +349,106 @@ CREATE TABLE IF NOT EXISTS earnings_events (
 
 CREATE INDEX IF NOT EXISTS idx_earnings_ticker_date
     ON earnings_events(ticker, report_date DESC);
+
+-- ── Multi-user tables ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS app_users (
+    user_id             TEXT PRIMARY KEY,
+    username            TEXT NOT NULL UNIQUE,
+    email               TEXT NOT NULL UNIQUE,
+    password_hash       TEXT NOT NULL,
+    role                TEXT NOT NULL DEFAULT 'user',   -- user | admin
+    tier                TEXT NOT NULL DEFAULT 'free',   -- free | pro | premium
+    is_active           INTEGER NOT NULL DEFAULT 1,
+    email_verified      INTEGER NOT NULL DEFAULT 0,
+    mfa_enabled         INTEGER NOT NULL DEFAULT 0,
+    mfa_secret          TEXT,                           -- TOTP secret (encrypted at rest)
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    last_login_at       TEXT,
+    stripe_customer_id  TEXT,
+    monthly_thesis_count INTEGER NOT NULL DEFAULT 0,
+    monthly_thesis_reset TEXT                            -- ISO date of next reset
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_users_email ON app_users(email);
+CREATE INDEX IF NOT EXISTS idx_app_users_username ON app_users(username);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    token       TEXT PRIMARY KEY,               -- secrets.token_urlsafe(32) stored hashed
+    user_id     TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    used        INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    token_id    TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    token_hash  TEXT NOT NULL UNIQUE,           -- SHA-256 of the raw bearer token
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    revoked     INTEGER NOT NULL DEFAULT 0,
+    replaced_by TEXT,                           -- token_id of the successor (rotation chain)
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id, revoked);
+
+CREATE TABLE IF NOT EXISTS apns_device_tokens (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    device_token TEXT NOT NULL,
+    platform    TEXT NOT NULL DEFAULT 'ios',    -- ios | watchos
+    registered_at TEXT NOT NULL,
+    UNIQUE(user_id, device_token),
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_watchlist (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    added_at    TEXT NOT NULL,
+    UNIQUE(user_id, ticker),
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_watchlist_user ON user_watchlist(user_id);
+
+CREATE TABLE IF NOT EXISTS user_portfolio (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    ticker          TEXT NOT NULL,
+    shares          REAL NOT NULL DEFAULT 0,
+    cost_basis      REAL,
+    purchase_date   TEXT,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(user_id, ticker),
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_paper_portfolio (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    ticker          TEXT NOT NULL,
+    shares          REAL NOT NULL DEFAULT 0,
+    cost_basis      REAL,
+    purchase_date   TEXT,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(user_id, ticker),
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id     TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    value       TEXT,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(user_id, key),
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
 """
 
 
@@ -385,6 +487,12 @@ def init_db() -> None:
         if "is_direction_proxy" not in existing_cols:
             conn.execute("ALTER TABLE forecast_outcome ADD COLUMN is_direction_proxy INTEGER DEFAULT 0")
             logger.info("Migrated forecast_outcome: added is_direction_proxy column")
+        # Idempotent migration: add mfa columns to app_users if missing
+        au_cols = {row[1] for row in conn.execute("PRAGMA table_info(app_users)").fetchall()}
+        if "mfa_enabled" not in au_cols:
+            conn.execute("ALTER TABLE app_users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
+        if "mfa_secret" not in au_cols:
+            conn.execute("ALTER TABLE app_users ADD COLUMN mfa_secret TEXT")
     prune_agent_history()
     n = _backfill_1m_outcomes()
     if n:
@@ -1930,3 +2038,398 @@ def mark_earnings_digest_sent(event_ids: list[str]) -> None:
             f"UPDATE earnings_events SET digest_sent = 1 WHERE event_id IN ({placeholders})",  # nosec B608
             event_ids,
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-user helpers
+# ---------------------------------------------------------------------------
+
+_TIER_THESIS_LIMITS: dict[str, int | None] = {"free": 5, "pro": None, "premium": None}
+_TIER_WATCHLIST_LIMITS: dict[str, int] = {"free": 10, "pro": 50, "premium": 999}
+
+
+def _hash_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# ── User CRUD ────────────────────────────────────────────────────────────────
+
+def create_user(username: str, email: str, password_hash: str, role: str = "user", tier: str = "free") -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    user_id = str(uuid.uuid4())
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_users
+                (user_id, username, email, password_hash, role, tier, is_active,
+                 email_verified, created_at, updated_at, monthly_thesis_count,
+                 monthly_thesis_reset)
+            VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, 0, ?)
+            """,
+            (user_id, username.lower(), email.lower(), password_hash, role, tier,
+             now, now, now[:10]),
+        )
+    return get_user_by_id(user_id)
+
+
+def get_user_by_id(user_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM app_users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_username(username: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM app_users WHERE username = ?", (username.lower(),)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_email(email: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM app_users WHERE email = ?", (email.lower(),)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_user(user_id: str, **fields) -> None:
+    allowed = {"username", "email", "password_hash", "role", "tier", "is_active",
+                "email_verified", "last_login_at", "stripe_customer_id",
+                "monthly_thesis_count", "monthly_thesis_reset",
+                "mfa_enabled", "mfa_secret"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    updates["updated_at"] = now
+    setters = ", ".join(f"{k}=?" for k in updates)
+    values = list(updates.values()) + [user_id]
+    with get_conn() as conn:
+        conn.execute(f"UPDATE app_users SET {setters} WHERE user_id=?", values)  # nosec B608
+
+
+def list_users(limit: int = 200, offset: int = 0) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM app_users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Email verification tokens ────────────────────────────────────────────────
+
+def create_email_verification_token(user_id: str) -> str:
+    """Create a single-use 24-hour email verification token. Returns the raw token."""
+    raw = secrets.token_urlsafe(32)
+    token_hash = _hash_token(raw)
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(hours=24)).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM email_verification_tokens WHERE user_id = ? AND used = 0",
+            (user_id,),
+        )
+        conn.execute(
+            "INSERT INTO email_verification_tokens (token, user_id, created_at, expires_at, used) VALUES (?,?,?,?,0)",
+            (token_hash, user_id, now.isoformat(), expires),
+        )
+    return raw
+
+
+def consume_email_verification_token(raw_token: str) -> str | None:
+    """Mark token used and return user_id, or None if invalid/expired."""
+    token_hash = _hash_token(raw_token)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id, expires_at, used FROM email_verification_tokens WHERE token = ?",
+            (token_hash,),
+        ).fetchone()
+        if not row or row["used"] or row["expires_at"] < now:
+            return None
+        conn.execute(
+            "UPDATE email_verification_tokens SET used = 1 WHERE token = ?",
+            (token_hash,),
+        )
+        conn.execute(
+            "UPDATE app_users SET email_verified = 1, updated_at = ? WHERE user_id = ?",
+            (now, row["user_id"]),
+        )
+    return row["user_id"]
+
+
+# ── Refresh tokens ───────────────────────────────────────────────────────────
+
+_REFRESH_TOKEN_DAYS = 30
+
+
+def create_refresh_token(user_id: str) -> str:
+    """Issue a new refresh token. Returns raw token (bearer-style)."""
+    raw = secrets.token_urlsafe(48)
+    token_hash = _hash_token(raw)
+    token_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(days=_REFRESH_TOKEN_DAYS)).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO refresh_tokens (token_id, user_id, token_hash, created_at, expires_at, revoked)
+            VALUES (?, ?, ?, ?, ?, 0)
+            """,
+            (token_id, user_id, token_hash, now.isoformat(), expires),
+        )
+    return raw
+
+
+def rotate_refresh_token(raw_token: str) -> tuple[str, str] | None:
+    """Consume old token, issue new one. Returns (new_raw_token, user_id) or None if invalid."""
+    token_hash = _hash_token(raw_token)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT token_id, user_id, expires_at, revoked FROM refresh_tokens WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if not row or row["revoked"] or row["expires_at"] < now:
+            return None
+        conn.execute(
+            "UPDATE refresh_tokens SET revoked = 1 WHERE token_id = ?",
+            (row["token_id"],),
+        )
+    new_raw = create_refresh_token(row["user_id"])
+    # Record replacement chain
+    new_hash = _hash_token(new_raw)
+    with get_conn() as conn:
+        new_row = conn.execute(
+            "SELECT token_id FROM refresh_tokens WHERE token_hash = ?", (new_hash,)
+        ).fetchone()
+        if new_row:
+            conn.execute(
+                "UPDATE refresh_tokens SET replaced_by = ? WHERE token_id = ?",
+                (new_row["token_id"], row["token_id"]),
+            )
+    return new_raw, row["user_id"]
+
+
+def revoke_all_refresh_tokens(user_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?", (user_id,)
+        )
+
+
+# ── Tier / quota enforcement ─────────────────────────────────────────────────
+
+def check_and_increment_thesis_count(user_id: str) -> tuple[bool, str]:
+    """Returns (allowed, reason). Increments counter if allowed."""
+    user = get_user_by_id(user_id)
+    if not user:
+        return False, "user_not_found"
+    limit = _TIER_THESIS_LIMITS.get(user["tier"])
+    if limit is None:
+        # Unlimited tier
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE app_users SET monthly_thesis_count = monthly_thesis_count + 1, updated_at = ? WHERE user_id = ?",
+                (datetime.now(timezone.utc).isoformat(), user_id),
+            )
+        return True, "ok"
+    today = datetime.now(timezone.utc).date()
+    reset_date_str = user.get("monthly_thesis_reset") or today.replace(day=1).isoformat()
+    reset_date = datetime.fromisoformat(reset_date_str).date() if isinstance(reset_date_str, str) else today
+    if today > reset_date:
+        # Reset counter
+        next_reset = (today.replace(day=1).replace(month=(today.month % 12) + 1)
+                      if today.month < 12 else today.replace(year=today.year + 1, month=1, day=1))
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE app_users SET monthly_thesis_count = 1, monthly_thesis_reset = ?, updated_at = ? WHERE user_id = ?",
+                (next_reset.isoformat(), datetime.now(timezone.utc).isoformat(), user_id),
+            )
+        return True, "ok"
+    if user["monthly_thesis_count"] >= limit:
+        return False, f"monthly_limit_{limit}"
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE app_users SET monthly_thesis_count = monthly_thesis_count + 1, updated_at = ? WHERE user_id = ?",
+            (datetime.now(timezone.utc).isoformat(), user_id),
+        )
+    return True, "ok"
+
+
+# ── Per-user watchlist ───────────────────────────────────────────────────────
+
+def get_user_watchlist(user_id: str) -> list[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ticker FROM user_watchlist WHERE user_id = ? ORDER BY added_at",
+            (user_id,),
+        ).fetchall()
+    return [r["ticker"] for r in rows]
+
+
+def add_to_user_watchlist(user_id: str, ticker: str) -> tuple[bool, str]:
+    user = get_user_by_id(user_id)
+    if not user:
+        return False, "user_not_found"
+    limit = _TIER_WATCHLIST_LIMITS.get(user["tier"], 10)
+    current = get_user_watchlist(user_id)
+    if ticker in current:
+        return True, "already_exists"
+    if len(current) >= limit:
+        return False, f"watchlist_limit_{limit}"
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_watchlist (user_id, ticker, added_at) VALUES (?, ?, ?)",
+            (user_id, ticker.upper(), now),
+        )
+    return True, "added"
+
+
+def remove_from_user_watchlist(user_id: str, ticker: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM user_watchlist WHERE user_id = ? AND ticker = ?",
+            (user_id, ticker.upper()),
+        )
+    return cur.rowcount > 0
+
+
+# ── Per-user portfolio ───────────────────────────────────────────────────────
+
+def _portfolio_table(paper: bool) -> str:
+    return "user_paper_portfolio" if paper else "user_portfolio"
+
+
+def get_user_portfolio(user_id: str, paper: bool = False) -> list[dict]:
+    table = _portfolio_table(paper)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM {table} WHERE user_id = ? ORDER BY updated_at DESC",  # nosec B608
+            (user_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_user_portfolio_position(
+    user_id: str, ticker: str, shares: float,
+    cost_basis: float | None = None, purchase_date: str | None = None,
+    paper: bool = False,
+) -> None:
+    table = _portfolio_table(paper)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            f"""
+            INSERT INTO {table} (user_id, ticker, shares, cost_basis, purchase_date, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, ticker) DO UPDATE SET
+                shares=excluded.shares,
+                cost_basis=COALESCE(excluded.cost_basis, {table}.cost_basis),
+                purchase_date=COALESCE(excluded.purchase_date, {table}.purchase_date),
+                updated_at=excluded.updated_at
+            """,  # nosec B608
+            (user_id, ticker.upper(), shares, cost_basis, purchase_date, now),
+        )
+
+
+def remove_user_portfolio_position(user_id: str, ticker: str, paper: bool = False) -> bool:
+    table = _portfolio_table(paper)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE user_id = ? AND ticker = ?",  # nosec B608
+            (user_id, ticker.upper()),
+        )
+    return cur.rowcount > 0
+
+
+# ── Per-user settings ────────────────────────────────────────────────────────
+
+def get_user_settings(user_id: str) -> dict[str, str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM user_settings WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def set_user_setting(user_id: str, key: str, value: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_settings (user_id, key, value, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (user_id, key, value, now),
+        )
+
+
+# ── APNs device tokens ───────────────────────────────────────────────────────
+
+def register_device_token(user_id: str, device_token: str, platform: str = "ios") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO apns_device_tokens (user_id, device_token, platform, registered_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, device_token, platform, now),
+        )
+
+
+def unregister_device_token(user_id: str, device_token: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM apns_device_tokens WHERE user_id = ? AND device_token = ?",
+            (user_id, device_token),
+        )
+    return cur.rowcount > 0
+
+
+def get_device_tokens_for_user(user_id: str) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT device_token, platform FROM apns_device_tokens WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_active_device_tokens(platform: str | None = None) -> list[dict]:
+    """Return all device tokens (with user_id) for push broadcast."""
+    with get_conn() as conn:
+        if platform:
+            rows = conn.execute(
+                """
+                SELECT adt.user_id, adt.device_token, adt.platform
+                FROM apns_device_tokens adt
+                JOIN app_users u ON u.user_id = adt.user_id
+                WHERE u.is_active = 1 AND u.tier IN ('pro','premium') AND adt.platform = ?
+                """,
+                (platform,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT adt.user_id, adt.device_token, adt.platform
+                FROM apns_device_tokens adt
+                JOIN app_users u ON u.user_id = adt.user_id
+                WHERE u.is_active = 1 AND u.tier IN ('pro','premium')
+                """,
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Stripe ───────────────────────────────────────────────────────────────────
+
+def update_user_stripe(user_id: str, stripe_customer_id: str, tier: str) -> None:
+    update_user(user_id, stripe_customer_id=stripe_customer_id, tier=tier)
