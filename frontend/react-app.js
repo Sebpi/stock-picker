@@ -459,10 +459,25 @@
     const [totpCode, setTotpCode] = useState("");
     const [disableCode, setDisableCode] = useState("");
     const [showDisable, setShowDisable] = useState(false);
+    const [allUsers, setAllUsers] = useState(null);
+    const [usersLoading, setUsersLoading] = useState(false);
 
     useEffect(() => {
-      api("/api/auth/me").then(setProfile).catch(() => setMsg({ text: "Could not load profile.", ok: false }));
+      api("/api/auth/me").then(d => {
+        setProfile(d);
+        if (d.role === "admin") {
+          setUsersLoading(true);
+          api("/v1/users").then(r => setAllUsers(r.users || [])).catch(() => setAllUsers([])).finally(() => setUsersLoading(false));
+        }
+      }).catch(() => setMsg({ text: "Could not load profile.", ok: false }));
     }, []);
+
+    async function updateUserTier(userId, tier) {
+      try {
+        await api(`/v1/users/${userId}/tier`, { method: "PUT", body: JSON.stringify({ tier }) });
+        setAllUsers(prev => prev.map(u => u.user_id === userId ? { ...u, tier } : u));
+      } catch (err) { setMsg({ text: err.message || "Could not update tier.", ok: false }); }
+    }
 
     async function startMfaSetup() {
       setBusy(true); setMsg({ text: "", ok: false });
@@ -575,7 +590,54 @@
         h("h2", { className: "mb-3 font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "Sessions"),
         h("p", { className: "mb-3 text-sm text-pulse-muted" }, "Sign out all other active sessions and revoke all refresh tokens."),
         h(Button, { onClick: logoutAll, disabled: busy, className: "text-xs" }, busy ? "Revoking..." : "Sign out all devices")
-      )
+      ),
+      profile.role === "admin" ? h(Card, { className: "p-5" },
+        h("div", { className: "mb-4 flex items-center justify-between" },
+          h("h2", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan" }, "All Users"),
+          allUsers && h("span", { className: "font-mono text-xs text-pulse-dim" }, allUsers.length, " registered")
+        ),
+        usersLoading ? h("p", { className: "text-sm text-pulse-muted" }, "Loading...") :
+        allUsers && allUsers.length === 0 ? h("p", { className: "text-sm text-pulse-muted" }, "No registered users yet.") :
+        allUsers ? h("div", { className: "overflow-x-auto" },
+          h("table", { className: "min-w-full text-xs" },
+            h("thead", null,
+              h("tr", { className: "border-b border-pulse-line text-left font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
+                ["Username", "Email", "Tier", "Verified", "MFA", "Joined"].map(col =>
+                  h("th", { key: col, className: "pb-2 pr-4 font-normal" }, col)
+                )
+              )
+            ),
+            h("tbody", null, allUsers.map(u => {
+              const tc = { free: "text-pulse-dim", pro: "text-pulse-cyan", premium: "text-pulse-magenta" }[u.tier] || "text-pulse-dim";
+              const joined = u.created_at ? u.created_at.slice(0, 10) : "—";
+              return h("tr", { key: u.user_id, className: "border-t border-pulse-line/40" },
+                h("td", { className: "py-2 pr-4 font-mono font-semibold" }, u.username,
+                  u.role === "admin" ? h("span", { className: "ml-1 text-[9px] text-pulse-amber uppercase" }, "admin") : null
+                ),
+                h("td", { className: "py-2 pr-4 text-pulse-muted max-w-[180px] truncate" }, u.email || "—"),
+                h("td", { className: "py-2 pr-4" },
+                  h("select", {
+                    value: u.tier,
+                    onChange: e => updateUserTier(u.user_id, e.target.value),
+                    className: `bg-transparent font-mono font-semibold uppercase ${tc} cursor-pointer outline-none`
+                  },
+                    ["free", "pro", "premium"].map(t =>
+                      h("option", { key: t, value: t, className: "bg-pulse-panel text-pulse-ink" }, t)
+                    )
+                  )
+                ),
+                h("td", { className: "py-2 pr-4" },
+                  h("span", { className: u.email_verified ? "text-pulse-green" : "text-pulse-amber" }, u.email_verified ? "Yes" : "No")
+                ),
+                h("td", { className: "py-2 pr-4" },
+                  h("span", { className: u.mfa_enabled ? "text-pulse-green" : "text-pulse-dim" }, u.mfa_enabled ? "On" : "Off")
+                ),
+                h("td", { className: "py-2 font-mono text-pulse-dim" }, joined)
+              );
+            }))
+          )
+        ) : null
+      ) : null
     );
   }
 

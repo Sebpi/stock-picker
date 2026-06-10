@@ -3053,6 +3053,25 @@ async def list_users_endpoint(
     return {"users": safe, "count": len(safe)}
 
 
+class UpdateTierRequest(BaseModel):
+    tier: str
+
+@app.put("/v1/users/{user_id}/tier")
+async def update_user_tier(user_id: str, req: UpdateTierRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    users = load_users()
+    user_obj = users.get(current_user, {})
+    if user_obj.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if req.tier not in ("free", "pro", "premium"):
+        raise HTTPException(status_code=400, detail="Invalid tier")
+    target = _db.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    _db.update_user(user_id, tier=req.tier)
+    return {"ok": True, "user_id": user_id, "tier": req.tier}
+
+
 @app.get("/v1/users/me")
 async def users_me(current_user: str = Depends(get_current_user)):
     import db as _db
