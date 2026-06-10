@@ -97,7 +97,7 @@ Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scopi
   - `GET /v1/users` — list all registered users
   - `PUT /v1/users/{user_id}/tier` — change a user's tier (free/pro/premium)
 - **Stripe webhook:** `POST /api/billing/stripe/webhook` — handles `subscription.created/updated/deleted`, updates user tier.
-- **APNs push:** `_send_apns_push()` via HTTP/2 + ES256 JWT; `_broadcast_earnings_push()` used by earnings scheduler. Requires `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY_PATH` env vars.
+- **APNs push:** `_send_apns_push()` via HTTP/2 + ES256 JWT; `_broadcast_earnings_push()` used by earnings scheduler. Requires `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY_PATH` env vars. The provider JWT is minted by `_apns_provider_jwt()` with an `iat`/`exp` (~50-min validity) and cached in `_apns_token_cache` — don't re-mint per push (Apple rejects tokens refreshed more than once per 20 min).
 - **Tests:** `backend/tests/test_multiuser.py` — 22 tests covering all DB helpers, using per-test in-memory SQLite via `monkeypatch`.
 
 ### Frontend — `frontend/`
@@ -112,7 +112,9 @@ Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scopi
 
 ### Deploy / runtime
 - `Dockerfile` is single-stage Python 3.12; no frontend build runs. `docker-entrypoint.sh` symlinks every JSON state file and the SQLite DB from `backend/` into `$DATA_DIR` (the Fly volume), copying seed values once if the volume is empty. Don't open these files via the symlink target during local dev if the volume isn't mounted — keep them where they are in `backend/` for local runs.
+- **Runs as non-root.** The image creates an unprivileged `appuser` (uid 10001) and installs `gosu`. `docker-entrypoint.sh` starts as root only to `chown` the mounted volume + create the symlinks, then `exec gosu appuser uvicorn …` so the long-lived server process is non-root. If you add steps that need root, do them before the `gosu` hand-off.
 - `fly.toml` mounts `stock_picker_data` at `/app/data`, sets `REQUIRE_HTTPS=true`, runs always-on (`auto_stop_machines = "off"`).
+- **Deploys are automated via GitHub Actions, not the manual `flyctl` command.** `.github/workflows/fly-deploy.yml` runs on every push to `main`: `test-and-quality` (pytest + Bandit `-ll` + `pip-audit` + `npm audit --audit-level=high` + `node --check`) → **deploy to Fly** (gated on tests, uses the `FLY_API_TOKEN` repo secret) → post-deploy smoke (`/api/health`, `/`, `/legacy`, `tests/e2e/smoke.mjs`) → OWASP ZAP baseline. The `flyctl deploy` below is the manual fallback. **`pip-audit` is a hard gate** — pin every dependency (incl. `cryptography`) to a version with no known advisory or the deploy fails before it ships. **The deploy will refuse to boot if `SECRET_KEY` is unset in Fly secrets** (fail-closed when `REQUIRE_HTTPS=true`), which surfaces as the smoke job failing on `/api/health`.
 
 ## Commands
 
@@ -139,7 +141,8 @@ npx playwright show-report test-results-run
 # Backend pytest suite (multi-agent unit tests)
 cd backend && python -m pytest tests/
 
-# Deploy
+# Deploy — normally automatic: pushing to main runs .github/workflows/fly-deploy.yml
+# (tests + bandit + pip-audit + npm audit → deploy → smoke → ZAP). Manual fallback:
 flyctl deploy -a stock-picker-sp
 ```
 
@@ -148,6 +151,8 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 ## Things to be careful with
 
 - **Playwright test harness.** `tests/server.js` is a proxy server — it serves the frontend static files on `:4321` AND proxies `/api/*` and `/v1/*` to the FastAPI backend on `:8000`. Start the backend first (`uvicorn main:app --port 8000`), then `npx playwright test`. The harness won't work without a running backend. React DOM IDs are baked into `react-app.js` and `index.html` for test selectors — don't rename them without updating the tests.
+- **`auth_middleware` gates `/v1/*` at the transport layer.** Backend tests that hit `/v1/*` via `TestClient` must send a credential the middleware accepts (e.g. set `main._SERVICE_KEY` and pass `Authorization: Bearer <key>`) — `app.dependency_overrides[get_current_user]` alone is no longer enough, because the override bypasses the route `Depends` but not the middleware. See `test_multiagent_phase1/3.py` for the pattern.
+- **`pip-audit` clean is a deploy gate.** When bumping or adding a backend dependency, run `pip-audit -r backend/requirements.txt` locally — a flagged version fails CI before the Fly deploy. `cryptography` in particular has a fast-moving advisory chain; pin to the latest clean patch.
 - **`ALLOWED_IDEA_KEYS`-style allowlist doesn't apply here**, but the equivalent gotcha is `_TICKER_RE` — anything user-supplied that bypasses `_validate_ticker()` is a bug.
 - **Don't reorder the `<link rel="stylesheet">` for `tailwind.css`** in `index.html` — it must load before React mounts or components render unstyled.
 - **CSP inline-script hash must stay in sync.** `backend/main.py` `security_headers` middleware uses a `sha256-` hash for the one remaining inline `<script>` block in `index.html` (the theme-detection snippet). If you change its content — even whitespace — recompute the hash: `python3 -c "import hashlib,base64,re; s=re.findall(r'<script(?![^>]*\bsrc\b)[^>]*>(.*?)</script>',open('frontend/index.html').read(),re.DOTALL); print('sha256-'+base64.b64encode(hashlib.sha256(s[0].encode()).digest()).decode())"`.
