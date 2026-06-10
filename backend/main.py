@@ -82,7 +82,21 @@ def _validate_ticker(ticker: str) -> str:
     return t
 
 # ── Rate limiter ───────────────────────────────────────────────────────────────
-limiter = Limiter(key_func=get_remote_address)
+def _client_ip(request) -> str:
+    """Resolve the real client IP for rate-limiting.
+
+    Behind Fly's edge, the original client IP arrives in `Fly-Client-IP`, which
+    Fly sets and overwrites — a client cannot forge it. `request.client.host`
+    is the proxy's address, so relying on it alone would make every request
+    share one bucket. We deliberately do NOT trust `X-Forwarded-For` (client
+    spoofable). Falls back to the socket peer for local/dev runs.
+    """
+    fly_ip = request.headers.get("fly-client-ip")
+    if fly_ip:
+        return fly_ip.strip()
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=_client_ip)
 
 # ── Account lockout ────────────────────────────────────────────────────────────
 _MAX_ATTEMPTS   = 5
@@ -138,12 +152,93 @@ def _clear_failed_logins(username: str) -> None:
     _lockout_until.pop(username, None)
     _save_lockout_state()
 
+def _norm_username(username: str) -> str:
+    """Canonical form for lockout/lookup. Lower-cased so that varying the case
+    (Admin/admin/ADMIN) cannot spawn independent lockout buckets or bypass the
+    per-account attempt limit."""
+    return username.strip().lower()
+
+def _lookup_user_ci(users: dict, username: str) -> tuple[str | None, dict | None]:
+    """Case-insensitive lookup into users.json. Returns (canonical_key, user)."""
+    if username in users:
+        return username, users[username]
+    lo = username.strip().lower()
+    for key, val in users.items():
+        if key.lower() == lo:
+            return key, val
+    return None, None
+
+# ── MFA verification throttle (per-user, in-memory) ──────────────────────────────
+_MFA_MAX_ATTEMPTS = 5
+_MFA_LOCKOUT_MINS = 15
+_mfa_failures: dict[str, list] = {}      # user_id -> [attempt datetimes]
+_mfa_lockout_until: dict[str, datetime] = {}
+
+def _check_mfa_lockout(user_id: str) -> None:
+    until = _mfa_lockout_until.get(user_id)
+    if until and datetime.now(timezone.utc) < until:
+        remaining = int((until - datetime.now(timezone.utc)).total_seconds() // 60) + 1
+        raise HTTPException(status_code=429, detail=f"Too many MFA attempts. Try again in {remaining} minute(s).")
+
+def _record_mfa_failure(user_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    window = [t for t in _mfa_failures.get(user_id, []) if (now - t).total_seconds() < 600]
+    window.append(now)
+    _mfa_failures[user_id] = window
+    if len(window) >= _MFA_MAX_ATTEMPTS:
+        _mfa_lockout_until[user_id] = now + timedelta(minutes=_MFA_LOCKOUT_MINS)
+        logger.warning("MFA_LOCKOUT user_id=%s after %d failed attempts", user_id, len(window))
+
+def _clear_mfa_failures(user_id: str) -> None:
+    _mfa_failures.pop(user_id, None)
+    _mfa_lockout_until.pop(user_id, None)
+
 # ── Auth setup ─────────────────────────────────────────────────────────────────
+# Treat REQUIRE_HTTPS=true as the "production" signal (set on Fly via fly.toml).
+_IS_PROD = os.getenv("REQUIRE_HTTPS", "false").lower() in {"1", "true", "yes", "on"}
 _SECRET_KEY = os.getenv("SECRET_KEY")
 if not _SECRET_KEY:
+    if _IS_PROD:
+        # Fail closed: an ephemeral key in prod silently invalidates every
+        # session on restart and diverges across instances. Refuse to boot.
+        raise RuntimeError(
+            "SECRET_KEY is not set but REQUIRE_HTTPS=true (production). "
+            "Set a persistent SECRET_KEY (python -c \"import secrets; print(secrets.token_hex(32))\") "
+            "before starting. Refusing to start with an ephemeral signing key."
+        )
     logger.warning("SECRET_KEY is not set; using an ephemeral key. Sessions will be invalidated on restart.")
     _SECRET_KEY = secrets.token_hex(32)
 _SERVICE_KEY = (os.getenv("STOCK_PICKER_SERVICE_KEY") or os.getenv("INTERNAL_SERVICE_KEY") or "").strip()
+
+# ── Secret-at-rest encryption (TOTP/MFA seeds) ───────────────────────────────────
+# MFA secrets are encrypted before they touch the DB so a database/backup
+# compromise does not hand an attacker working TOTP seeds. Key is derived from
+# SECRET_KEY via SHA-256 → urlsafe base64 (Fernet key format). Values are
+# prefixed so legacy plaintext base32 seeds (uppercase A-Z2-7, never lowercase)
+# decrypt transparently for backward compatibility.
+_MFA_ENC_PREFIX = "enc:v1:"
+
+def _secret_cipher():
+    import base64
+    import hashlib
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(_SECRET_KEY.encode()).digest())
+    return Fernet(key)
+
+def _encrypt_secret(plaintext: str) -> str:
+    if not plaintext:
+        return plaintext
+    return _MFA_ENC_PREFIX + _secret_cipher().encrypt(plaintext.encode()).decode()
+
+def _decrypt_secret(stored: str | None) -> str:
+    """Decrypt a stored secret. Plaintext (un-prefixed) values pass through so
+    seeds written before encryption was added keep working."""
+    if not stored:
+        return stored or ""
+    if not stored.startswith(_MFA_ENC_PREFIX):
+        return stored  # legacy plaintext seed
+    token = stored[len(_MFA_ENC_PREFIX):]
+    return _secret_cipher().decrypt(token.encode()).decode()
 
 # Portal-shared JWT (LENS → engines). Same value set on seb-portal +
 # pick-shovels + LENS so a portal-minted JWT verifies here without a
@@ -177,8 +272,13 @@ _legacy_users = Path(__file__).parent / "users.json"
 if _legacy_users.exists() and not USERS_FILE.exists():
     USERS_FILE.write_text(_legacy_users.read_text())
 
-# In-memory password reset tokens: token -> (username, expiry)
+# In-memory password reset tokens: sha256(token) -> (username, expiry).
+# Keyed by hash so a process-memory disclosure yields no replayable tokens.
 _reset_tokens: dict[str, tuple[str, datetime]] = {}
+
+def _hash_reset_token(raw: str) -> str:
+    import hashlib
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 # Auth public routes — no JWT required
 _AUTH_PUBLIC = {
@@ -399,13 +499,20 @@ async def origin_guard(request: Request, call_next):
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    # Allow static files, HTML root, and public auth endpoints
-    if not path.startswith("/api/") or path in _AUTH_PUBLIC:
+    # Defense-in-depth backstop: require a valid bearer token for every /api/
+    # and /v1/ route (except the public auth/health set), so a route that
+    # forgets its per-route Depends(get_current_user) is not silently exposed.
+    protected = path.startswith("/api/") or path.startswith("/v1/")
+    if not protected or path in _AUTH_PUBLIC:
         return await call_next(request)
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
     token = auth_header[7:]
+    # Service-account literal match — must mirror get_current_user so the
+    # middleware backstop is never stricter than the per-route dependency.
+    if _SERVICE_KEY and secrets.compare_digest(token, _SERVICE_KEY):
+        return await call_next(request)
     # Try local SECRET_KEY first (existing login flow).
     try:
         payload = jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
@@ -459,7 +566,8 @@ async def health_check():
             conn.execute("SELECT 1")
         checks["sqlite"] = "ok"
     except Exception as exc:
-        checks["sqlite"] = f"error: {exc}"
+        logger.error("HEALTH_SQLITE_FAIL: %s", exc)
+        checks["sqlite"] = "error"  # detail kept server-side; endpoint is public
 
     # yfinance spot check
     try:
@@ -467,7 +575,8 @@ async def health_check():
         info = yf.Ticker("AAPL").fast_info
         checks["yfinance"] = "ok" if info else "no data"
     except Exception as exc:
-        checks["yfinance"] = f"error: {exc}"
+        logger.error("HEALTH_YFINANCE_FAIL: %s", exc)
+        checks["yfinance"] = "error"  # detail kept server-side; endpoint is public
 
     # Anthropic key present
     checks["anthropic_key"] = "configured" if os.getenv("ANTHROPIC_API_KEY") else "missing"
@@ -1278,7 +1387,8 @@ def run_sentiment_scanner(ticker: Optional[str] = None, watchlist_only: bool = F
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Sentiment scan timed out")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sentiment scan failed: {e}")
+        logger.error("SENTIMENT_SCAN_FAIL: %s", e)
+        raise HTTPException(status_code=500, detail="Sentiment scan failed")
 
 
 def load_predictions() -> list[dict]:
@@ -2715,19 +2825,37 @@ async def startup():
     # Create default admin account on first run
     users = load_users()
     if not users:
-        default_pass = secrets.token_urlsafe(16)
+        # Prefer an operator-supplied bootstrap password; only generate one as a
+        # last resort. Never print the password to stdout — container/CI logs are
+        # widely readable. Generated passwords are written to a 0600 file on the
+        # data volume so an operator can retrieve it over a secure channel, then
+        # delete it.
+        default_pass = (os.getenv("ADMIN_BOOTSTRAP_PASSWORD") or "").strip()
+        generated = False
+        if not default_pass:
+            default_pass = secrets.token_urlsafe(16)
+            generated = True
         users["admin"] = {
             "hashed_password": _hash_pw(default_pass),
             "email": os.getenv("ALERT_EMAIL", ""),
         }
         save_users(users)
-        print("\n" + "="*55)
-        print("[Auth] First run — default account created:")
-        print("  Username : admin")
-        print(f"  Password : {default_pass}")
-        print("  Please change this password after first login!")
-        print("="*55 + "\n")
-        logger.info("First-run admin account created")
+        if generated:
+            try:
+                cred_file = _DATA_DIR / "admin_initial_password.txt"
+                cred_file.write_text(
+                    f"username: admin\npassword: {default_pass}\n"
+                    "Change this immediately after first login, then delete this file.\n"
+                )
+                os.chmod(cred_file, 0o600)
+                logger.warning(
+                    "First-run admin account created. Initial password written to %s (mode 0600) — "
+                    "retrieve it securely, change it, then delete the file.", cred_file,
+                )
+            except Exception as exc:
+                logger.error("First-run admin created but could not persist initial password file: %s", exc)
+        else:
+            logger.info("First-run admin account created from ADMIN_BOOTSTRAP_PASSWORD")
 
     # Load persisted scheduler settings (overrides .env)
     import scheduler_settings as _ss
@@ -2829,17 +2957,18 @@ async def shutdown():
 @app.post("/api/auth/login")
 @limiter.limit("10/minute")
 async def login(req: LoginRequest, request: Request):
-    username = req.username.strip()
-    _check_lockout(username)
+    raw_username = req.username.strip()
+    lock_key = _norm_username(raw_username)
+    _check_lockout(lock_key)
     users = load_users()
-    user = users.get(username)
+    ukey, user = _lookup_user_ci(users, raw_username)
     if not user or not _verify_pw(req.password, user["hashed_password"]):
-        _record_failed_login(username)
-        logger.warning("LOGIN_FAIL username=%s ip=%s", username, request.client.host if request.client else "unknown")
+        _record_failed_login(lock_key)
+        logger.warning("LOGIN_FAIL username=%s ip=%s", lock_key, request.client.host if request.client else "unknown")
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    _clear_failed_logins(username)
-    logger.info("LOGIN_OK username=%s ip=%s", username, request.client.host if request.client else "unknown")
-    token = create_access_token(username)
+    _clear_failed_logins(lock_key)
+    logger.info("LOGIN_OK username=%s ip=%s", ukey, request.client.host if request.client else "unknown")
+    token = create_access_token(ukey)
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/api/auth/forgot-password")
@@ -2850,10 +2979,11 @@ async def forgot_password(req: ForgotPasswordRequest, request: Request):
     origin = request.headers.get("origin", "")
     logger.info("PASSWORD_RESET_ATTEMPT username=%s ip=%s origin=%s", username, client_ip, origin or "none")
     users = load_users()
-    user = users.get(username)
+    ukey, user = _lookup_user_ci(users, username)
     if user:
         token = secrets.token_urlsafe(32)
-        _reset_tokens[token] = (username, datetime.now(timezone.utc) + timedelta(minutes=15))
+        # Store only a hash of the token so a memory disclosure can't be replayed.
+        _reset_tokens[_hash_reset_token(token)] = (ukey, datetime.now(timezone.utc) + timedelta(minutes=15))
         app_url = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
         reset_link = f"{app_url}/?reset_token={token}"
         reset_email = (user.get("email") or "").strip()
@@ -2869,22 +2999,22 @@ async def forgot_password(req: ForgotPasswordRequest, request: Request):
     return {"ok": True, "message": "If that username exists, a reset link has been sent to the registered email."}
 
 @app.post("/api/auth/reset-password")
-async def reset_password(req: ResetPasswordRequest):
+@limiter.limit("5/minute")
+async def reset_password(req: ResetPasswordRequest, request: Request):
     if len(req.new_password) < 12:
         raise HTTPException(status_code=400, detail="Password must be at least 12 characters")
-    entry = _reset_tokens.get(req.token)
+    # Pop atomically so the token is single-use even on retries/races.
+    entry = _reset_tokens.pop(_hash_reset_token(req.token), None)
     if not entry:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     username, expiry = entry
     if datetime.now(timezone.utc) > expiry:
-        _reset_tokens.pop(req.token, None)
         raise HTTPException(status_code=400, detail="Reset token has expired")
     users = load_users()
     if username not in users:
         raise HTTPException(status_code=400, detail="User not found")
     users[username]["hashed_password"] = _hash_pw(req.new_password)
     save_users(users)
-    _reset_tokens.pop(req.token, None)
     logger.info("PASSWORD_RESET_OK username=%s", username)
     return {"ok": True}
 
@@ -3003,40 +3133,62 @@ async def mfa_setup(current_user: str = Depends(get_current_user)):
     if user["mfa_enabled"]:
         raise HTTPException(status_code=400, detail="MFA already enabled")
     secret = pyotp.random_base32()
-    _db.update_user(user["user_id"], mfa_secret=secret)
+    _db.update_user(user["user_id"], mfa_secret=_encrypt_secret(secret))
     totp = pyotp.TOTP(secret)
     provisioning_uri = totp.provisioning_uri(name=user["email"], issuer_name="StockLens")
     return {"secret": secret, "provisioning_uri": provisioning_uri}
 
 
 @app.post("/api/auth/mfa/verify")
-async def mfa_verify(req: MfaSetupVerifyRequest, current_user: str = Depends(get_current_user)):
+@limiter.limit("5/minute")
+async def mfa_verify(req: MfaSetupVerifyRequest, request: Request, current_user: str = Depends(get_current_user)):
     import db as _db
     user = _db.get_user_by_username(current_user)
     if not user or not user.get("mfa_secret"):
         raise HTTPException(status_code=400, detail="MFA setup not started")
-    totp = pyotp.TOTP(user["mfa_secret"])
+    _check_mfa_lockout(user["user_id"])
+    totp = pyotp.TOTP(_decrypt_secret(user["mfa_secret"]))
     if not totp.verify(req.code, valid_window=1):
+        _record_mfa_failure(user["user_id"])
         raise HTTPException(status_code=400, detail="Invalid TOTP code")
+    _clear_mfa_failures(user["user_id"])
     _db.update_user(user["user_id"], mfa_enabled=1)
     logger.info("MFA_ENABLED user_id=%s", user["user_id"])
     return {"ok": True}
 
 
 @app.post("/api/auth/mfa/disable")
-async def mfa_disable(req: MfaSetupVerifyRequest, current_user: str = Depends(get_current_user)):
+@limiter.limit("5/minute")
+async def mfa_disable(req: MfaSetupVerifyRequest, request: Request, current_user: str = Depends(get_current_user)):
     import db as _db
     user = _db.get_user_by_username(current_user)
     if not user or not user.get("mfa_enabled"):
         raise HTTPException(status_code=400, detail="MFA not enabled")
-    totp = pyotp.TOTP(user["mfa_secret"])
+    _check_mfa_lockout(user["user_id"])
+    totp = pyotp.TOTP(_decrypt_secret(user["mfa_secret"]))
     if not totp.verify(req.code, valid_window=1):
+        _record_mfa_failure(user["user_id"])
         raise HTTPException(status_code=400, detail="Invalid TOTP code")
+    _clear_mfa_failures(user["user_id"])
     _db.update_user(user["user_id"], mfa_enabled=0, mfa_secret=None)
+    logger.info("MFA_DISABLED user_id=%s", user["user_id"])
     return {"ok": True}
 
 
 # ── User management endpoints ─────────────────────────────────────────────────
+
+def _is_admin_user(current_user: str) -> bool:
+    """Authoritative admin check. Portal/service identities are never admin
+    (they have no local users.json entry and are not the bootstrap admin).
+    A local user is admin if their users.json role is 'admin', or they are the
+    bootstrap 'admin' account (which predates the role field)."""
+    if current_user.startswith(("portal:", "service:")):
+        return False
+    user_obj = load_users().get(current_user)
+    if user_obj is None:
+        return False
+    return user_obj.get("role") == "admin" or current_user == "admin"
+
 
 @app.get("/v1/users")
 async def list_users_endpoint(
@@ -3044,9 +3196,7 @@ async def list_users_endpoint(
     current_user: str = Depends(get_current_user),
 ):
     import db as _db
-    users = load_users()
-    user_obj = users.get(current_user, {})
-    if user_obj.get("role") != "admin":
+    if not _is_admin_user(current_user):
         raise HTTPException(status_code=403, detail="Admin only")
     rows = _db.list_users(limit=min(limit, 500), offset=offset)
     safe = [{k: v for k, v in r.items() if k not in ("password_hash", "mfa_secret")} for r in rows]
@@ -3059,9 +3209,7 @@ class UpdateTierRequest(BaseModel):
 @app.put("/v1/users/{user_id}/tier")
 async def update_user_tier(user_id: str, req: UpdateTierRequest, current_user: str = Depends(get_current_user)):
     import db as _db
-    users = load_users()
-    user_obj = users.get(current_user, {})
-    if user_obj.get("role") != "admin":
+    if not _is_admin_user(current_user):
         raise HTTPException(status_code=403, detail="Admin only")
     if req.tier not in ("free", "pro", "premium"):
         raise HTTPException(status_code=400, detail="Invalid tier")
@@ -3077,7 +3225,14 @@ async def users_me(current_user: str = Depends(get_current_user)):
     import db as _db
     app_user = _db.get_user_by_username(current_user)
     if not app_user:
-        return {"username": current_user, "tier": "admin", "role": "admin"}
+        # No multi-user row: only the genuine local admin gets admin; portal /
+        # service / unknown identities default to a non-privileged user.
+        is_admin = _is_admin_user(current_user)
+        return {
+            "username": current_user,
+            "tier": "admin" if is_admin else "free",
+            "role": "admin" if is_admin else "user",
+        }
     return {k: v for k, v in app_user.items() if k not in ("password_hash", "mfa_secret")}
 
 
@@ -3240,19 +3395,35 @@ async def stripe_webhook(request: Request):
 
 # ── APNs push helper (used by earnings scheduler) ─────────────────────────────
 
+_apns_token_cache: dict[str, Any] = {"jwt": None, "minted_at": 0.0}
+
+def _apns_provider_jwt() -> str:
+    """Return a cached APNs provider JWT, regenerating only when older than
+    ~50 minutes. Apple requires the token to carry an `exp`-equivalent lifetime
+    of < 1 hour and rejects tokens refreshed more than once every 20 minutes,
+    so caching is both a security and a correctness requirement."""
+    import time as _time
+    from pathlib import Path as _Path
+    from jose import jwt as _jwt
+    now = int(_time.time())
+    cached = _apns_token_cache.get("jwt")
+    if cached and (now - _apns_token_cache.get("minted_at", 0)) < 3000:
+        return cached
+    key_data = _Path(_APNS_KEY_PATH).read_text()
+    header_payload = {"alg": "ES256", "kid": _APNS_KEY_ID}
+    # `iat`/`exp` bound the token to a 50-minute validity window.
+    claims = {"iss": _APNS_TEAM_ID, "iat": now, "exp": now + 3000}
+    token = _jwt.encode(claims, key_data, algorithm="ES256", headers=header_payload)
+    _apns_token_cache["jwt"] = token
+    _apns_token_cache["minted_at"] = now
+    return token
+
 async def _send_apns_push(device_token: str, title: str, body: str, data: dict | None = None) -> bool:
     """Send a single APNs push notification via HTTP/2. Returns True on success."""
     if not all([_APNS_KEY_ID, _APNS_TEAM_ID, _APNS_BUNDLE_ID, _APNS_KEY_PATH]):
         return False
     try:
-        from pathlib import Path as _Path
-        import time as _time
-        key_data = _Path(_APNS_KEY_PATH).read_text()
-        now = int(_time.time())
-        header_payload = {"alg": "ES256", "kid": _APNS_KEY_ID}
-        claims = {"iss": _APNS_TEAM_ID, "iat": now}
-        from jose import jwt as _jwt
-        apns_jwt = _jwt.encode(claims, key_data, algorithm="ES256", headers=header_payload)
+        apns_jwt = _apns_provider_jwt()
         url = f"https://api.push.apple.com/3/device/{device_token}"
         payload = {
             "aps": {
@@ -3618,8 +3789,11 @@ async def get_watchlist(names_only: bool = False):
 
 
 @app.get("/api/sentiment")
-async def sentiment_scan(ticker: Optional[str] = None, watchlist: bool = False, refresh: bool = False):
+@limiter.limit("20/minute")
+async def sentiment_scan(request: Request, ticker: Optional[str] = None, watchlist: bool = False, refresh: bool = False):
     """Run sentiment scanner. Results cached 30 min (watchlist) / 15 min (ticker). Pass refresh=true to bypass."""
+    if ticker:
+        ticker = _validate_ticker(ticker)
     return run_sentiment_scanner(ticker=ticker, watchlist_only=watchlist, refresh=refresh)
 
 
@@ -4942,7 +5116,7 @@ async def get_predictions_learning(request: Request, evaluate: bool = True):
         return summary
     except Exception as exc:
         logger.exception("Prediction learning summary failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Prediction learning summary failed: {exc}")
+        raise HTTPException(status_code=500, detail="Prediction learning summary failed")
 
 
 @app.get("/api/insider/{ticker}")
@@ -5025,7 +5199,7 @@ async def rebuild_predictions_calibration(request: Request, current_user: str = 
         }
     except Exception as exc:
         logger.exception("Prediction calibration rebuild failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Prediction calibration rebuild failed: {exc}")
+        raise HTTPException(status_code=500, detail="Prediction calibration rebuild failed")
 
 
 async def _generate_predictions_impl():
@@ -8009,7 +8183,8 @@ async def trigger_sentiment_scan(
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Scan timed out after 5 minutes")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("SENTIMENT_SCAN_DRYRUN_FAIL: %s", e)
+        raise HTTPException(status_code=500, detail="Sentiment scan failed")
 
 
 @app.post("/api/sentiment-agent/reset-state")
@@ -8143,7 +8318,7 @@ def v1_get_run(request: Request, run_id: str, current_user: str = Depends(get_cu
 def v1_latest_thesis(request: Request, ticker: str, current_user: str = Depends(get_current_user)):
     """Return the latest InvestmentThesis for a ticker."""
     import db as _db
-    symbol = ticker.upper()
+    symbol = _validate_ticker(ticker)
     thesis = _db.get_latest_thesis(symbol)
     if not thesis:
         raise HTTPException(status_code=404, detail=f"No thesis found for {ticker}. POST /v1/runs to generate one.")
