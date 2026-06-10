@@ -601,6 +601,122 @@ def save_settings(s: dict):
     _atomic_write(SETTINGS_FILE, json.dumps(s, indent=2))
 
 
+# ── Per-user data isolation helpers (v4.0) ───────────────────────────────────
+
+def _get_app_user_id(username: str) -> str | None:
+    """Return app_users.user_id for a logged-in user, or None if not in app_users."""
+    try:
+        import db as _db
+        user = _db.get_user_by_username(username)
+        return user["user_id"] if user else None
+    except Exception:
+        return None
+
+def _get_user_watchlist(username: str) -> list[str]:
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        return _db.get_user_watchlist(uid)
+    return load_watchlist()
+
+def _add_user_watchlist_ticker(username: str, ticker: str):
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        _db.add_to_user_watchlist(uid, ticker)
+    else:
+        tickers = load_watchlist()
+        if ticker not in tickers:
+            tickers.append(ticker)
+            save_watchlist(tickers)
+
+def _remove_user_watchlist_ticker(username: str, ticker: str):
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        _db.remove_from_user_watchlist(uid, ticker)
+    else:
+        tickers = [t for t in load_watchlist() if t != ticker]
+        save_watchlist(tickers)
+
+def _load_user_portfolio(username: str) -> list[dict]:
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        return _db.get_user_data(uid, "portfolio", [])
+    return load_portfolio()
+
+def _save_user_portfolio(username: str, txns: list[dict]):
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        _db.save_user_data(uid, "portfolio", txns)
+    else:
+        save_portfolio(txns)
+
+def _load_user_paper_portfolio(username: str) -> list[dict]:
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        return _db.get_user_data(uid, "paper_portfolio", [])
+    return load_paper_portfolio()
+
+def _save_user_paper_portfolio(username: str, txns: list[dict]):
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        _db.save_user_data(uid, "paper_portfolio", txns)
+    else:
+        save_paper_portfolio(txns)
+
+def _load_user_predictions(username: str) -> list[dict]:
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        return _db.get_user_data(uid, "predictions", [])
+    return load_predictions()
+
+def _save_user_predictions(username: str, preds: list[dict]):
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        _db.save_user_data(uid, "predictions", preds[:1000])
+    else:
+        save_predictions(preds)
+
+def _load_user_alerts(username: str) -> list[dict]:
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        return _db.get_user_data(uid, "alerts", [])
+    return load_alerts()
+
+def _save_user_alerts(username: str, alerts: list[dict]):
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        _db.save_user_data(uid, "alerts", alerts)
+    else:
+        save_alerts(alerts)
+
+def _load_user_settings(username: str) -> dict:
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        stored = _db.get_user_settings(uid)
+        return {**load_settings(), **stored}
+    return load_settings()
+
+def _save_user_settings(username: str, s: dict):
+    uid = _get_app_user_id(username)
+    if uid:
+        import db as _db
+        for k, v in s.items():
+            _db.set_user_setting(uid, k, json.dumps(v) if not isinstance(v, str) else v)
+    else:
+        save_settings(s)
+
+
 # Phase 2: market-regime gate. Block BUYs when SPY is below its long-term DMA
 # (trend-following filter) OR VIX is elevated (stress filter). Cached for an
 # hour because regime doesn't change minute-by-minute and the yfinance call is
@@ -1289,11 +1405,7 @@ def load_predictions() -> list[dict]:
             logger.error("Corrupt predictions file, returning empty: %s", exc)
     return []
 
-_predictions_cache: dict[str, object] = {
-    "date": None,
-    "mtime_ns": None,
-    "data": None,
-}
+_predictions_cache: dict[str, dict] = {}  # username → {"date": str, "data": list}
 _screen_universe_cache: dict[str, tuple[list[dict], datetime]] = {}
 _sentiment_cache: dict[str, dict] = {}  # key → {"ts": datetime, "data": dict}
 _SENTIMENT_WATCHLIST_TTL = 1800   # 30 min
@@ -1471,10 +1583,11 @@ async def _prewarm_universe_cache():
         logger.info("Screener cache pre-warmed: %s (%d rows)", pool_key, len(rows))
 
 
-def invalidate_predictions_cache() -> None:
-    _predictions_cache["date"] = None
-    _predictions_cache["mtime_ns"] = None
-    _predictions_cache["data"] = None
+def invalidate_predictions_cache(username: str | None = None) -> None:
+    if username:
+        _predictions_cache.pop(username, None)
+    else:
+        _predictions_cache.clear()
 
 
 def save_predictions(predictions: list[dict]):
@@ -3596,8 +3709,8 @@ async def get_peer_valuation(ticker: str):
 
 
 @app.get("/api/watchlist")
-async def get_watchlist(names_only: bool = False):
-    tickers = load_watchlist()
+async def get_watchlist(names_only: bool = False, current_user: str = Depends(get_current_user)):
+    tickers = _get_user_watchlist(current_user)
     if names_only:
         return tickers
     infos = await asyncio.gather(*[get_info(t) for t in tickers], return_exceptions=True)
@@ -3618,39 +3731,42 @@ async def get_watchlist(names_only: bool = False):
 
 
 @app.get("/api/sentiment")
-async def sentiment_scan(ticker: Optional[str] = None, watchlist: bool = False, refresh: bool = False):
+async def sentiment_scan(ticker: Optional[str] = None, watchlist: bool = False, refresh: bool = False,
+                         current_user: str = Depends(get_current_user)):
     """Run sentiment scanner. Results cached 30 min (watchlist) / 15 min (ticker). Pass refresh=true to bypass."""
-    return run_sentiment_scanner(ticker=ticker, watchlist_only=watchlist, refresh=refresh)
+    return run_sentiment_scanner(ticker=ticker, watchlist_only=watchlist, refresh=refresh,
+                                 watchlist_override=_get_user_watchlist(current_user) if watchlist else None)
 
 
-async def _run_predictions_bg():
+async def _run_predictions_bg(username: str):
     try:
-        print("[Predictions] Background generation triggered by watchlist add...")
-        await generate_predictions()
-        print("[Predictions] Background generation completed.")
+        print(f"[Predictions] Background generation for {username}...")
+        await _generate_predictions_impl(username=username)
+        invalidate_predictions_cache(username)
+        print(f"[Predictions] Background generation completed for {username}.")
     except Exception as e:
-        print(f"[Predictions] Background generation failed: {e}")
+        print(f"[Predictions] Background generation failed for {username}: {e}")
 
 
 @app.post("/api/watchlist/{ticker}")
-async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks):
+async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks,
+                           current_user: str = Depends(get_current_user)):
     ticker = _validate_ticker(ticker)
-    tickers = load_watchlist()
+    tickers = _get_user_watchlist(current_user)
     if ticker not in tickers:
-        tickers.append(ticker)
-        save_watchlist(tickers)
-        background_tasks.add_task(_run_predictions_bg)
+        _add_user_watchlist_ticker(current_user, ticker)
+        tickers = _get_user_watchlist(current_user)
+        background_tasks.add_task(_run_predictions_bg, current_user)
         import finnhub_prices as _fp
         _fp.subscribe([ticker])
     return {"watchlist": tickers}
 
 
 @app.delete("/api/watchlist/{ticker}")
-def remove_from_watchlist(ticker: str):
+def remove_from_watchlist(ticker: str, current_user: str = Depends(get_current_user)):
     ticker = _validate_ticker(ticker)
-    tickers = load_watchlist()
-    tickers = [t for t in tickers if t != ticker]
-    save_watchlist(tickers)
+    _remove_user_watchlist_ticker(current_user, ticker)
+    tickers = _get_user_watchlist(current_user)
     import finnhub_prices as _fp
     _fp.unsubscribe(ticker)
     return {"watchlist": tickers}
@@ -3660,7 +3776,7 @@ def remove_from_watchlist(ticker: str):
 async def get_live_prices(current_user: str = Depends(get_current_user)):
     """Live prices from Finnhub WebSocket + REST, falling back to yfinance cache."""
     import finnhub_prices as _fp
-    watchlist = load_watchlist()
+    watchlist = _get_user_watchlist(current_user)
     live = _fp.get_prices()
     result: dict[str, dict] = {}
     for ticker in watchlist:
@@ -4806,22 +4922,21 @@ async def evaluate_prediction_outcomes(limit: int = 100) -> int:
 
 
 @app.get("/api/predictions")
-async def get_predictions():
+async def get_predictions(current_user: str = Depends(get_current_user)):
     today = str(date.today())
-    mtime_ns = PREDICTIONS_FILE.stat().st_mtime_ns if PREDICTIONS_FILE.exists() else None
+    user_cache = _predictions_cache.get(current_user, {})
     if (
-        _predictions_cache["data"] is not None
-        and _predictions_cache["date"] == today
-        and _predictions_cache["mtime_ns"] == mtime_ns
+        user_cache.get("data") is not None
+        and user_cache.get("date") == today
     ):
-        return await _attach_current_prices_to_predictions(_predictions_cache["data"])
+        return await _attach_current_prices_to_predictions(user_cache["data"])
 
-    predictions = load_predictions()
+    predictions = _load_user_predictions(current_user)
     cleaned_predictions = sanitize_jsonable(predictions)
     if cleaned_predictions != predictions:
         predictions = cleaned_predictions
         try:
-            save_predictions(predictions)
+            _save_user_predictions(current_user, predictions)
         except Exception as e:
             logger.warning("Could not persist cleaned predictions during GET /api/predictions: %s", e)
     predictions, updated = update_actuals(predictions)
@@ -4859,10 +4974,10 @@ async def get_predictions():
                 updated = True
     if updated:
         try:
-            save_predictions(predictions)
+            _save_user_predictions(current_user, predictions)
         except Exception as e:
             logger.warning("Could not persist updated predictions during GET /api/predictions: %s", e)
-    watchlist_set = set(load_watchlist())
+    watchlist_set = set(_get_user_watchlist(current_user))
     calibration = compute_calibration(predictions)
 
     def _prediction_sort_key(p: dict):
@@ -4912,9 +5027,7 @@ async def get_predictions():
             })
     response = sanitize_jsonable(sorted_preds)
     _sync_prediction_history(response)
-    _predictions_cache["date"] = today
-    _predictions_cache["mtime_ns"] = PREDICTIONS_FILE.stat().st_mtime_ns if PREDICTIONS_FILE.exists() else None
-    _predictions_cache["data"] = response
+    _predictions_cache[current_user] = {"date": today, "data": response}
     return await _attach_current_prices_to_predictions(response)
 
 
@@ -5028,7 +5141,19 @@ async def rebuild_predictions_calibration(request: Request, current_user: str = 
         raise HTTPException(status_code=500, detail=f"Prediction calibration rebuild failed: {exc}")
 
 
-async def _generate_predictions_impl():
+async def _generate_predictions_impl(username: str | None = None):
+    def _load_preds():
+        return _load_user_predictions(username) if username else load_predictions()
+
+    def _save_preds(preds):
+        if username:
+            _save_user_predictions(username, preds)
+        else:
+            save_predictions(preds)
+
+    def _get_watchlist():
+        return _get_user_watchlist(username) if username else load_watchlist()
+
     def _clean_for_json(value):
         if isinstance(value, float):
             return value if math.isfinite(value) else None
@@ -5069,11 +5194,11 @@ async def _generate_predictions_impl():
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in .env")
 
     today = str(date.today())
-    predictions = load_predictions()
+    predictions = _load_preds()
     predictions, updated = update_actuals(predictions)
 
     already_predicted = {p["ticker"] for p in predictions if p["date"] == today}
-    watchlist_tickers = load_watchlist()
+    watchlist_tickers = _get_watchlist()
 
     # Watchlist stocks always get a prediction; UNIVERSE fills remaining slots
     watchlist_missing = [t for t in watchlist_tickers if t not in already_predicted]
@@ -5082,7 +5207,7 @@ async def _generate_predictions_impl():
 
     if not to_analyze:
         if updated:
-            save_predictions(predictions)
+            _save_preds(predictions)
         _sync_prediction_history(predictions)
         return {
             "message": "Predictions already generated for today.",
@@ -5531,7 +5656,7 @@ Rules:
         predictions.append(entry)
         new_preds.append(entry)
 
-    save_predictions(predictions)
+    _save_preds(predictions)
     stored_predictions = 0
     try:
         import db as _db
@@ -5546,7 +5671,7 @@ Rules:
             entry["prediction_id"] = prediction_id
             stored_predictions += 1
         if stored_predictions:
-            save_predictions(predictions)
+            _save_preds(predictions)
         if prediction_run_created:
             _db.complete_prediction_run(prediction_run_id, "completed", stored_predictions)
     except Exception as exc:
@@ -5602,14 +5727,16 @@ async def _backfill_factor_scores(tickers: list[str], pred_date: str):
 
 _predictions_job: dict = {"running": False, "started_at": None, "finished_at": None, "error": None, "count": None}
 
-async def _generate_predictions_bg():
+async def _generate_predictions_bg(username: str | None = None):
     _predictions_job["running"] = True
     _predictions_job["started_at"] = datetime.now(timezone.utc).isoformat()
     _predictions_job["error"] = None
     _predictions_job["count"] = None
     try:
-        result = await _generate_predictions_impl()
+        result = await _generate_predictions_impl(username=username)
         _predictions_job["count"] = len(result.get("predictions", [])) if isinstance(result, dict) else None
+        if username:
+            invalidate_predictions_cache(username)
     except Exception as exc:
         _predictions_job["error"] = str(exc)
         logger.exception("[Predictions] Background generate failed: %s", exc)
@@ -5619,10 +5746,11 @@ async def _generate_predictions_bg():
 
 @app.post("/api/predictions/generate")
 @limiter.limit("8/hour")
-async def generate_predictions(request: Request, background_tasks: BackgroundTasks):
+async def generate_predictions(request: Request, background_tasks: BackgroundTasks,
+                               current_user: str = Depends(get_current_user)):
     if _predictions_job["running"]:
         return {"status": "already_running", "started_at": _predictions_job["started_at"]}
-    background_tasks.add_task(_generate_predictions_bg)
+    background_tasks.add_task(_generate_predictions_bg, current_user)
     return {"status": "started"}
 
 @app.get("/api/predictions/generate/status")
@@ -6359,7 +6487,8 @@ async def simulate_predictions(request: Request):
 
 @app.delete("/api/predictions")
 def clear_predictions(current_user: str = Depends(get_current_user)):
-    save_predictions([])
+    _save_user_predictions(current_user, [])
+    invalidate_predictions_cache(current_user)
     logger.info("PREDICTIONS_CLEARED user=%s", current_user)
     return {"message": "All predictions cleared."}
 
@@ -6367,14 +6496,14 @@ def clear_predictions(current_user: str = Depends(get_current_user)):
 # ── Alerts endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/api/alerts")
-def get_alerts():
-    return load_alerts()
+def get_alerts(current_user: str = Depends(get_current_user)):
+    return _load_user_alerts(current_user)
 
 
 @app.get("/api/alerts/status")
-def get_monitor_status():
-    watchlist = load_watchlist()
-    owned = [ticker for ticker, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0]
+def get_monitor_status(current_user: str = Depends(get_current_user)):
+    watchlist = _get_user_watchlist(current_user)
+    owned = [ticker for ticker, pos in compute_positions(_load_user_portfolio(current_user)).items() if pos.get("shares", 0) > 0]
     email_configured = bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and os.getenv("ALERT_EMAIL"))
     sms_configured   = bool(os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN"))
     return {
@@ -7303,15 +7432,15 @@ async def get_recommendations_progress(job_id: str):
 
 
 @app.get("/api/settings")
-def get_settings():
-    return load_settings()
+def get_settings(current_user: str = Depends(get_current_user)):
+    return _load_user_settings(current_user)
 
 
 @app.post("/api/settings")
 def update_settings(s: dict, current_user: str = Depends(get_current_user)):
-    save_settings(s)
+    _save_user_settings(current_user, s)
     logger.info("SETTINGS_UPDATED user=%s", current_user)
-    return load_settings()
+    return _load_user_settings(current_user)
 
 
 @app.get("/api/risk")
@@ -7383,8 +7512,8 @@ def get_risk_dashboard():
 # ── Portfolio endpoints ───────────────────────────────────────────────────────
 
 @app.get("/api/portfolio")
-async def get_portfolio():
-    transactions = load_portfolio()
+async def get_portfolio(current_user: str = Depends(get_current_user)):
+    transactions = _load_user_portfolio(current_user)
     positions = compute_positions(transactions)
 
     held = [t for t, p in positions.items() if p["shares"] > 0]
@@ -7460,8 +7589,8 @@ async def get_portfolio():
 
 
 @app.post("/api/portfolio/buy")
-async def portfolio_buy(req: TradeRequest):
-    transactions = load_portfolio()
+async def portfolio_buy(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    transactions = _load_user_portfolio(current_user)
     ticker = req.ticker.upper()
     try:
         info = await get_info_with_timeout(ticker, 2.5)
@@ -7478,13 +7607,13 @@ async def portfolio_buy(req: TradeRequest):
         "date": req.date or str(date.today()),
         "timestamp": datetime.utcnow().isoformat(),
     })
-    save_portfolio(transactions)
+    _save_user_portfolio(current_user, transactions)
     return {"ok": True}
 
 
 @app.post("/api/portfolio/sell")
-async def portfolio_sell(req: TradeRequest):
-    transactions = load_portfolio()
+async def portfolio_sell(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    transactions = _load_user_portfolio(current_user)
     ticker = req.ticker.upper()
     positions = compute_positions(transactions)
     held = positions.get(ticker, {}).get("shares", 0)
@@ -7505,20 +7634,20 @@ async def portfolio_sell(req: TradeRequest):
         "date": req.date or str(date.today()),
         "timestamp": datetime.utcnow().isoformat(),
     })
-    save_portfolio(transactions)
+    _save_user_portfolio(current_user, transactions)
     return {"ok": True}
 
 
 @app.get("/api/portfolio/transactions")
-def get_transactions():
-    return load_portfolio()
+def get_transactions(current_user: str = Depends(get_current_user)):
+    return _load_user_portfolio(current_user)
 
 
 @app.delete("/api/portfolio/transaction/{tx_id}")
 def delete_transaction(tx_id: str, current_user: str = Depends(get_current_user)):
-    transactions = load_portfolio()
+    transactions = _load_user_portfolio(current_user)
     transactions = [t for t in transactions if t["id"] != tx_id]
-    save_portfolio(transactions)
+    _save_user_portfolio(current_user, transactions)
     logger.info("TRANSACTION_DELETED user=%s tx_id=%s", current_user, tx_id)
     return {"ok": True}
 
@@ -7528,7 +7657,8 @@ _MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MB
 
 @app.post("/api/portfolio/import")
 @limiter.limit("10/hour")
-async def import_portfolio(request: Request, file: UploadFile = File(...), replace: bool = False):
+async def import_portfolio(request: Request, file: UploadFile = File(...), replace: bool = False,
+                           current_user: str = Depends(get_current_user)):
     """
     Import transactions from a CSV file.
     Required columns: type, ticker, qty, price, date
@@ -7551,7 +7681,7 @@ async def import_portfolio(request: Request, file: UploadFile = File(...), repla
     if not required.issubset({c.strip().lower() for c in (reader.fieldnames or [])}):
         raise HTTPException(status_code=400, detail=f"CSV must have columns: {', '.join(sorted(required))}")
 
-    transactions = [] if replace else load_portfolio()
+    transactions = [] if replace else _load_user_portfolio(current_user)
     imported, skipped = 0, []
 
     # Build dedup key set from whatever transactions we're starting with
@@ -7634,7 +7764,7 @@ async def import_portfolio(request: Request, file: UploadFile = File(...), repla
             continue
 
     if imported > 0:
-        save_portfolio(transactions)
+        _save_user_portfolio(current_user, transactions)
 
     return {
         "imported": imported,
@@ -7647,7 +7777,7 @@ async def import_portfolio(request: Request, file: UploadFile = File(...), repla
 @limiter.limit("10/hour")
 async def reset_portfolio(request: Request, current_user: str = Depends(get_current_user)):
     """Clear all portfolio transactions."""
-    save_portfolio([])
+    _save_user_portfolio(current_user, [])
     logger.info("PORTFOLIO_RESET user=%s", current_user)
     return {"ok": True, "message": "Portfolio cleared."}
 
@@ -7663,7 +7793,8 @@ def portfolio_template():
 
 @app.post("/api/portfolio/import-pdf")
 @limiter.limit("5/hour")
-async def import_portfolio_pdf(request: Request, file: UploadFile = File(...), replace: bool = False):
+async def import_portfolio_pdf(request: Request, file: UploadFile = File(...), replace: bool = False,
+                               current_user: str = Depends(get_current_user)):
     """
     Import transactions from a Saxo Bank PDF statement.
     Extracts text from the PDF and uses Claude AI to parse transactions.
@@ -7739,7 +7870,7 @@ PDF TEXT:
         return {"imported": 0, "skipped": 0, "errors": [], "preview": [], "message": "No transactions found in this PDF."}
 
     # Validate and import
-    transactions = [] if replace else load_portfolio()
+    transactions = [] if replace else _load_user_portfolio(current_user)
     positions    = compute_positions(transactions)
     imported, skipped = 0, []
     preview = []
@@ -7806,7 +7937,7 @@ PDF TEXT:
             skipped.append(f"Row {i}: {e}")
 
     if imported > 0:
-        save_portfolio(transactions)
+        _save_user_portfolio(current_user, transactions)
 
     return {"imported": imported, "skipped": len(skipped), "errors": skipped, "preview": preview}
 
@@ -7814,8 +7945,8 @@ PDF TEXT:
 # ── Paper Portfolio endpoints ─────────────────────────────────────────────────
 
 @app.get("/api/paper-portfolio")
-async def get_paper_portfolio():
-    transactions = load_paper_portfolio()
+async def get_paper_portfolio(current_user: str = Depends(get_current_user)):
+    transactions = _load_user_paper_portfolio(current_user)
     annotated_transactions = annotate_transactions_with_realised_pnl(transactions)
     positions    = compute_positions(transactions)
     held         = [t for t, p in positions.items() if p["shares"] > 0]
@@ -7889,8 +8020,8 @@ async def get_paper_portfolio():
 
 
 @app.post("/api/paper-portfolio/buy")
-async def paper_buy(req: TradeRequest):
-    transactions = load_paper_portfolio()
+async def paper_buy(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    transactions = _load_user_paper_portfolio(current_user)
     cash = PAPER_INITIAL_FLOAT
     for tx in transactions:
         qty   = float(tx.get("qty", 0))
@@ -7918,13 +8049,13 @@ async def paper_buy(req: TradeRequest):
         "timestamp": datetime.utcnow().isoformat(),
         "source":    "recommendation",
     })
-    save_paper_portfolio(transactions)
+    _save_user_paper_portfolio(current_user, transactions)
     return {"ok": True}
 
 
 @app.post("/api/paper-portfolio/sell")
-async def paper_sell(req: TradeRequest):
-    transactions = load_paper_portfolio()
+async def paper_sell(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    transactions = _load_user_paper_portfolio(current_user)
     positions    = compute_positions(transactions)
     held         = positions.get(req.ticker.upper(), {}).get("shares", 0)
     if req.qty > held + 1e-9:
@@ -7945,20 +8076,20 @@ async def paper_sell(req: TradeRequest):
         "timestamp": datetime.utcnow().isoformat(),
         "source":    "recommendation",
     })
-    save_paper_portfolio(transactions)
+    _save_user_paper_portfolio(current_user, transactions)
     return {"ok": True}
 
 
 @app.delete("/api/paper-portfolio/reset")
 def reset_paper_portfolio(current_user: str = Depends(get_current_user)):
-    save_paper_portfolio([])
+    _save_user_paper_portfolio(current_user, [])
     logger.info("PAPER_PORTFOLIO_RESET user=%s", current_user)
     return {"ok": True}
 
 
 @app.delete("/api/alerts")
 def clear_alerts(current_user: str = Depends(get_current_user)):
-    save_alerts([])
+    _save_user_alerts(current_user, [])
     logger.info("ALERTS_CLEARED user=%s", current_user)
     return {"message": "Alert history cleared."}
 
@@ -8728,3 +8859,39 @@ async def _init_multiagent_db():
             logger.info("[v1] Calibrated agent weights loaded from DB")
     except Exception as exc:
         logger.warning("[v1] Could not load calibrated weights: %s", exc)
+    # Seed admin user into app_users so they get per-user data isolation
+    try:
+        import db as _db
+        admin_uid = _db.ensure_admin_app_user()
+        # Seed watchlist if user_watchlist is empty for admin
+        if not _db.get_user_watchlist(admin_uid):
+            wl = load_watchlist()
+            if wl:
+                _db.seed_user_watchlist_from_tickers(admin_uid, wl)
+                logger.info("[v1] Seeded admin watchlist: %d tickers", len(wl))
+        # Seed portfolio if empty
+        if not _db.get_user_data(admin_uid, "portfolio"):
+            pf = load_portfolio()
+            if pf:
+                _db.save_user_data(admin_uid, "portfolio", pf)
+                logger.info("[v1] Seeded admin portfolio")
+        # Seed paper portfolio if empty
+        if not _db.get_user_data(admin_uid, "paper_portfolio"):
+            ppf = load_paper_portfolio()
+            if ppf:
+                _db.save_user_data(admin_uid, "paper_portfolio", ppf)
+                logger.info("[v1] Seeded admin paper portfolio")
+        # Seed predictions if empty
+        if not _db.get_user_data(admin_uid, "predictions"):
+            preds = load_predictions()
+            if preds:
+                _db.save_user_data(admin_uid, "predictions", preds[:1000])
+                logger.info("[v1] Seeded admin predictions: %d rows", len(preds))
+        # Seed alerts if empty
+        if not _db.get_user_data(admin_uid, "alerts"):
+            alerts = load_alerts()
+            if alerts:
+                _db.save_user_data(admin_uid, "alerts", alerts)
+                logger.info("[v1] Seeded admin alerts: %d rows", len(alerts))
+    except Exception as exc:
+        logger.warning("[v1] Admin user seeding failed (non-fatal): %s", exc)

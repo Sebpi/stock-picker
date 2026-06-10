@@ -449,6 +449,15 @@ CREATE TABLE IF NOT EXISTS user_settings (
     PRIMARY KEY(user_id, key),
     FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS user_data_store (
+    user_id     TEXT NOT NULL,
+    data_key    TEXT NOT NULL,
+    data_json   TEXT NOT NULL DEFAULT '[]',
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(user_id, data_key),
+    FOREIGN KEY(user_id) REFERENCES app_users(user_id) ON DELETE CASCADE
+);
 """
 
 
@@ -2433,3 +2442,63 @@ def get_all_active_device_tokens(platform: str | None = None) -> list[dict]:
 
 def update_user_stripe(user_id: str, stripe_customer_id: str, tier: str) -> None:
     update_user(user_id, stripe_customer_id=stripe_customer_id, tier=tier)
+
+
+# ── Per-user generic data store ───────────────────────────────────────────────
+
+def get_user_data(user_id: str, key: str, default=None):
+    """Return the JSON-decoded value for (user_id, key), or default if absent."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT data_json FROM user_data_store WHERE user_id=? AND data_key=?",
+            (user_id, key),
+        ).fetchone()
+    if row is None:
+        return default
+    return _safe_json_loads(row["data_json"], default)
+
+
+def save_user_data(user_id: str, key: str, data) -> None:
+    """Upsert a JSON blob for (user_id, key)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO user_data_store (user_id, data_key, data_json, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id, data_key) DO UPDATE SET
+                 data_json=excluded.data_json, updated_at=excluded.updated_at""",
+            (user_id, key, json.dumps(data), now),
+        )
+
+
+def ensure_admin_app_user() -> str:
+    """Create an app_users row for 'admin' if it doesn't exist. Returns the user_id."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM app_users WHERE username='admin'"
+        ).fetchone()
+        if row:
+            return row["user_id"]
+        user_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT INTO app_users
+               (user_id, username, email, password_hash, role, tier,
+                is_active, email_verified, mfa_enabled, created_at, updated_at)
+               VALUES (?, 'admin', 'admin@localhost', 'legacy_admin', 'admin', 'premium',
+                       1, 1, 0, ?, ?)""",
+            (user_id, now, now),
+        )
+    return user_id
+
+
+def seed_user_watchlist_from_tickers(user_id: str, tickers: list) -> None:
+    """Idempotently insert tickers into user_watchlist (skips duplicates)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        for t in tickers:
+            conn.execute(
+                """INSERT OR IGNORE INTO user_watchlist (user_id, ticker, added_at)
+                   VALUES (?, ?, ?)""",
+                (user_id, t, now),
+            )
