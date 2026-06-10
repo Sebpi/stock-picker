@@ -2,20 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> Lives at `~/code/stock-picker`. Own git repo, remote `Sebpi/stock-picker` on GitHub. Deploys to the Fly app `stock-picker-sp`. Current version: **v3.8.0** (defined in `package.json`).
+> Lives at `~/code/stock-picker`. Own git repo, remote `Sebpi/stock-picker` on GitHub. Deploys to the Fly app `stock-picker-sp`. Current version: **v3.9.0** (defined in `package.json`).
 
 ## Architecture
 
 StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-process FastAPI backend that also serves a hand-written React SPA loaded via CDN UMD — there is **no frontend build step**.
 
-### Backend — `backend/main.py` (single ~8k-line FastAPI app)
-- Python 3.12, FastAPI + uvicorn, JWT auth via `python-jose`, bcrypt password hashing, slowapi rate limiting, APScheduler for background jobs, Anthropic SDK for LLM calls, `yfinance`/`yahooquery` for market data, Twilio + SMTP for alerts, `reportlab`/`pypdf` for PDFs.
+### Backend — `backend/main.py` (single ~9k-line FastAPI app)
+- Python 3.12, FastAPI + uvicorn, JWT auth via `python-jose`, bcrypt password hashing, slowapi rate limiting, APScheduler for background jobs, Anthropic SDK for LLM calls, `yfinance`/`yahooquery` for market data, Twilio + SMTP for alerts, `reportlab`/`pypdf` for PDFs, `pyotp` for TOTP MFA, `stripe` for billing webhooks.
 - Storage is **dual-format on purpose**:
-  - SQLite at `$DATA_DIR/stockpicker.db` — multi-agent signals, thesis history, decision log, agent accuracy, calibrated weights (see `backend/db.py`). Also contains an `insider_transactions` table managed by `backend/insider_transactions.py` (CREATE TABLE IF NOT EXISTS, no migration script needed).
+  - SQLite at `$DATA_DIR/stockpicker.db` — multi-agent signals, thesis history, decision log, agent accuracy, calibrated weights, multi-user tables (see `backend/db.py`). Also contains an `insider_transactions` table managed by `backend/insider_transactions.py` (CREATE TABLE IF NOT EXISTS, no migration script needed).
   - JSON files under `$DATA_DIR` for legacy UI compatibility: `users.json`, `watchlist.json`, `predictions.json`, `portfolio.json`, `paper_portfolio.json`, `alerts.json`, `settings.json`, `lockout_state.json`, `sentiment_agent_state.json`.
   - `db.py` auto-migrates a legacy `backend/stockpicker.db` into `$DATA_DIR` on first boot if the latter doesn't exist. JSON writes use a temp-file + rename atomic pattern (`_atomic_write`).
 - **`SECRET_KEY`** drives JWT signing. If unset, the app generates an ephemeral one and **all sessions invalidate on restart** — set it in `backend/.env` for any non-toy run.
 - Auth surface: bcrypt + JWT (HS256), per-account lockout (5 attempts → 15-min cool-off, persisted to `lockout_state.json`), password reset via email token, default `admin` user auto-created on first run with a **random password printed to stdout once**.
+- **Multi-user auth** (v3.9.0): `app_users` SQLite table with UUID PK, bcrypt hash, role, tier (free/pro/premium), email_verified, TOTP MFA. Short-lived access tokens (`_ACCESS_TOKEN_MINUTES=15`) + 30-day rotating refresh tokens. Existing `users.json` admin login unchanged — new system is additive.
 - **Portal JWT integration (LENS shared-session):** `get_current_user` and `auth_middleware` both accept JWTs minted by `seb-portal /api/auth/jwt` when `PORTAL_JWT_SECRET` is set. Only tokens with `iss="seb-portal"` pass through; portal-routed identity is returned as `"portal:<sub>"` so audit logs can distinguish it from local logins. Portal users don't need a `users.json` entry.
 - Three middleware stacks on top of FastAPI: trusted-host (`ALLOWED_HOSTS`), CORS (`ALLOWED_ORIGINS`), and an HTTPS-redirect / origin-check pair gated by `REQUIRE_HTTPS`.
 - Ticker validation is centralised: `_validate_ticker()` enforces `^[A-Z0-9.\-]{1,10}$` — call this on every user-supplied ticker. `load_watchlist()` also validates tickers on read and logs a warning for any it skips.
@@ -73,9 +74,37 @@ The learning system measures how well each agent's directional calls translated 
 - **Phase 5** — Trajectory math: `_p_hit_target()` and `_expected_return_from_score()` drive a "Probability of hitting portfolio target" trajectory block in the `/api/recommendations` response. Cross-engine consistency badge per BUY (agree / contradiction / no_thesis / stale >24h) uses the cached alert snapshot.
 - **Confidence calibration** — `compute_confidence_calibration` adds a `buckets` key to `/api/predictions/calibration`: per-confidence hit rate vs `CONFIDENCE_PRIOR_HIT_RATE` ({high: 0.75, medium: 0.62, low: 0.55}), MAE, and ECE (expected calibration error — lower is better, <0.05 ≈ well-calibrated). Rendered as `ConfidenceCalibrationTile` on the Predictions tab.
 
+### Multi-user system — `backend/db.py` + `backend/main.py`
+Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scoping) → Data (row-level SQLite).
+
+- **SQLite tables:** `app_users`, `email_verification_tokens`, `refresh_tokens`, `user_watchlist`, `user_portfolio`, `user_paper_portfolio`, `user_settings`, `apns_device_tokens`.
+- **Tier limits:** free = 10 watchlist tickers / 5 thesis per month; pro = 50 / unlimited; premium = 999 / unlimited. `check_and_increment_thesis_count()` enforces per-user monthly quota.
+- **Auth endpoints** (all public — no JWT required):
+  - `POST /api/auth/register` — create account, send verification email
+  - `GET /api/auth/verify-email?token=` — consume single-use token, set `email_verified=1`
+  - `POST /api/auth/refresh` — rotate 30-day refresh token, issue 15-min access token
+- **Auth endpoints** (require JWT):
+  - `POST /api/auth/logout-all` — revoke all refresh tokens for current user
+  - `POST /api/auth/mfa/setup` — generate TOTP secret + provisioning URI (for QR scan)
+  - `POST /api/auth/mfa/verify` — confirm 6-digit code and enable MFA
+  - `POST /api/auth/mfa/disable` — disable MFA with confirmation code
+- **User data endpoints** (all under `/v1/users/me/`, require JWT):
+  - `GET/POST/DELETE /v1/users/me/watchlist[/{ticker}]` — per-user watchlist, tier-gated
+  - `GET/POST/DELETE /v1/users/me/portfolio[/{ticker}]` — per-user portfolio (real + paper)
+  - `GET/PUT /v1/users/me/settings[/{key}]` — per-user key-value settings
+  - `POST/DELETE /v1/users/me/device-tokens[/{token}]` — APNs device tokens (pro/premium only)
+- **Admin endpoints** (require admin role):
+  - `GET /v1/users` — list all registered users
+  - `PUT /v1/users/{user_id}/tier` — change a user's tier (free/pro/premium)
+- **Stripe webhook:** `POST /api/billing/stripe/webhook` — handles `subscription.created/updated/deleted`, updates user tier.
+- **APNs push:** `_send_apns_push()` via HTTP/2 + ES256 JWT; `_broadcast_earnings_push()` used by earnings scheduler. Requires `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY_PATH` env vars.
+- **Tests:** `backend/tests/test_multiuser.py` — 22 tests covering all DB helpers, using per-test in-memory SQLite via `monkeypatch`.
+
 ### Frontend — `frontend/`
-- `index.html` + `react-app.js` (~3960 lines) is the entire active app. The SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
+- `index.html` + `react-app.js` (~4400 lines) is the entire active app. The SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
 - `frontend/react-app.js` contains a `FLAG_TOOLTIPS` constant covering all `QualityFlag` enum values. Quality flags are rendered as amber pills in the thesis detail view when present.
+- **Login/Register flow** (v3.9.0): The `Login` component supports four modes: `login`, `register`, `forgot`, `reset`. Auto-verifies email on page load when `?verify_token=` is in the URL. Registration calls `POST /api/auth/register` and requires a 12-char minimum password.
+- **Account tab** (v3.9.0): Shows profile info (username, email, tier, email verification, MFA status), TOTP MFA setup/disable, and a "Sign out all devices" button. When signed in as `admin`, also shows a users table with all registered accounts and an inline tier dropdown.
 - **Rebuilding Tailwind CSS:** run `./node_modules/.bin/tailwindcss -i tailwind.input.css -o frontend/tailwind.css --minify` from the repo root whenever you add new Tailwind classes to `react-app.js` or `index.html`. After regenerating: recompute the SRI hash (`python3 -c "import hashlib,base64,sys; d=open('frontend/tailwind.css','rb').read(); print('sha256-'+base64.b64encode(hashlib.sha256(d).digest()).decode())"`) and update the `integrity=` attribute in `index.html`. The config lives in `tailwind.config.js` at the repo root.
 - The `?v=` cache-buster and page title in `index.html` use the `__APP_VERSION__` placeholder, which the server injects from `package.json` at runtime. **Version bumps only require updating `package.json`** — no hand-editing of `index.html` needed.
 - `fetch` uses `API = ""` (relative paths), so the SPA must be served from the same origin as the FastAPI backend in production.
@@ -114,7 +143,7 @@ cd backend && python -m pytest tests/
 flyctl deploy -a stock-picker-sp
 ```
 
-Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` (32+ chars; `python -c "import secrets; print(secrets.token_hex(32))"`), `ANTHROPIC_API_KEY`. Optional: `ANTHROPIC_MODEL`, `THESIS_MODEL`, `PREDICTIONS_MAX_TOKENS`, `ALLOWED_HOSTS`, `ALLOWED_ORIGINS`, `REQUIRE_HTTPS`, `APP_URL`, `ALLOW_NGROK_ORIGINS`, `DATA_DIR`, Twilio (`TWILIO_*`) for WhatsApp, SMTP (`SMTP_*`) for email, `PORTAL_JWT_SECRET` (shared with `seb-portal` for LENS cross-app auth), `EDGAR_USER_AGENT` (SEC EDGAR courtesy header for Form 4 fetches).
+Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` (32+ chars; `python -c "import secrets; print(secrets.token_hex(32))"`), `ANTHROPIC_API_KEY`. Optional: `ANTHROPIC_MODEL`, `THESIS_MODEL`, `PREDICTIONS_MAX_TOKENS`, `ALLOWED_HOSTS`, `ALLOWED_ORIGINS`, `REQUIRE_HTTPS`, `APP_URL`, `ALLOW_NGROK_ORIGINS`, `DATA_DIR`, Twilio (`TWILIO_*`) for WhatsApp, SMTP (`SMTP_*`) for email, `PORTAL_JWT_SECRET` (shared with `seb-portal` for LENS cross-app auth), `EDGAR_USER_AGENT` (SEC EDGAR courtesy header for Form 4 fetches). Multi-user (v3.9.0): `ACCESS_TOKEN_MINUTES` (default 15), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY_PATH` (path to .p8 file). Stripe and APNs are optional — the app degrades gracefully without them.
 
 ## Things to be careful with
 
@@ -131,4 +160,7 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 - **Two recommendation engines with different sources of truth.** `_build_recommendations` (Signals tab) reads `paper_portfolio.json` and prediction scores; `_build_recommendation_alert_snapshot` (Alerts) reads `portfolio.json` + the watchlist and uses the multi-agent thesis. Phase 1 unifies the "already held" check across both by including paper holdings in the alert snapshot's skip list; Phase 2 wires the market-regime gate into both. Alert snapshot requires ≥5 positive agents. Keep these two engines in sync if you add new BUY filters to one.
 - **Learning system weight mutations are live.** `HORIZON_WEIGHTS` is mutated in-place by `apply_weight_adjustments()`. Changes take effect on the next thesis run without restart. If you're debugging unexpected scores, check `GET /v1/learning/weights` to see if weights have drifted from factory defaults. Use `POST /v1/learning/weights/reset` to restore defaults.
 - **1m forecast rows are direction proxies only.** The 1m `forecast_outcome` row created by `store_thesis()` uses the 3m `base_return_pct` as the direction proxy (not a real 1m forecast). It exists solely to feed accuracy data back to the learning system 30 days sooner. Don't treat `forecast_return_pct` on 1m rows as a genuine 1-month price target.
+- **Multi-user auth is additive, not a replacement.** The existing `users.json` admin login still works and is the only way to access admin role features (including the users list). New `app_users` registrations are separate — they don't get an entry in `users.json` and cannot access admin endpoints unless their `role` column is manually set to `"admin"` in the DB.
+- **Refresh token rotation is single-use.** Each `POST /api/auth/refresh` invalidates the old token and issues a new one. If two tabs race, one will get a 401 — that's by design (token theft detection). The frontend doesn't yet handle silent refresh, so 15-minute access tokens will cause visible logouts without a refresh implementation.
+- **MFA secrets are stored in plaintext** in `app_users.mfa_secret`. If the DB is compromised, TOTP seeds are exposed. For higher security: encrypt at rest using `SECRET_KEY` as the key before storing.
 - **Backtest harness lives in `backend/backtest_phase4.py`, NOT main.py.** Reachable via `/api/recommendations/backtest?lookback_days=90&sensitivity=true&refit_curve=true`. The harness reads `predictions.json` + yfinance prices and replays the Phase 1-3 BUY/SELL rules — it does **not** call the multi-agent orchestrator (too expensive over hundreds of dates). When you change a rule in `_build_recommendations`, mirror it in `backtest_phase4._simulate_exit` / the sizing block, or backtest results will silently drift from reality. The sensitivity sweep uses `_prefetch_market_data` to fetch SPY/VIX/tickers once and pass a `_market_cache` to each config — don't bypass this or the sweep will hit yfinance rate limits at 36× concurrency.
