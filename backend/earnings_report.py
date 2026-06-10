@@ -81,10 +81,14 @@ def _fmt_period(col: Any) -> str:
 
 def _fetch_quarterly_results(t: Any) -> list[dict]:
     """
-    Merge EPS beat/miss data (earnings_history — confirmed working) with
-    quarterly P&L (quarterly_financials — backward-compat alias confirmed
-    to have same row labels as t.financials).
+    Merge EPS beat/miss data (earnings_history) with P&L (quarterly or annual).
+    Tries quarterly_financials → quarterly_income_stmt → annual t.financials
+    (t.financials is the confirmed-working source used by all 21 production agents).
+    Handles both standard orientation (metrics=index, dates=columns) and transposed.
     """
+    _STD_METRICS = ["Total Revenue", "Gross Profit", "Operating Income", "Net Income",
+                    "EBIT", "Net Income Common Stockholders"]
+
     # EPS history: confirmed working via earnings_surprise agent
     eps_by_date: dict[str, dict] = {}
     eh = _timed_fetch(lambda: t.earnings_history, "earnings_history")
@@ -93,31 +97,51 @@ def _fetch_quarterly_results(t: Any) -> list[dict]:
             for idx, row in eh.sort_index(ascending=False).head(4).iterrows():
                 date_str = str(idx)[:10]
                 eps_by_date[date_str] = {
-                    "eps_estimate": _sf(row.get("epsEstimate") or row.get("EPS Estimate")),
-                    "eps_actual":   _sf(row.get("epsActual")   or row.get("Reported EPS") or row.get("EPS Actual")),
+                    "eps_estimate":     _sf(row.get("epsEstimate") or row.get("EPS Estimate")),
+                    "eps_actual":       _sf(row.get("epsActual") or row.get("Reported EPS") or row.get("EPS Actual")),
                     "eps_surprise_pct": _sf(row.get("surprisePercent") or row.get("Surprise(%)")),
                 }
         except Exception as exc:
             logger.debug("[earnings_report] earnings_history parse: %s", exc)
 
-    # Quarterly P&L — try quarterly_financials (backward-compat alias for
-    # quarterly_income_stmt); same row labels as t.financials (confirmed working)
-    rev_rows: list[dict] = []
-    qfin = _timed_fetch(lambda: t.quarterly_financials, "quarterly_financials")
-    if qfin is not None and not qfin.empty:
+    # Try P&L sources in preference order; fall back to annual financials (confirmed working)
+    pnl_df = None
+    for attr, label in [
+        ("quarterly_financials",  "quarterly_financials"),
+        ("quarterly_income_stmt", "quarterly_income_stmt"),
+    ]:
         try:
-            all_cols = list(qfin.columns)
+            df = _timed_fetch(lambda a=attr: getattr(t, a), label)
+            if df is not None and not df.empty and df.shape[0] > 0 and df.shape[1] > 0:
+                pnl_df = df
+                break
+        except Exception:
+            pass
+
+    if pnl_df is None:
+        pnl_df = _timed_fetch(lambda: t.financials, "financials")
+
+    rev_rows: list[dict] = []
+    if pnl_df is not None and not pnl_df.empty:
+        try:
+            # Detect and fix transposed orientation:
+            # standard → index=metric names, columns=dates
+            # transposed → index=dates, columns=metric names
+            if not any(m in pnl_df.index for m in _STD_METRICS):
+                if any(m in pnl_df.columns for m in _STD_METRICS):
+                    pnl_df = pnl_df.T
+
+            all_cols = list(pnl_df.columns)
             for i, col in enumerate(all_cols[:4]):
                 period = _fmt_period(col)
                 date_str = str(col)[:10]
 
-                rev = _row(qfin, "Total Revenue",    col=i)
-                gp  = _row(qfin, "Gross Profit",     col=i)
-                op  = _row(qfin, "Operating Income", "EBIT", "Operating Profit", col=i)
-                ni  = _row(qfin, "Net Income", "Net Income Common Stockholders", col=i)
+                rev = _row(pnl_df, "Total Revenue", col=i)
+                gp  = _row(pnl_df, "Gross Profit", col=i)
+                op  = _row(pnl_df, "Operating Income", "EBIT", "Operating Profit", col=i)
+                ni  = _row(pnl_df, "Net Income", "Net Income Common Stockholders", col=i)
 
-                # Same-quarter prior year is 4 quarters back
-                prev_rev = _row(qfin, "Total Revenue", col=i + 4) if i + 4 < len(all_cols) else None
+                prev_rev = _row(pnl_df, "Total Revenue", col=i + 4) if i + 4 < len(all_cols) else None
                 rev_yoy = (
                     round((rev - prev_rev) / abs(prev_rev) * 100, 1)
                     if (rev and prev_rev and prev_rev != 0) else None
@@ -150,12 +174,12 @@ def _fetch_quarterly_results(t: Any) -> list[dict]:
 
                 rev_rows.append(row_dict)
         except Exception as exc:
-            logger.debug("[earnings_report] quarterly_financials parse: %s", exc)
+            logger.debug("[earnings_report] pnl_df parse: %s", exc)
 
     if rev_rows:
         return rev_rows
 
-    # Fallback: EPS-only rows from earnings_history
+    # Final fallback: EPS-only rows from earnings_history
     results = []
     for date_str, eps in sorted(eps_by_date.items(), reverse=True)[:4]:
         try:

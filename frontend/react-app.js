@@ -2393,7 +2393,7 @@
     );
   }
 
-  function EarningsReportPanel({ ticker }) {
+  function EarningsReportPanel({ ticker, autoLoad = false }) {
     const [phase, setPhase] = useState("idle");
     const [report, setReport] = useState(null);
     const [err, setErr] = useState("");
@@ -2405,6 +2405,8 @@
         setReport(data); setPhase("loaded");
       } catch (e) { setErr(e.message); setPhase("error"); }
     }
+
+    React.useEffect(() => { if (autoLoad) load(false); }, []);
 
     if (phase === "idle") return h(Card, { className: "p-4" },
       h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-dim" }, "Earnings Report"),
@@ -3943,6 +3945,8 @@
     const [calLoading, setCalLoading] = React.useState(true);
     const [expanded, setExpanded] = React.useState(null);
     const [calExpanded, setCalExpanded] = React.useState(null);
+    const [deepInput, setDeepInput] = React.useState("");
+    const [deepActiveTicker, setDeepActiveTicker] = React.useState(null);
     const [checking, setChecking] = React.useState(false);
     const [checkMsg, setCheckMsg] = React.useState("");
     const [testing, setTesting] = React.useState(false);
@@ -4034,6 +4038,36 @@
 
       testResult && h("p", { className: cx("font-mono text-xs", testResult.ok ? "text-emerald-400" : "text-red-400") }, testResult.msg),
       checkMsg && h("p", { className: "font-mono text-xs text-pulse-muted" }, checkMsg),
+
+      // Deep earnings report — direct ticker input
+      h("div", { className: "rounded-lg border border-pulse-line bg-pulse-card p-4" },
+        h("div", { className: "font-mono text-[10px] uppercase tracking-[0.24em] text-pulse-cyan mb-2" }, "Deep Earnings Report"),
+        h("p", { className: "text-xs text-pulse-muted mb-3" },
+          "Full post-earnings analyst report for any ticker — quarterly P&L trend, margins, RSI, moving averages, short interest, institutional ownership, analyst actions, and Claude Sonnet synthesis."
+        ),
+        h("div", { className: "flex flex-wrap gap-2 items-center" },
+          h("input", {
+            value: deepInput,
+            onChange: e => setDeepInput(e.target.value.toUpperCase().replace(/[^A-Z0-9.\-]/g, "").slice(0, 10)),
+            onKeyDown: e => { if (e.key === "Enter" && deepInput) { setDeepActiveTicker(deepInput); } },
+            placeholder: "e.g. AAPL",
+            className: "font-mono text-sm bg-pulse-panel border border-pulse-line rounded px-3 py-1.5 text-pulse-ink placeholder-pulse-dim focus:outline-none focus:border-pulse-cyan w-32",
+          }),
+          h("button", {
+            disabled: !deepInput,
+            onClick: () => deepInput && setDeepActiveTicker(deepInput),
+            className: cx(
+              "rounded border px-3 py-1.5 font-mono text-xs transition",
+              deepInput
+                ? "border-pulse-cyan/50 text-pulse-cyan hover:bg-pulse-cyan/10"
+                : "border-pulse-line text-pulse-muted cursor-not-allowed"
+            ),
+          }, "Generate Report")
+        ),
+        deepActiveTicker && h("div", { key: deepActiveTicker, className: "mt-4 border-t border-pulse-line pt-4" },
+          h(EarningsReportPanel, { ticker: deepActiveTicker, autoLoad: true })
+        )
+      ),
 
       // Upcoming earnings calendar
       h("div", null,
