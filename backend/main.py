@@ -3293,10 +3293,15 @@ async def reset_password(req: ResetPasswordRequest, request: Request):
     if datetime.now(timezone.utc) > expiry:
         raise HTTPException(status_code=400, detail="Reset token has expired")
     users = load_users()
-    if username not in users:
-        raise HTTPException(status_code=400, detail="User not found")
-    users[username]["hashed_password"] = _hash_pw(req.new_password)
-    save_users(users)
+    if username in users:
+        users[username]["hashed_password"] = _hash_pw(req.new_password)
+        save_users(users)
+    else:
+        import db as _db
+        app_user = _db.get_user_by_username(username)
+        if not app_user:
+            raise HTTPException(status_code=400, detail="User not found — token may be stale")
+        _db.update_user(app_user["user_id"], password_hash=_hash_pw(req.new_password))
     logger.info("PASSWORD_RESET_OK username=%s", username)
     return {"ok": True}
 
@@ -3480,7 +3485,7 @@ async def list_users_endpoint(
     import db as _db
     if not _is_admin_user(current_user):
         raise HTTPException(status_code=403, detail="Admin only")
-    rows = _db.list_users(limit=min(limit, 500), offset=offset)
+    rows = _db.list_users_with_stats(limit=min(limit, 500), offset=offset)
     safe = [{k: v for k, v in r.items() if k not in ("password_hash", "mfa_secret")} for r in rows]
     return {"users": safe, "count": len(safe)}
 
@@ -3500,6 +3505,60 @@ async def update_user_tier(user_id: str, req: UpdateTierRequest, current_user: s
         raise HTTPException(status_code=404, detail="User not found")
     _db.update_user(user_id, tier=req.tier)
     return {"ok": True, "user_id": user_id, "tier": req.tier}
+
+
+@app.delete("/v1/users/{user_id}")
+async def admin_delete_user(user_id: str, current_user: str = Depends(get_current_user)):
+    import db as _db
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    target = _db.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    deleted = _db.delete_user(user_id)
+    logger.info("ADMIN_DELETE_USER admin=%s deleted_user=%s", current_user, target["username"])
+    return {"ok": deleted}
+
+
+@app.post("/v1/users/{user_id}/revoke-sessions")
+async def admin_revoke_sessions(user_id: str, current_user: str = Depends(get_current_user)):
+    import db as _db
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    target = _db.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    _db.revoke_all_refresh_tokens(user_id)
+    logger.info("ADMIN_REVOKE_SESSIONS admin=%s target_user=%s", current_user, target["username"])
+    return {"ok": True}
+
+
+@app.post("/v1/users/{user_id}/reset-password")
+async def admin_reset_password(user_id: str, current_user: str = Depends(get_current_user)):
+    import db as _db
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    target = _db.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not target.get("email"):
+        raise HTTPException(status_code=400, detail="User has no email address on file")
+    token = secrets.token_urlsafe(32)
+    _reset_tokens[_hash_reset_token(token)] = (
+        target["username"],
+        datetime.now(timezone.utc) + timedelta(minutes=60),
+    )
+    app_url = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
+    reset_link = f"{app_url}/?reset_token={token}"
+    sent = send_email(
+        "StockLens - Password Reset",
+        f"An administrator has requested a password reset for your account.\n\n"
+        f"Click the link below to set a new password (valid 60 minutes):\n\n{reset_link}\n\n"
+        f"If you did not expect this, contact support.",
+        target["email"],
+    )
+    logger.info("ADMIN_PASSWORD_RESET admin=%s target_user=%s email_sent=%s", current_user, target["username"], sent)
+    return {"ok": True, "email_sent": sent}
 
 
 @app.get("/v1/users/me")
