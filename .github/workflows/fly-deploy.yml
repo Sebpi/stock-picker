@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-and-quality:
-    name: Tests + Quality
+  python-checks:
+    name: Python Tests + Quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +34,12 @@ jobs:
       - name: Dependency audit
         run: pip-audit -r backend/requirements.txt
 
+  node-checks:
+    name: Node Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -51,7 +57,7 @@ jobs:
   deploy:
     name: Deploy to Fly
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: test-and-quality
+    needs: [python-checks, node-checks]
     runs-on: ubuntu-latest
     concurrency: deploy-group
     steps:
@@ -76,6 +82,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: playwright-${{ runner.os }}-
       - name: Install Playwright + chromium
         run: |
           npm ci
@@ -102,7 +114,7 @@ jobs:
   owasp-zap:
     name: OWASP ZAP Baseline
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: smoke
+    needs: deploy
     runs-on: ubuntu-latest
     permissions:
       contents: read
