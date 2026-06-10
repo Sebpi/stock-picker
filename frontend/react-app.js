@@ -3416,7 +3416,7 @@
         .then(d => setEvents(d.events || []))
         .catch(() => setEvents([]))
         .finally(() => setLoading(false));
-      api("/v1/earnings/calendar?days_ahead=10")
+      api("/v1/earnings/calendar?days_ahead=30")
         .then(d => setCalendar(d.calendar || []))
         .catch(() => setCalendar([]))
         .finally(() => setCalLoading(false));
@@ -3504,7 +3504,7 @@
         calLoading
           ? h("p", { className: "font-mono text-xs text-pulse-muted" }, "Loading calendar…")
           : calendar.length === 0
-          ? h("p", { className: "font-mono text-xs text-pulse-muted" }, "No upcoming earnings in the next 10 days for your watchlist.")
+          ? h("p", { className: "font-mono text-xs text-pulse-muted" }, "No upcoming earnings in the next 30 days for your watchlist.")
           : h("div", { className: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" },
               calendar.map(item => h("div", {
                 key: item.ticker,
