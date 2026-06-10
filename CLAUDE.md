@@ -11,8 +11,8 @@ StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-pr
 ### Backend — `backend/main.py` (single ~9k-line FastAPI app)
 - Python 3.12, FastAPI + uvicorn, JWT auth via `python-jose`, bcrypt password hashing, slowapi rate limiting, APScheduler for background jobs, Anthropic SDK for LLM calls, `yfinance`/`yahooquery` for market data, Twilio + SMTP for alerts, `reportlab`/`pypdf` for PDFs, `pyotp` for TOTP MFA, `stripe` for billing webhooks.
 - Storage is **dual-format on purpose**:
-  - SQLite at `$DATA_DIR/stockpicker.db` — multi-agent signals, thesis history, decision log, agent accuracy, calibrated weights, multi-user tables (see `backend/db.py`). Also contains an `insider_transactions` table managed by `backend/insider_transactions.py` (CREATE TABLE IF NOT EXISTS, no migration script needed).
-  - JSON files under `$DATA_DIR` for legacy UI compatibility: `users.json`, `watchlist.json`, `predictions.json`, `portfolio.json`, `paper_portfolio.json`, `alerts.json`, `settings.json`, `lockout_state.json`, `sentiment_agent_state.json`.
+  - SQLite at `$DATA_DIR/stockpicker.db` — multi-agent signals, thesis history, decision log, agent accuracy, calibrated weights, all multi-user tables (see `backend/db.py`). Also contains an `insider_transactions` table managed by `backend/insider_transactions.py` (CREATE TABLE IF NOT EXISTS, no migration script needed).
+  - JSON files under `$DATA_DIR` are now **legacy / admin fallbacks only**: `users.json`, `watchlist.json`, `predictions.json`, `portfolio.json`, `paper_portfolio.json`, `alerts.json`, `settings.json`, `lockout_state.json`, `sentiment_agent_state.json`. All user-facing API endpoints read from SQLite via the per-user helpers (see Per-user data isolation below) — the JSON files are only touched when no app_users row is found (i.e., unauthenticated legacy admin path).
   - `db.py` auto-migrates a legacy `backend/stockpicker.db` into `$DATA_DIR` on first boot if the latter doesn't exist. JSON writes use a temp-file + rename atomic pattern (`_atomic_write`).
 - **`SECRET_KEY`** drives JWT signing. If unset, the app generates an ephemeral one and **all sessions invalidate on restart** — set it in `backend/.env` for any non-toy run.
 - Auth surface: bcrypt + JWT (HS256), per-account lockout (5 attempts → 15-min cool-off, persisted to `lockout_state.json`), password reset via email token, default `admin` user auto-created on first run with a **random password printed to stdout once**.
@@ -77,7 +77,8 @@ The learning system measures how well each agent's directional calls translated 
 ### Multi-user system — `backend/db.py` + `backend/main.py`
 Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scoping) → Data (row-level SQLite).
 
-- **SQLite tables:** `app_users`, `email_verification_tokens`, `refresh_tokens`, `user_watchlist`, `user_portfolio`, `user_paper_portfolio`, `user_settings`, `apns_device_tokens`.
+- **SQLite tables:** `app_users`, `email_verification_tokens`, `refresh_tokens`, `user_watchlist`, `user_settings`, `apns_device_tokens`, **`user_data_store`** (generic JSON blob store — holds portfolio, paper_portfolio, predictions, alerts per user).
+- **`user_data_store` schema:** `(user_id TEXT, data_key TEXT, data_json TEXT, updated_at TEXT, PRIMARY KEY(user_id, data_key), FK → app_users CASCADE)`. Keys in use: `"portfolio"`, `"paper_portfolio"`, `"predictions"`, `"alerts"`.
 - **Tier limits:** free = 10 watchlist tickers / 5 thesis per month; pro = 50 / unlimited; premium = 999 / unlimited. `check_and_increment_thesis_count()` enforces per-user monthly quota.
 - **Auth endpoints** (all public — no JWT required):
   - `POST /api/auth/register` — create account, send verification email
@@ -99,6 +100,28 @@ Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scopi
 - **Stripe webhook:** `POST /api/billing/stripe/webhook` — handles `subscription.created/updated/deleted`, updates user tier.
 - **APNs push:** `_send_apns_push()` via HTTP/2 + ES256 JWT; `_broadcast_earnings_push()` used by earnings scheduler. Requires `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY_PATH` env vars.
 - **Tests:** `backend/tests/test_multiuser.py` — 22 tests covering all DB helpers, using per-test in-memory SQLite via `monkeypatch`.
+
+### Per-user data isolation — `backend/main.py` per-user helpers
+Every user-facing API endpoint is fully isolated per authenticated user. No data bleeds between accounts.
+
+- **Core resolver:** `_get_app_user_id(username) → str | None` — looks up `app_users.user_id` for a logged-in username. If no row found (legacy path), helpers fall back to global JSON files.
+- **Per-user helpers in `main.py`:**
+  - `_get_user_watchlist(username)` / `_add_user_watchlist_ticker` / `_remove_user_watchlist_ticker` — use `user_watchlist` SQLite table.
+  - `_load_user_portfolio(username)` / `_save_user_portfolio(username, txns)` — `user_data_store` key `"portfolio"`.
+  - `_load_user_paper_portfolio` / `_save_user_paper_portfolio` — key `"paper_portfolio"`.
+  - `_load_user_predictions` / `_save_user_predictions` — key `"predictions"`.
+  - `_load_user_alerts` / `_save_user_alerts` — key `"alerts"`.
+  - `_load_user_settings` / `_save_user_settings` — `user_settings` table (merges global defaults).
+- **Isolated endpoints** (all require JWT, all scoped to `current_user`):
+  - Watchlist: `GET/POST/DELETE /api/watchlist[/{ticker}]`
+  - Portfolio: `GET /api/portfolio`, `POST /api/portfolio/buy|sell`, `GET /api/portfolio/transactions`, `DELETE /api/portfolio/transaction/{id}`, `POST /api/portfolio/import|import-pdf`, `DELETE /api/portfolio/reset`
+  - Paper portfolio: `GET /api/paper-portfolio`, `POST /api/paper-portfolio/buy|sell`, `DELETE /api/paper-portfolio/reset`
+  - Predictions: `GET /api/predictions`, `POST /api/predictions/generate`, `DELETE /api/predictions`
+  - Alerts: `GET /api/alerts`, `DELETE /api/alerts`, `GET /api/alerts/status`
+  - Settings: `GET /api/settings`, `POST /api/settings`
+- **Predictions cache** (`_predictions_cache`) is a `dict[str, dict]` keyed by username — each user has an independent in-memory cache entry.
+- **`_generate_predictions_impl(username)`** accepts a username and uses per-user load/save/watchlist throughout — each user generates predictions for their own watchlist and those predictions are stored in their own `user_data_store` row.
+- **Admin seeding on startup:** `ensure_admin_app_user()` (in `db.py`) creates an `app_users` row for the legacy `admin` if one doesn't exist yet. `_init_multiagent_db()` then seeds the admin's `user_data_store` and `user_watchlist` from the global JSON files exactly once (idempotent — skips if data already exists). This means existing admin data is preserved on upgrade.
 
 ### Frontend — `frontend/`
 - `index.html` + `react-app.js` (~4400 lines) is the entire active app. The SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
@@ -157,10 +180,12 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 - **State files vs symlinks.** In production, `backend/users.json` etc. are symlinks into `/app/data`. Editing them locally via the symlink path will silently write into your local `data/` directory once `DATA_DIR` is set — be deliberate about which copy you're touching when reproducing prod bugs.
 - **Version bumps:** update `package.json` only — the version is injected at runtime into the page title and asset URLs via `__APP_VERSION__`. Run the version metadata tests (`python -m pytest tests/test_version_metadata.py`) to verify.
 - **Two LLM models, two cost profiles.** Generating predictions for a large watchlist on the Sonnet thesis model is significantly more expensive than the Haiku default — keep them separate.
-- **Two recommendation engines with different sources of truth.** `_build_recommendations` (Signals tab) reads `paper_portfolio.json` and prediction scores; `_build_recommendation_alert_snapshot` (Alerts) reads `portfolio.json` + the watchlist and uses the multi-agent thesis. Phase 1 unifies the "already held" check across both by including paper holdings in the alert snapshot's skip list; Phase 2 wires the market-regime gate into both. Alert snapshot requires ≥5 positive agents. Keep these two engines in sync if you add new BUY filters to one.
+- **Two recommendation engines with different sources of truth.** `_build_recommendations` (Signals tab) reads the user's paper portfolio and prediction scores; `_build_recommendation_alert_snapshot` (Alerts) reads the user's portfolio + watchlist and uses the multi-agent thesis. Both now use the per-user helpers (`_load_user_portfolio`, `_load_user_paper_portfolio`, `_get_user_watchlist`) so each user sees only their own data. Phase 1 unifies the "already held" check across both by including paper holdings in the alert snapshot's skip list; Phase 2 wires the market-regime gate into both. Alert snapshot requires ≥5 positive agents. Keep these two engines in sync if you add new BUY filters to one.
 - **Learning system weight mutations are live.** `HORIZON_WEIGHTS` is mutated in-place by `apply_weight_adjustments()`. Changes take effect on the next thesis run without restart. If you're debugging unexpected scores, check `GET /v1/learning/weights` to see if weights have drifted from factory defaults. Use `POST /v1/learning/weights/reset` to restore defaults.
 - **1m forecast rows are direction proxies only.** The 1m `forecast_outcome` row created by `store_thesis()` uses the 3m `base_return_pct` as the direction proxy (not a real 1m forecast). It exists solely to feed accuracy data back to the learning system 30 days sooner. Don't treat `forecast_return_pct` on 1m rows as a genuine 1-month price target.
 - **Multi-user auth is additive, not a replacement.** The existing `users.json` admin login still works and is the only way to access admin role features (including the users list). New `app_users` registrations are separate — they don't get an entry in `users.json` and cannot access admin endpoints unless their `role` column is manually set to `"admin"` in the DB.
 - **Refresh token rotation is single-use.** Each `POST /api/auth/refresh` invalidates the old token and issues a new one. If two tabs race, one will get a 401 — that's by design (token theft detection). The frontend doesn't yet handle silent refresh, so 15-minute access tokens will cause visible logouts without a refresh implementation.
 - **MFA secrets are stored in plaintext** in `app_users.mfa_secret`. If the DB is compromised, TOTP seeds are exposed. For higher security: encrypt at rest using `SECRET_KEY` as the key before storing.
+- **Per-user data isolation: always use the `_load/save_user_*` helpers, never `load/save_portfolio()` etc. directly in user-facing endpoints.** The global `load_portfolio()` / `save_portfolio()` / `load_predictions()` / `save_predictions()` / `load_alerts()` / `save_alerts()` functions still exist and are used by background jobs, the backtest harness, and the admin fallback path — but any endpoint that has `current_user: str = Depends(get_current_user)` must go through the per-user helpers. Adding a new user-facing endpoint and calling `load_portfolio()` directly is a data-isolation bug.
+- **`user_data_store` is append-safe but not transactional across keys.** `save_user_data` is an upsert on a single `(user_id, data_key)` row. If you need to atomically update two keys (e.g. portfolio + alerts together), do it in a single SQLite transaction via `get_conn()`. Currently each helper is independent.
 - **Backtest harness lives in `backend/backtest_phase4.py`, NOT main.py.** Reachable via `/api/recommendations/backtest?lookback_days=90&sensitivity=true&refit_curve=true`. The harness reads `predictions.json` + yfinance prices and replays the Phase 1-3 BUY/SELL rules — it does **not** call the multi-agent orchestrator (too expensive over hundreds of dates). When you change a rule in `_build_recommendations`, mirror it in `backtest_phase4._simulate_exit` / the sizing block, or backtest results will silently drift from reality. The sensitivity sweep uses `_prefetch_market_data` to fetch SPY/VIX/tickers once and pass a `_market_cache` to each config — don't bypass this or the sweep will hit yfinance rate limits at 36× concurrency.
