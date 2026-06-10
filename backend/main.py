@@ -8883,6 +8883,33 @@ def v1_earnings_test_notification(
     return result
 
 
+@app.get("/api/earnings/{ticker}/report")
+@limiter.limit("10/hour")
+async def get_earnings_report(
+    request: Request,
+    ticker: str,
+    force: bool = False,
+    current_user: str = Depends(get_current_user),
+):
+    """Deep post-earnings analyst report for a ticker.
+
+    Fetches 4 quarters of financials, price-action technicals, and market
+    sentiment from yfinance, then synthesises an institutional-style narrative
+    using Claude Sonnet. Results are cached in-memory for 4 hours.
+
+    Pass ?force=true to bypass the cache and regenerate.
+    """
+    import earnings_report as _er
+    symbol = _validate_ticker(ticker)
+    loop = asyncio.get_event_loop()
+    try:
+        report = await loop.run_in_executor(None, lambda: _er.generate_report(symbol, force=force))
+        return report
+    except Exception as exc:
+        logger.exception("[earnings_report] %s failed: %s", symbol, exc)
+        raise HTTPException(status_code=500, detail="Earnings report generation failed")
+
+
 async def _init_multiagent_db():
     """Initialise the SQLite database for the multi-agent system."""
     try:
