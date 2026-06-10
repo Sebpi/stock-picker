@@ -710,6 +710,27 @@ def save_settings(s: dict):
     _atomic_write(SETTINGS_FILE, json.dumps(s, indent=2))
 
 
+def _get_db_user(username: str) -> Optional[dict]:
+    """Returns the app_users record for this username, or None for the legacy admin."""
+    import db as _db
+    return _db.get_user_by_username(username)
+
+
+def _load_user_settings_merged(user_id: str) -> dict:
+    """Merge global defaults with per-user overrides stored in user_settings table."""
+    import db as _db
+    merged = load_settings()
+    overrides = _db.get_user_settings(user_id)
+    for k, v in overrides.items():
+        if v is None:
+            continue
+        try:
+            merged[k] = float(v) if "." in str(v) else int(v)
+        except (ValueError, TypeError):
+            merged[k] = v
+    return merged
+
+
 # Phase 2: market-regime gate. Block BUYs when SPY is below its long-term DMA
 # (trend-following filter) OR VIX is elevated (stress filter). Cached for an
 # hour because regime doesn't change minute-by-minute and the yfinance call is
@@ -2127,6 +2148,110 @@ async def _get_portfolio_price_map(held: list[str], positions: dict[str, dict]) 
     return price_map
 
 
+# Per-user alert cooldown state (in-memory, keyed by user_id)
+_user_alert_cooldowns: dict[str, dict[str, datetime]] = {}
+_user_alert_price_cache: dict[str, dict[str, float]] = {}
+
+
+def _build_user_signals(
+    thesis_map: dict,
+    buy_tickers: list,
+    owned_positions: dict,
+    paper_held: set,
+    allow_buys: bool,
+    strong_buy_min_score: int,
+    sell_max_score: int,
+    initial_float: float,
+    min_positive_agents: int,
+    buy_limit: int = 3,
+    sell_limit: int = 3,
+) -> dict:
+    """Build BUY/SELL signals from a pre-computed thesis_map for a specific user context."""
+    sell_tickers = list(owned_positions.keys())
+    strong_buys: list[dict] = []
+    strong_sells: list[dict] = []
+
+    for ticker in buy_tickers:
+        if not allow_buys:
+            break
+        if ticker in owned_positions or ticker in paper_held:
+            continue
+        thesis = thesis_map.get(ticker)
+        if not thesis:
+            continue
+        positive_agents = sum(
+            1 for meta in (thesis.agent_meta or {}).values()
+            if meta.get("direction") == "positive" and meta.get("usable", True)
+        )
+        if positive_agents < min_positive_agents:
+            continue
+        composite     = float(thesis.composite_score)
+        forecast_12m  = thesis.forecast.get("12m")
+        forecast_6m   = thesis.forecast.get("6m")
+        projected_12m = float(forecast_12m.base_return_pct) if forecast_12m else 0.0
+        projected_6m  = float(forecast_6m.base_return_pct)  if forecast_6m  else 0.0
+        confidence_f  = float(forecast_12m.confidence)       if forecast_12m else 0.5
+        confidence_s  = "high" if confidence_f >= 0.7 else "medium" if confidence_f >= 0.45 else "low"
+        if confidence_s == "low":
+            continue
+        if composite < strong_buy_min_score:
+            continue
+        if projected_12m < 12 and projected_6m < 7:
+            continue
+        alloc_pct = 0.05 + (composite - strong_buy_min_score) / (100 - strong_buy_min_score) * 0.10
+        est_cost  = round(initial_float * min(alloc_pct, 0.15), 2)
+        strong_buys.append({
+            "ticker": ticker,
+            "name": thesis.company_name or ticker,
+            "price": thesis.current_price or 0.0,
+            "action": "BUY",
+            "type": "buy_opportunity",
+            "trigger": "AGENT CONSENSUS",
+            "signal": f"Score {composite:.0f}/100 — {projected_12m:+.1f}% 12m base",
+            "score_value": int(composite),
+            "confidence": confidence_s,
+            "projected_12m_pct": round(projected_12m, 1),
+            "projected_24m_pct": round(projected_12m * 1.8, 1),
+            "est_cost": est_cost,
+            "reasoning": (thesis.narrative or "")[:400] if thesis.narrative else "",
+            "agent_scores": {k: v.get("score") for k, v in (thesis.agent_meta or {}).items()},
+        })
+
+    for ticker in sell_tickers:
+        thesis = thesis_map.get(ticker)
+        pos    = owned_positions.get(ticker, {})
+        if not thesis:
+            continue
+        composite     = float(thesis.composite_score)
+        if composite > sell_max_score:
+            continue
+        forecast_12m  = thesis.forecast.get("12m")
+        projected_12m = float(forecast_12m.base_return_pct) if forecast_12m else 0.0
+        avg_cost      = pos.get("avg_cost", 0)
+        current_price = thesis.current_price or avg_cost
+        unrealised_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost else 0
+        strong_sells.append({
+            "ticker": ticker,
+            "name": thesis.company_name or ticker,
+            "price": current_price,
+            "action": "SELL",
+            "type": "sell_signal",
+            "trigger": "AGENT SELL",
+            "signal": f"Score {composite:.0f}/100 — weak thesis",
+            "score_value": int(composite),
+            "confidence": "medium",
+            "projected_12m_pct": round(projected_12m, 1),
+            "projected_24m_pct": round(projected_12m * 1.8, 1),
+            "unrealised_pct": round(unrealised_pct, 1),
+            "reasoning": (thesis.narrative or "")[:400] if thesis.narrative else "",
+            "agent_scores": {k: v.get("score") for k, v in (thesis.agent_meta or {}).items()},
+        })
+
+    strong_buys.sort(key=lambda x: x["score_value"], reverse=True)
+    strong_sells.sort(key=lambda x: x["score_value"])
+    return {"buys": strong_buys[:buy_limit], "sells": strong_sells[:sell_limit], "scored_by": "multi-agent"}
+
+
 async def _build_recommendation_alert_snapshot(buy_limit: int = 3, sell_limit: int = 3) -> dict:
     """
     Build buy/sell alert candidates using the full 21-agent thesis pipeline.
@@ -2459,59 +2584,118 @@ async def monitor_stocks():
     now = datetime.now(timezone.utc)
     monitor_status["last_check"] = now.isoformat()
     monitor_status["checks_run"] += 1
-    _s = load_settings()
-    cooldown_hours = float(_s.get("alert_cooldown_hours") or int(os.getenv("ALERT_RECOMMENDATION_COOLDOWN_MINUTES", "720")) // 60)
-    cooldown_minutes = int(cooldown_hours * 60)
-    snapshot_ttl_minutes = int(os.getenv("ALERT_RECOMMENDATION_SNAPSHOT_MINUTES", "30"))
-    buy_limit = max(1, int(_s.get("alert_top_buys") or os.getenv("ALERT_TOP_BUYS", "3")))
-    sell_limit = max(1, int(_s.get("alert_top_sells") or os.getenv("ALERT_TOP_SELLS", "3")))
+    time_str = now.astimezone(ET).strftime("%d %b %Y, %H:%M ET")
 
-    generated_at = recommendation_alert_snapshot.get("generated_at")
-    cached_data = recommendation_alert_snapshot.get("data")
-    if (
-        isinstance(generated_at, datetime)
-        and cached_data
-        and (now - generated_at).total_seconds() < snapshot_ttl_minutes * 60
-    ):
-        snapshot = cached_data
-    else:
-        snapshot = await _build_recommendation_alert_snapshot(buy_limit=buy_limit, sell_limit=sell_limit)
-        recommendation_alert_snapshot["generated_at"] = now
-        recommendation_alert_snapshot["data"] = snapshot
+    import db as _db
+    active_users = _db.get_all_active_users_with_email()
 
-    price_swing_pct = float(_s.get("alert_price_swing_pct") or os.getenv("ALERT_PRICE_SWING_PCT", "3.0"))
+    # Collect unique tickers from all users (thesis runs are cached per-ticker)
+    all_unique: set[str] = set()
+    for u in active_users:
+        for t in _db.get_user_watchlist(u["user_id"]):
+            all_unique.add(t)
+        for pos in compute_positions(_db.get_user_transactions(u["user_id"], "real")).values():
+            if pos.get("shares", 0) > 0 and pos.get("name"):
+                pass  # ticker is the key, tracked above
+        for t, pos in compute_positions(_db.get_user_transactions(u["user_id"], "real")).items():
+            if pos.get("shares", 0) > 0:
+                all_unique.add(t)
 
-    pending_alerts = []
-    for item in snapshot.get("buys", []) + snapshot.get("sells", []):
-        alert_key = f"{item.get('action', 'ALERT')}:{item['ticker']}:{item.get('trigger', '')}"
-        last_alerted = alert_cooldown.get(alert_key)
-        if last_alerted and (now - last_alerted).total_seconds() < cooldown_minutes * 60:
+    # Also include legacy admin watchlist tickers
+    global_watchlist = load_watchlist()
+    legacy_owned_map = {t: pos for t, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0}
+    legacy_paper_held = {t for t, p in compute_positions(load_paper_portfolio()).items() if p.get("shares", 0) > 0}
+    all_unique |= set(global_watchlist) | set(legacy_owned_map.keys())
+    all_unique_tickers = [t for t in all_unique if t]
+
+    if not all_unique_tickers:
+        monitor_status["active"] = True
+        monitor_scheduler_status["active"] = False
+        return
+
+    # Run agent theses once for all unique tickers (cached — won't re-call Claude if fresh)
+    from agents.orchestrator import OrchestratorAgent
+    orchestrator = OrchestratorAgent()
+    semaphore    = asyncio.Semaphore(3)
+
+    async def _run_thesis(ticker: str):
+        async with semaphore:
+            try:
+                thesis = await asyncio.to_thread(orchestrator.run_thesis, ticker, False)
+                return ticker, thesis
+            except Exception as exc:
+                logger.warning("[AlertSnapshot] %s thesis failed: %s", ticker, exc)
+                return ticker, None
+
+    results = await asyncio.gather(*[_run_thesis(t) for t in all_unique_tickers])
+    thesis_map = {ticker: thesis for ticker, thesis in results if thesis is not None}
+
+    regime     = await get_market_regime()
+    allow_buys = regime.get("ok", True)
+
+    # ── Per-user alert delivery ───────────────────────────────────────────────
+    for u in active_users:
+        uid = u["user_id"]
+        _s = _load_user_settings_merged(uid)
+        cooldown_minutes = int(float(_s.get("alert_cooldown_hours") or int(os.getenv("ALERT_RECOMMENDATION_COOLDOWN_MINUTES", "720")) // 60) * 60)
+        price_swing_pct  = float(_s.get("alert_price_swing_pct") or os.getenv("ALERT_PRICE_SWING_PCT", "3.0"))
+        strong_buy_min   = max(55, int(_s.get("alert_buy_min_score") or os.getenv("ALERT_BUY_MIN_SCORE", "72")))
+        sell_max_score   = min(50, int(_s.get("alert_sell_max_score") or os.getenv("ALERT_SELL_MAX_SCORE", "42")))
+        initial_float    = float(_s.get("initial_float") or 100_000.0)
+        min_pos_agents   = int(_s.get("alert_min_positive_agents", 5))
+        buy_limit        = max(1, int(_s.get("alert_top_buys") or os.getenv("ALERT_TOP_BUYS", "3")))
+        sell_limit       = max(1, int(_s.get("alert_top_sells") or os.getenv("ALERT_TOP_SELLS", "3")))
+
+        user_watchlist   = _db.get_user_watchlist(uid)
+        user_owned       = {t: pos for t, pos in compute_positions(_db.get_user_transactions(uid, "real")).items() if pos.get("shares", 0) > 0}
+        user_paper_held  = {t for t, p in compute_positions(_db.get_user_transactions(uid, "paper")).items() if p.get("shares", 0) > 0}
+
+        if not user_watchlist and not user_owned:
             continue
 
-        # Skip if price hasn't moved enough since the last alert for this ticker+action
-        ticker_action_key = f"{item.get('action', 'ALERT')}:{item['ticker']}"
-        current_price = item.get("price", 0.0)
-        last_price = alert_price_cache.get(ticker_action_key)
-        if last_price and current_price > 0:
-            swing_pct = abs(current_price - last_price) / last_price * 100
-            if swing_pct < price_swing_pct:
-                logger.debug(
-                    "ALERT_SKIPPED ticker=%s action=%s current_price=%.4f last_price=%.4f swing_pct=%.2f threshold=%.1f",
-                    item["ticker"], item.get("action"), current_price, last_price, swing_pct, price_swing_pct,
-                )
-                continue  # Don't update cooldown — re-evaluate next cycle
+        snapshot = _build_user_signals(
+            thesis_map=thesis_map,
+            buy_tickers=user_watchlist,
+            owned_positions=user_owned,
+            paper_held=user_paper_held,
+            allow_buys=allow_buys,
+            strong_buy_min_score=strong_buy_min,
+            sell_max_score=sell_max_score,
+            initial_float=initial_float,
+            min_positive_agents=min_pos_agents,
+            buy_limit=buy_limit,
+            sell_limit=sell_limit,
+        )
 
-        alert_cooldown[alert_key] = now
-        alert_price_cache[ticker_action_key] = current_price if current_price > 0 else (last_price or 0.0)
-        pending_alerts.append(item)
+        user_cooldown    = _user_alert_cooldowns.setdefault(uid, {})
+        user_price_cache = _user_alert_price_cache.setdefault(uid, {})
+        pending_alerts: list[dict] = []
 
-    if pending_alerts:
-        time_str = now.astimezone(ET).strftime("%d %b %Y, %H:%M ET")
+        for item in snapshot.get("buys", []) + snapshot.get("sells", []):
+            alert_key = f"{item.get('action', 'ALERT')}:{item['ticker']}:{item.get('trigger', '')}"
+            last_alerted = user_cooldown.get(alert_key)
+            if last_alerted and (now - last_alerted).total_seconds() < cooldown_minutes * 60:
+                continue
+            ticker_action_key = f"{item.get('action', 'ALERT')}:{item['ticker']}"
+            current_price = item.get("price", 0.0)
+            last_price = user_price_cache.get(ticker_action_key)
+            if last_price and current_price > 0:
+                swing_pct = abs(current_price - last_price) / last_price * 100
+                if swing_pct < price_swing_pct:
+                    continue
+            user_cooldown[alert_key] = now
+            user_price_cache[ticker_action_key] = current_price if current_price > 0 else (last_price or 0.0)
+            pending_alerts.append(item)
+
+        if not pending_alerts:
+            continue
+
         buy_alerts  = [a for a in pending_alerts if a.get("action") == "BUY"]
         sell_alerts = [a for a in pending_alerts if a.get("action") == "SELL"]
         subject, body, sms_body = _build_alert_email(buy_alerts, sell_alerts, time_str)
-        emailed = send_email(subject, body)
-        texted  = send_sms(sms_body[:1600])
+        to_email = u.get("email") or os.getenv("ALERT_EMAIL", "")
+        emailed  = send_email(subject, body, to_email=to_email) if to_email else False
+        texted   = send_sms(sms_body[:1600])
 
         for alert in pending_alerts:
             record = {
@@ -2521,11 +2705,7 @@ async def monitor_stocks():
                 "name": alert["name"],
                 "price": alert["price"],
                 "action": alert.get("action"),
-                "signals": [{
-                    "type": alert.get("type"),
-                    "signal": alert.get("signal"),
-                    "change_pct": alert.get("projected_12m_pct"),
-                }],
+                "signals": [{"type": alert.get("type"), "signal": alert.get("signal"), "change_pct": alert.get("projected_12m_pct")}],
                 "score_value": alert.get("score_value"),
                 "confidence": alert.get("confidence"),
                 "projected_12m_pct": alert.get("projected_12m_pct"),
@@ -2534,7 +2714,78 @@ async def monitor_stocks():
                 "notified_email": emailed,
                 "notified_sms": texted,
             }
-            append_alert(record)
+            _db.append_user_alert(uid, record)
+
+    # ── Legacy admin path (global watchlist / ALERT_EMAIL) ────────────────────
+    _s = load_settings()
+    cooldown_minutes = int(float(_s.get("alert_cooldown_hours") or int(os.getenv("ALERT_RECOMMENDATION_COOLDOWN_MINUTES", "720")) // 60) * 60)
+    price_swing_pct  = float(_s.get("alert_price_swing_pct") or os.getenv("ALERT_PRICE_SWING_PCT", "3.0"))
+    strong_buy_min   = max(55, int(_s.get("alert_buy_min_score") or os.getenv("ALERT_BUY_MIN_SCORE", "72")))
+    sell_max_score   = min(50, int(_s.get("alert_sell_max_score") or os.getenv("ALERT_SELL_MAX_SCORE", "42")))
+    initial_float    = float(_s.get("initial_float") or 100_000.0)
+    buy_limit        = max(1, int(_s.get("alert_top_buys") or os.getenv("ALERT_TOP_BUYS", "3")))
+    sell_limit       = max(1, int(_s.get("alert_top_sells") or os.getenv("ALERT_TOP_SELLS", "3")))
+    min_pos_agents   = int(_s.get("alert_min_positive_agents", 5))
+
+    if global_watchlist or legacy_owned_map:
+        snapshot = _build_user_signals(
+            thesis_map=thesis_map,
+            buy_tickers=global_watchlist,
+            owned_positions=legacy_owned_map,
+            paper_held=legacy_paper_held,
+            allow_buys=allow_buys,
+            strong_buy_min_score=strong_buy_min,
+            sell_max_score=sell_max_score,
+            initial_float=initial_float,
+            min_positive_agents=min_pos_agents,
+            buy_limit=buy_limit,
+            sell_limit=sell_limit,
+        )
+        # Update the cached snapshot for /api/recommendations/status
+        recommendation_alert_snapshot["generated_at"] = now
+        recommendation_alert_snapshot["data"] = snapshot
+
+        pending_alerts = []
+        for item in snapshot.get("buys", []) + snapshot.get("sells", []):
+            alert_key = f"{item.get('action', 'ALERT')}:{item['ticker']}:{item.get('trigger', '')}"
+            last_alerted = alert_cooldown.get(alert_key)
+            if last_alerted and (now - last_alerted).total_seconds() < cooldown_minutes * 60:
+                continue
+            ticker_action_key = f"{item.get('action', 'ALERT')}:{item['ticker']}"
+            current_price = item.get("price", 0.0)
+            last_price = alert_price_cache.get(ticker_action_key)
+            if last_price and current_price > 0:
+                swing_pct = abs(current_price - last_price) / last_price * 100
+                if swing_pct < price_swing_pct:
+                    continue
+            alert_cooldown[alert_key] = now
+            alert_price_cache[ticker_action_key] = current_price if current_price > 0 else (last_price or 0.0)
+            pending_alerts.append(item)
+
+        if pending_alerts:
+            buy_alerts  = [a for a in pending_alerts if a.get("action") == "BUY"]
+            sell_alerts = [a for a in pending_alerts if a.get("action") == "SELL"]
+            subject, body, sms_body = _build_alert_email(buy_alerts, sell_alerts, time_str)
+            emailed = send_email(subject, body)
+            texted  = send_sms(sms_body[:1600])
+            for alert in pending_alerts:
+                record = {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now.isoformat(),
+                    "ticker": alert["ticker"],
+                    "name": alert["name"],
+                    "price": alert["price"],
+                    "action": alert.get("action"),
+                    "signals": [{"type": alert.get("type"), "signal": alert.get("signal"), "change_pct": alert.get("projected_12m_pct")}],
+                    "score_value": alert.get("score_value"),
+                    "confidence": alert.get("confidence"),
+                    "projected_12m_pct": alert.get("projected_12m_pct"),
+                    "projected_24m_pct": alert.get("projected_24m_pct"),
+                    "reasoning": alert.get("reasoning"),
+                    "notified_email": emailed,
+                    "notified_sms": texted,
+                }
+                append_alert(record)
 
     monitor_status["active"] = True
     monitor_scheduler_status["active"] = False
@@ -3767,8 +4018,13 @@ async def get_peer_valuation(ticker: str):
 
 
 @app.get("/api/watchlist")
-async def get_watchlist(names_only: bool = False):
-    tickers = load_watchlist()
+async def get_watchlist(names_only: bool = False, current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        tickers = _db.get_user_watchlist(db_user["user_id"])
+    else:
+        tickers = load_watchlist()
     if names_only:
         return tickers
     infos = await asyncio.gather(*[get_info(t) for t in tickers], return_exceptions=True)
@@ -3807,24 +4063,38 @@ async def _run_predictions_bg():
 
 
 @app.post("/api/watchlist/{ticker}")
-async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks):
+async def add_to_watchlist(ticker: str, background_tasks: BackgroundTasks, current_user: str = Depends(get_current_user)):
+    import db as _db
     ticker = _validate_ticker(ticker)
-    tickers = load_watchlist()
-    if ticker not in tickers:
-        tickers.append(ticker)
-        save_watchlist(tickers)
-        background_tasks.add_task(_run_predictions_bg)
-        import finnhub_prices as _fp
-        _fp.subscribe([ticker])
+    db_user = _get_db_user(current_user)
+    if db_user:
+        ok, reason = _db.add_to_user_watchlist(db_user["user_id"], ticker)
+        if not ok:
+            raise HTTPException(status_code=400, detail=reason)
+        tickers = _db.get_user_watchlist(db_user["user_id"])
+    else:
+        tickers = load_watchlist()
+        if ticker not in tickers:
+            tickers.append(ticker)
+            save_watchlist(tickers)
+    background_tasks.add_task(_run_predictions_bg)
+    import finnhub_prices as _fp
+    _fp.subscribe([ticker])
     return {"watchlist": tickers}
 
 
 @app.delete("/api/watchlist/{ticker}")
-def remove_from_watchlist(ticker: str):
+def remove_from_watchlist(ticker: str, current_user: str = Depends(get_current_user)):
+    import db as _db
     ticker = _validate_ticker(ticker)
-    tickers = load_watchlist()
-    tickers = [t for t in tickers if t != ticker]
-    save_watchlist(tickers)
+    db_user = _get_db_user(current_user)
+    if db_user:
+        _db.remove_from_user_watchlist(db_user["user_id"], ticker)
+        tickers = _db.get_user_watchlist(db_user["user_id"])
+    else:
+        tickers = load_watchlist()
+        tickers = [t for t in tickers if t != ticker]
+        save_watchlist(tickers)
     import finnhub_prices as _fp
     _fp.unsubscribe(ticker)
     return {"watchlist": tickers}
@@ -4980,7 +5250,7 @@ async def evaluate_prediction_outcomes(limit: int = 100) -> int:
 
 
 @app.get("/api/predictions")
-async def get_predictions():
+async def get_predictions(current_user: str = Depends(get_current_user)):
     today = str(date.today())
     mtime_ns = PREDICTIONS_FILE.stat().st_mtime_ns if PREDICTIONS_FILE.exists() else None
     if (
@@ -5036,7 +5306,12 @@ async def get_predictions():
             save_predictions(predictions)
         except Exception as e:
             logger.warning("Could not persist updated predictions during GET /api/predictions: %s", e)
-    watchlist_set = set(load_watchlist())
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        watchlist_set = set(_db.get_user_watchlist(db_user["user_id"]))
+    else:
+        watchlist_set = set(load_watchlist())
     calibration = compute_calibration(predictions)
 
     def _prediction_sort_key(p: dict):
@@ -6541,14 +6816,24 @@ def clear_predictions(current_user: str = Depends(get_current_user)):
 # ── Alerts endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/api/alerts")
-def get_alerts():
+def get_alerts(current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        return _db.get_user_alerts(db_user["user_id"])
     return load_alerts()
 
 
 @app.get("/api/alerts/status")
-def get_monitor_status():
-    watchlist = load_watchlist()
-    owned = [ticker for ticker, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0]
+def get_monitor_status(current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        watchlist = _db.get_user_watchlist(db_user["user_id"])
+        owned = [t for t, pos in compute_positions(_db.get_user_transactions(db_user["user_id"], "real")).items() if pos.get("shares", 0) > 0]
+    else:
+        watchlist = load_watchlist()
+        owned = [ticker for ticker, pos in compute_positions(load_portfolio()).items() if pos.get("shares", 0) > 0]
     email_configured = bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and os.getenv("ALERT_EMAIL"))
     sms_configured   = bool(os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN"))
     return {
@@ -6581,9 +6866,16 @@ def test_alert():
 
 
 @app.post("/api/alerts/test-preview")
-def test_alert_preview():
+def test_alert_preview(current_user: str = Depends(get_current_user)):
     """Send a formatted recommendation alert email using current alert history as sample data."""
-    alerts = load_alerts()
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        alerts = _db.get_user_alerts(db_user["user_id"])
+        to_email = db_user.get("email") or os.getenv("ALERT_EMAIL", "")
+    else:
+        alerts = load_alerts()
+        to_email = os.getenv("ALERT_EMAIL", "")
     if not alerts:
         return {"email_sent": False, "sms_sent": False, "error": "No alert data to preview"}
 
@@ -6592,7 +6884,7 @@ def test_alert_preview():
     buy_alerts  = [a for a in alerts if a.get("action") == "BUY"]
     sell_alerts = [a for a in alerts if a.get("action") == "SELL"]
     subject, body, sms_body = _build_alert_email(buy_alerts, sell_alerts, time_str, preview=True)
-    emailed = send_email(subject, body)
+    emailed = send_email(subject, body, to_email=to_email)
     texted  = send_sms(sms_body[:1600])
     return {"email_sent": emailed, "sms_sent": texted}
 
@@ -7477,12 +7769,24 @@ async def get_recommendations_progress(job_id: str):
 
 
 @app.get("/api/settings")
-def get_settings():
+def get_settings(current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        return _load_user_settings_merged(db_user["user_id"])
     return load_settings()
 
 
 @app.post("/api/settings")
 def update_settings(s: dict, current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        for k, v in s.items():
+            if v is not None:
+                _db.set_user_setting(db_user["user_id"], k, str(v))
+        logger.info("SETTINGS_UPDATED user=%s", current_user)
+        return _load_user_settings_merged(db_user["user_id"])
     save_settings(s)
     logger.info("SETTINGS_UPDATED user=%s", current_user)
     return load_settings()
@@ -7557,8 +7861,13 @@ def get_risk_dashboard():
 # ── Portfolio endpoints ───────────────────────────────────────────────────────
 
 @app.get("/api/portfolio")
-async def get_portfolio():
-    transactions = load_portfolio()
+async def get_portfolio(current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        transactions = _db.get_user_transactions(db_user["user_id"], "real")
+    else:
+        transactions = load_portfolio()
     positions = compute_positions(transactions)
 
     held = [t for t, p in positions.items() if p["shares"] > 0]
@@ -7634,15 +7943,15 @@ async def get_portfolio():
 
 
 @app.post("/api/portfolio/buy")
-async def portfolio_buy(req: TradeRequest):
-    transactions = load_portfolio()
+async def portfolio_buy(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
     ticker = req.ticker.upper()
     try:
         info = await get_info_with_timeout(ticker, 2.5)
     except Exception:
         info = {}
     name = info.get("shortName", ticker) if isinstance(info, dict) else ticker
-    transactions.append({
+    tx = {
         "id": str(uuid.uuid4()),
         "type": "buy",
         "ticker": ticker,
@@ -7651,15 +7960,26 @@ async def portfolio_buy(req: TradeRequest):
         "price": req.price,
         "date": req.date or str(date.today()),
         "timestamp": datetime.utcnow().isoformat(),
-    })
-    save_portfolio(transactions)
+    }
+    db_user = _get_db_user(current_user)
+    if db_user:
+        _db.add_user_transaction(db_user["user_id"], "real", tx)
+    else:
+        transactions = load_portfolio()
+        transactions.append(tx)
+        save_portfolio(transactions)
     return {"ok": True}
 
 
 @app.post("/api/portfolio/sell")
-async def portfolio_sell(req: TradeRequest):
-    transactions = load_portfolio()
+async def portfolio_sell(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
     ticker = req.ticker.upper()
+    db_user = _get_db_user(current_user)
+    if db_user:
+        transactions = _db.get_user_transactions(db_user["user_id"], "real")
+    else:
+        transactions = load_portfolio()
     positions = compute_positions(transactions)
     held = positions.get(ticker, {}).get("shares", 0)
     if req.qty > held:
@@ -7669,7 +7989,7 @@ async def portfolio_sell(req: TradeRequest):
     except Exception:
         info = {}
     name = info.get("shortName", ticker) if isinstance(info, dict) else ticker
-    transactions.append({
+    tx = {
         "id": str(uuid.uuid4()),
         "type": "sell",
         "ticker": ticker,
@@ -7678,21 +7998,34 @@ async def portfolio_sell(req: TradeRequest):
         "price": req.price,
         "date": req.date or str(date.today()),
         "timestamp": datetime.utcnow().isoformat(),
-    })
-    save_portfolio(transactions)
+    }
+    if db_user:
+        _db.add_user_transaction(db_user["user_id"], "real", tx)
+    else:
+        transactions.append(tx)
+        save_portfolio(transactions)
     return {"ok": True}
 
 
 @app.get("/api/portfolio/transactions")
-def get_transactions():
+def get_transactions(current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        return _db.get_user_transactions(db_user["user_id"], "real")
     return load_portfolio()
 
 
 @app.delete("/api/portfolio/transaction/{tx_id}")
 def delete_transaction(tx_id: str, current_user: str = Depends(get_current_user)):
-    transactions = load_portfolio()
-    transactions = [t for t in transactions if t["id"] != tx_id]
-    save_portfolio(transactions)
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        _db.delete_user_transaction(db_user["user_id"], tx_id)
+    else:
+        transactions = load_portfolio()
+        transactions = [t for t in transactions if t["id"] != tx_id]
+        save_portfolio(transactions)
     logger.info("TRANSACTION_DELETED user=%s tx_id=%s", current_user, tx_id)
     return {"ok": True}
 
@@ -7702,7 +8035,7 @@ _MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MB
 
 @app.post("/api/portfolio/import")
 @limiter.limit("10/hour")
-async def import_portfolio(request: Request, file: UploadFile = File(...), replace: bool = False):
+async def import_portfolio(request: Request, file: UploadFile = File(...), replace: bool = False, current_user: str = Depends(get_current_user)):
     """
     Import transactions from a CSV file.
     Required columns: type, ticker, qty, price, date
@@ -7725,12 +8058,21 @@ async def import_portfolio(request: Request, file: UploadFile = File(...), repla
     if not required.issubset({c.strip().lower() for c in (reader.fieldnames or [])}):
         raise HTTPException(status_code=400, detail=f"CSV must have columns: {', '.join(sorted(required))}")
 
-    transactions = [] if replace else load_portfolio()
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        existing_txns = [] if replace else _db.get_user_transactions(db_user["user_id"], "real")
+        if replace:
+            _db.clear_user_transactions(db_user["user_id"], "real")
+    else:
+        existing_txns = [] if replace else load_portfolio()
+    transactions = list(existing_txns)
     imported, skipped = 0, []
+    new_txns: list[dict] = []
 
     # Build dedup key set from whatever transactions we're starting with
     existing_keys: set[tuple] = {
-        (t["type"], t["ticker"], float(t["qty"]), float(t["price"]), t["date"])
+        (t["type"], t["ticker"], float(t["qty"]), float(t["price"]), t.get("date", ""))
         for t in transactions
     }
 
@@ -7788,6 +8130,7 @@ async def import_portfolio(request: Request, file: UploadFile = File(...), repla
                 "timestamp": datetime.utcnow().isoformat(),
             }
             transactions.append(tx)
+            new_txns.append(tx)
             existing_keys.add(dedup_key)
             # Update positions dict for subsequent sell validation in same file
             if ticker not in positions:
@@ -7808,7 +8151,11 @@ async def import_portfolio(request: Request, file: UploadFile = File(...), repla
             continue
 
     if imported > 0:
-        save_portfolio(transactions)
+        if db_user:
+            for tx in new_txns:
+                _db.add_user_transaction(db_user["user_id"], "real", tx)
+        else:
+            save_portfolio(transactions)
 
     return {
         "imported": imported,
@@ -7821,7 +8168,12 @@ async def import_portfolio(request: Request, file: UploadFile = File(...), repla
 @limiter.limit("10/hour")
 async def reset_portfolio(request: Request, current_user: str = Depends(get_current_user)):
     """Clear all portfolio transactions."""
-    save_portfolio([])
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        _db.clear_user_transactions(db_user["user_id"], "real")
+    else:
+        save_portfolio([])
     logger.info("PORTFOLIO_RESET user=%s", current_user)
     return {"ok": True, "message": "Portfolio cleared."}
 
@@ -7837,7 +8189,7 @@ def portfolio_template():
 
 @app.post("/api/portfolio/import-pdf")
 @limiter.limit("5/hour")
-async def import_portfolio_pdf(request: Request, file: UploadFile = File(...), replace: bool = False):
+async def import_portfolio_pdf(request: Request, file: UploadFile = File(...), replace: bool = False, current_user: str = Depends(get_current_user)):
     """
     Import transactions from a Saxo Bank PDF statement.
     Extracts text from the PDF and uses Claude AI to parse transactions.
@@ -7913,13 +8265,22 @@ PDF TEXT:
         return {"imported": 0, "skipped": 0, "errors": [], "preview": [], "message": "No transactions found in this PDF."}
 
     # Validate and import
-    transactions = [] if replace else load_portfolio()
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        existing_txns = [] if replace else _db.get_user_transactions(db_user["user_id"], "real")
+        if replace:
+            _db.clear_user_transactions(db_user["user_id"], "real")
+    else:
+        existing_txns = [] if replace else load_portfolio()
+    transactions = list(existing_txns)
     positions    = compute_positions(transactions)
     imported, skipped = 0, []
     preview = []
+    new_txns: list[dict] = []
 
     existing_keys: set[tuple] = {
-        (t["type"], t["ticker"], float(t["qty"]), float(t["price"]), t["date"])
+        (t["type"], t["ticker"], float(t["qty"]), float(t["price"]), t.get("date", ""))
         for t in transactions
     }
 
@@ -7961,6 +8322,7 @@ PDF TEXT:
                 "date": tx_date, "timestamp": datetime.utcnow().isoformat(),
             }
             transactions.append(tx)
+            new_txns.append(tx)
             existing_keys.add(dedup_key)
             preview.append({"type": tx_type, "ticker": ticker, "name": name, "qty": qty, "price": price, "date": tx_date})
 
@@ -7980,7 +8342,11 @@ PDF TEXT:
             skipped.append(f"Row {i}: {e}")
 
     if imported > 0:
-        save_portfolio(transactions)
+        if db_user:
+            for tx in new_txns:
+                _db.add_user_transaction(db_user["user_id"], "real", tx)
+        else:
+            save_portfolio(transactions)
 
     return {"imported": imported, "skipped": len(skipped), "errors": skipped, "preview": preview}
 
@@ -7988,8 +8354,13 @@ PDF TEXT:
 # ── Paper Portfolio endpoints ─────────────────────────────────────────────────
 
 @app.get("/api/paper-portfolio")
-async def get_paper_portfolio():
-    transactions = load_paper_portfolio()
+async def get_paper_portfolio(current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        transactions = _db.get_user_transactions(db_user["user_id"], "paper")
+    else:
+        transactions = load_paper_portfolio()
     annotated_transactions = annotate_transactions_with_realised_pnl(transactions)
     positions    = compute_positions(transactions)
     held         = [t for t, p in positions.items() if p["shares"] > 0]
@@ -8063,8 +8434,13 @@ async def get_paper_portfolio():
 
 
 @app.post("/api/paper-portfolio/buy")
-async def paper_buy(req: TradeRequest):
-    transactions = load_paper_portfolio()
+async def paper_buy(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        transactions = _db.get_user_transactions(db_user["user_id"], "paper")
+    else:
+        transactions = load_paper_portfolio()
     cash = PAPER_INITIAL_FLOAT
     for tx in transactions:
         qty   = float(tx.get("qty", 0))
@@ -8081,7 +8457,7 @@ async def paper_buy(req: TradeRequest):
     except Exception:
         info = {}
     name = info.get("shortName", req.ticker.upper()) if isinstance(info, dict) else req.ticker.upper()
-    transactions.append({
+    tx = {
         "id":        str(uuid.uuid4()),
         "type":      "buy",
         "ticker":    req.ticker.upper(),
@@ -8091,14 +8467,23 @@ async def paper_buy(req: TradeRequest):
         "date":      req.date or str(date.today()),
         "timestamp": datetime.utcnow().isoformat(),
         "source":    "recommendation",
-    })
-    save_paper_portfolio(transactions)
+    }
+    if db_user:
+        _db.add_user_transaction(db_user["user_id"], "paper", tx)
+    else:
+        transactions.append(tx)
+        save_paper_portfolio(transactions)
     return {"ok": True}
 
 
 @app.post("/api/paper-portfolio/sell")
-async def paper_sell(req: TradeRequest):
-    transactions = load_paper_portfolio()
+async def paper_sell(req: TradeRequest, current_user: str = Depends(get_current_user)):
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        transactions = _db.get_user_transactions(db_user["user_id"], "paper")
+    else:
+        transactions = load_paper_portfolio()
     positions    = compute_positions(transactions)
     held         = positions.get(req.ticker.upper(), {}).get("shares", 0)
     if req.qty > held + 1e-9:
@@ -8108,7 +8493,7 @@ async def paper_sell(req: TradeRequest):
     except Exception:
         info = {}
     name = info.get("shortName", req.ticker.upper()) if isinstance(info, dict) else req.ticker.upper()
-    transactions.append({
+    tx = {
         "id":        str(uuid.uuid4()),
         "type":      "sell",
         "ticker":    req.ticker.upper(),
@@ -8118,21 +8503,35 @@ async def paper_sell(req: TradeRequest):
         "date":      req.date or str(date.today()),
         "timestamp": datetime.utcnow().isoformat(),
         "source":    "recommendation",
-    })
-    save_paper_portfolio(transactions)
+    }
+    if db_user:
+        _db.add_user_transaction(db_user["user_id"], "paper", tx)
+    else:
+        transactions.append(tx)
+        save_paper_portfolio(transactions)
     return {"ok": True}
 
 
 @app.delete("/api/paper-portfolio/reset")
 def reset_paper_portfolio(current_user: str = Depends(get_current_user)):
-    save_paper_portfolio([])
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        _db.clear_user_transactions(db_user["user_id"], "paper")
+    else:
+        save_paper_portfolio([])
     logger.info("PAPER_PORTFOLIO_RESET user=%s", current_user)
     return {"ok": True}
 
 
 @app.delete("/api/alerts")
 def clear_alerts(current_user: str = Depends(get_current_user)):
-    save_alerts([])
+    import db as _db
+    db_user = _get_db_user(current_user)
+    if db_user:
+        _db.clear_user_alerts(db_user["user_id"])
+    else:
+        save_alerts([])
     logger.info("ALERTS_CLEARED user=%s", current_user)
     return {"message": "Alert history cleared."}
 
