@@ -305,6 +305,7 @@ class InvestmentThesis(BaseModel):
     narrative: dict[str, str] = Field(default_factory=dict)  # bull/base/bear
     quality_flags: list[QualityFlag] = Field(default_factory=list)
     decision_log: list[DecisionLogEntry] = Field(default_factory=list)
+    conflict_score: float = Field(default=0.0, ge=0.0, le=1.0)  # std-dev of agent scores / 50, 0=consensus 1=max disagreement
 
     def overall_direction(self) -> Direction:
         score = self.composite_score

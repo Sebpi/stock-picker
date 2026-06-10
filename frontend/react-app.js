@@ -2083,12 +2083,17 @@
             h(Metric, { label: "Evidence", value: thesis.evidence_quality || "—" }),
             h(Metric, { label: "12M base", value: forecast["12m"] ? fmtPct(forecast["12m"].base_return_pct, 1) : "—" })
           ),
-          thesis.quality_flags && thesis.quality_flags.length > 0 && h("div", { className: "mt-3 flex flex-wrap gap-1" },
-            thesis.quality_flags.map(f => h("span", {
+          (thesis.quality_flags && thesis.quality_flags.length > 0 || thesis.conflict_score > 0.35) && h("div", { className: "mt-3 flex flex-wrap gap-1" },
+            thesis.quality_flags && thesis.quality_flags.map(f => h("span", {
               key: f,
               title: FLAG_TOOLTIPS[f] || f,
               className: "inline-block rounded border border-pulse-amber/30 bg-pulse-amber/10 px-2 py-0.5 font-mono text-[10px] text-pulse-amber"
-            }, f))
+            }, f)),
+            thesis.conflict_score > 0.35 && h("span", {
+              key: "conflict",
+              title: `Agent disagreement score: ${(thesis.conflict_score * 100).toFixed(0)}% — agents hold divergent views on this stock. Bull/bear cases may be wider than usual.`,
+              className: "inline-block rounded border border-pulse-magenta/30 bg-pulse-magenta/10 px-2 py-0.5 font-mono text-[10px] text-pulse-magenta cursor-help"
+            }, `MIXED SIGNALS ${(thesis.conflict_score * 100).toFixed(0)}%`)
           )
         )
       ),

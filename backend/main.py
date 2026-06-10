@@ -2569,10 +2569,14 @@ async def auto_recalibrate_weights():
     """Weekly weight recalibration — Monday 02:00 UTC."""
     try:
         import agent_accuracy as _aa
+        from agents.orchestrator import rebuild_score_return_table
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _aa.apply_weight_adjustments)
         logger.info("[Learning] Weekly weight recalibration: n_adjusted=%s applied=%s",
                     result.get("n_adjusted"), result.get("applied"))
+        updated = await loop.run_in_executor(None, rebuild_score_return_table)
+        if updated:
+            logger.info("[Learning] SCORE_TO_12M_RETURN table rebuilt from realised returns")
     except Exception as exc:
         logger.warning("[Learning] Weight recalibration failed: %s", exc)
 
@@ -6270,11 +6274,11 @@ async def _build_recommendations(progress: Optional[callable] = None):
             except Exception:
                 continue
 
-        # Phase 1: raise BUY floor — composite ≥ 70, drop low-confidence back-door.
+        # Phase 1: raise BUY floor — composite ≥ 72, matching the alert snapshot threshold.
         # Also gate by min_buy_confidence setting (default "medium" = accept medium+high).
         _conf_rank = {"low": 0, "medium": 1, "high": 2}
         _min_conf  = settings.get("min_buy_confidence", "medium").lower()
-        if (direction != "bullish" or signal_score < 70
+        if (direction != "bullish" or signal_score < 72
                 or _conf_rank.get(confidence, 1) < _conf_rank.get(_min_conf, 1)
                 or remaining_cash < 500):
             continue
@@ -6309,8 +6313,8 @@ async def _build_recommendations(progress: Optional[callable] = None):
         # per-position, per-sector, and portfolio-VaR limits in that order.
         sec = ((info_map.get(ticker) or {}).get("sector")) or "Unknown"
 
-        # Conviction factor 0.7–1.0 based on signal_score above the BUY floor (70).
-        edge       = max(0.0, min(1.0, (signal_score - 70) / 30.0))
+        # Conviction factor 0.7–1.0 based on signal_score above the BUY floor (72).
+        edge       = max(0.0, min(1.0, (signal_score - 72) / 28.0))
         conviction = 0.7 + 0.3 * edge
         conf_factor = 1.0 if confidence == "high" else 0.75
         # Vol-adjust: bidirectional. Low-vol names earn up to +30%, high-vol cut to -50%.
