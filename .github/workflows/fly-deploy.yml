@@ -121,6 +121,15 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v4
+      - name: Wait for app to be live
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS https://stock-picker-sp.fly.dev/api/health >/dev/null; then
+              echo "live"; exit 0
+            fi
+            sleep 5
+          done
+          echo "site never came up"; exit 1
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.14.0
         with:
