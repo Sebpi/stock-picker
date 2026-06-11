@@ -2159,6 +2159,25 @@ def list_users(limit: int = 200, offset: int = 0) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_users_with_stats(limit: int = 200, offset: int = 0) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT u.*, COUNT(w.ticker) AS watchlist_count,
+                   (SELECT COUNT(*) FROM refresh_tokens rt
+                    WHERE rt.user_id = u.user_id AND rt.revoked = 0
+                      AND rt.expires_at > datetime('now')) AS active_sessions
+            FROM app_users u
+            LEFT JOIN user_watchlist w ON w.user_id = u.user_id
+            GROUP BY u.user_id
+            ORDER BY u.created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Email verification tokens ────────────────────────────────────────────────
 
 def create_email_verification_token(user_id: str) -> str:

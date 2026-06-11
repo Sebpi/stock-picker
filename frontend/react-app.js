@@ -461,6 +461,8 @@
     const [showDisable, setShowDisable] = useState(false);
     const [allUsers, setAllUsers] = useState(null);
     const [usersLoading, setUsersLoading] = useState(false);
+    const [confirmDelete, setConfirmDelete] = useState(null);
+    const [busyUser, setBusyUser] = useState(null);
 
     useEffect(() => {
       api("/api/auth/me").then(d => {
@@ -477,6 +479,35 @@
         await api(`/v1/users/${userId}/tier`, { method: "PUT", body: JSON.stringify({ tier }) });
         setAllUsers(prev => prev.map(u => u.user_id === userId ? { ...u, tier } : u));
       } catch (err) { setMsg({ text: err.message || "Could not update tier.", ok: false }); }
+    }
+
+    async function revokeUserSessions(userId, username) {
+      setBusyUser(userId);
+      try {
+        await api(`/v1/users/${userId}/revoke-sessions`, { method: "POST" });
+        setAllUsers(prev => prev.map(u => u.user_id === userId ? { ...u, active_sessions: 0 } : u));
+        setMsg({ text: `Sessions revoked for ${username}.`, ok: true });
+      } catch (err) { setMsg({ text: err.message || "Could not revoke sessions.", ok: false }); }
+      finally { setBusyUser(null); }
+    }
+
+    async function adminResetPassword(userId, username) {
+      setBusyUser(userId);
+      try {
+        const r = await api(`/v1/users/${userId}/reset-password`, { method: "POST" });
+        setMsg({ text: r.email_sent ? `Reset email sent to ${username}.` : `Reset link generated (email not configured).`, ok: true });
+      } catch (err) { setMsg({ text: err.message || "Could not send reset.", ok: false }); }
+      finally { setBusyUser(null); }
+    }
+
+    async function deleteUser(userId, username) {
+      setBusyUser(userId);
+      try {
+        await api(`/v1/users/${userId}`, { method: "DELETE" });
+        setAllUsers(prev => prev.filter(u => u.user_id !== userId));
+        setMsg({ text: `User ${username} deleted.`, ok: true });
+      } catch (err) { setMsg({ text: err.message || "Could not delete user.", ok: false }); }
+      finally { setBusyUser(null); setConfirmDelete(null); }
     }
 
     async function startMfaSetup() {
@@ -602,7 +633,7 @@
           h("table", { className: "min-w-full text-xs" },
             h("thead", null,
               h("tr", { className: "border-b border-pulse-line text-left font-mono text-[10px] uppercase tracking-[0.16em] text-pulse-dim" },
-                ["Username", "Email", "Tier", "Verified", "MFA", "Joined"].map(col =>
+                ["Username", "Email", "Tier", "Verified", "MFA", "Watchlist", "Sessions", "Joined", "Actions"].map(col =>
                   h("th", { key: col, className: "pb-2 pr-4 font-normal" }, col)
                 )
               )
@@ -610,6 +641,8 @@
             h("tbody", null, allUsers.map(u => {
               const tc = { free: "text-pulse-dim", pro: "text-pulse-cyan", premium: "text-pulse-magenta" }[u.tier] || "text-pulse-dim";
               const joined = u.created_at ? u.created_at.slice(0, 10) : "—";
+              const isBusy = busyUser === u.user_id;
+              const isConfirming = confirmDelete === u.user_id;
               return h("tr", { key: u.user_id, className: "border-t border-pulse-line/40" },
                 h("td", { className: "py-2 pr-4 font-mono font-semibold" }, u.username,
                   u.role === "admin" ? h("span", { className: "ml-1 text-[9px] text-pulse-amber uppercase" }, "admin") : null
@@ -632,7 +665,46 @@
                 h("td", { className: "py-2 pr-4" },
                   h("span", { className: u.mfa_enabled ? "text-pulse-green" : "text-pulse-dim" }, u.mfa_enabled ? "On" : "Off")
                 ),
-                h("td", { className: "py-2 font-mono text-pulse-dim" }, joined)
+                h("td", { className: "py-2 pr-4 font-mono text-pulse-dim text-center" }, u.watchlist_count ?? "—"),
+                h("td", { className: "py-2 pr-4 font-mono text-center" },
+                  h("span", { className: (u.active_sessions > 0) ? "text-pulse-cyan" : "text-pulse-dim" }, u.active_sessions ?? 0)
+                ),
+                h("td", { className: "py-2 pr-4 font-mono text-pulse-dim" }, joined),
+                h("td", { className: "py-2 whitespace-nowrap" },
+                  isConfirming
+                    ? h("span", { className: "flex items-center gap-2" },
+                        h("span", { className: "text-pulse-amber text-[10px]" }, "Delete?"),
+                        h("button", {
+                          onClick: () => deleteUser(u.user_id, u.username),
+                          disabled: isBusy,
+                          className: "text-[10px] text-red-400 hover:text-red-300 font-mono uppercase"
+                        }, isBusy ? "…" : "Yes"),
+                        h("button", {
+                          onClick: () => setConfirmDelete(null),
+                          className: "text-[10px] text-pulse-muted hover:text-pulse-dim font-mono uppercase"
+                        }, "No")
+                      )
+                    : h("span", { className: "flex items-center gap-3" },
+                        h("button", {
+                          onClick: () => revokeUserSessions(u.user_id, u.username),
+                          disabled: isBusy || u.active_sessions === 0,
+                          title: "Revoke all active sessions",
+                          className: "text-[10px] font-mono uppercase text-pulse-amber hover:text-amber-300 disabled:opacity-30"
+                        }, isBusy ? "…" : "Revoke"),
+                        h("button", {
+                          onClick: () => adminResetPassword(u.user_id, u.username),
+                          disabled: isBusy || !u.email,
+                          title: u.email ? "Send password reset email" : "No email on file",
+                          className: "text-[10px] font-mono uppercase text-pulse-cyan hover:text-cyan-300 disabled:opacity-30"
+                        }, isBusy ? "…" : "Reset pwd"),
+                        h("button", {
+                          onClick: () => setConfirmDelete(u.user_id),
+                          disabled: isBusy,
+                          title: "Permanently delete this user",
+                          className: "text-[10px] font-mono uppercase text-red-400/70 hover:text-red-400 disabled:opacity-30"
+                        }, "Delete")
+                      )
+                )
               );
             }))
           )
