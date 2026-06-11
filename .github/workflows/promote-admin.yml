@@ -20,5 +20,8 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           TARGET_USERNAME: ${{ github.event.inputs.username }}
         run: |
+          TARGET_L=$(python3 -c "import os; print(os.environ.get('TARGET_USERNAME','').lower())")
+          PYCODE="import sqlite3; conn=sqlite3.connect('/app/data/stockpicker.db'); conn.execute('UPDATE app_users SET role=? WHERE username=lower(?)', ('admin','${TARGET_L}')); conn.commit(); row=conn.execute('SELECT username,role,tier FROM app_users WHERE username=lower(?)', ('${TARGET_L}',)).fetchone(); print('Result:', row or 'not found'); conn.close()"
+          B64=$(echo "$PYCODE" | python3 -c "import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())")
           flyctl ssh console -a stock-picker-sp --command \
-            "TUSER='${TARGET_USERNAME}' python3 -c 'import sqlite3,os; u=os.environ[\"TUSER\"].lower(); conn=sqlite3.connect(\"/app/data/stockpicker.db\"); conn.execute(\"UPDATE app_users SET role=? WHERE username=lower(?)\", (\"admin\",u)); conn.commit(); row=conn.execute(\"SELECT username,role,tier FROM app_users WHERE username=lower(?)\", (u,)).fetchone(); print(\"Result:\",row or \"not found\"); conn.close()'"
+            "python3 -c \"import base64; exec(base64.b64decode('${B64}').decode())\""
