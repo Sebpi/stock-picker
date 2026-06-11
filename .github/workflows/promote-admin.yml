@@ -21,7 +21,7 @@ jobs:
           TARGET_USERNAME: ${{ github.event.inputs.username }}
         run: |
           TARGET_L=$(python3 -c "import os; print(os.environ.get('TARGET_USERNAME','').lower())")
-          PYCODE="import sqlite3; conn=sqlite3.connect('/app/data/stockpicker.db',timeout=30); conn.execute('UPDATE app_users SET role=? WHERE username=lower(?)', ('admin','${TARGET_L}')); conn.commit(); row=conn.execute('SELECT username,role,tier FROM app_users WHERE username=lower(?)', ('${TARGET_L}',)).fetchone(); print('Result:', row or 'not found - check spelling'); conn.close()"
+          PYCODE="import sqlite3; conn=sqlite3.connect('/app/data/stockpicker.db',timeout=30); all_users=conn.execute('SELECT username,role,tier FROM app_users ORDER BY created_at').fetchall(); print('All app_users:', all_users); updated=conn.execute('UPDATE app_users SET role=? WHERE lower(username)=lower(?)', ('admin','${TARGET_L}')).rowcount; conn.commit(); row=conn.execute('SELECT username,role,tier FROM app_users WHERE lower(username)=lower(?)', ('${TARGET_L}',)).fetchone(); print('Updated rows:', updated, '| Result:', row or 'not found'); conn.close()"
           B64=$(echo "$PYCODE" | python3 -c "import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())")
           flyctl ssh console -a stock-picker-sp --command \
             "python3 -c \"import base64; exec(base64.b64decode('${B64}').decode())\""
