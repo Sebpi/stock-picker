@@ -3334,7 +3334,7 @@ async def me(current_user: str = Depends(get_current_user)):
             "mfa_enabled": bool(app_user["mfa_enabled"]),
             "monthly_thesis_count": app_user["monthly_thesis_count"],
         }
-    return {"username": current_user}
+    return {"username": current_user, "role": "admin" if _is_admin_user(current_user) else "user"}
 
 
 # ── Multi-user auth endpoints ─────────────────────────────────────────────────
