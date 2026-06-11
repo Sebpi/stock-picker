@@ -3465,16 +3465,18 @@ async def mfa_disable(req: MfaSetupVerifyRequest, request: Request, current_user
 # ── User management endpoints ─────────────────────────────────────────────────
 
 def _is_admin_user(current_user: str) -> bool:
-    """Authoritative admin check. Portal/service identities are never admin
-    (they have no local users.json entry and are not the bootstrap admin).
-    A local user is admin if their users.json role is 'admin', or they are the
-    bootstrap 'admin' account (which predates the role field)."""
+    """Authoritative admin check. Portal/service identities are never admin.
+    A user is admin if: (1) they are in users.json with role=='admin' or are
+    the bootstrap 'admin' account, OR (2) their app_users row has role=='admin'."""
     if current_user.startswith(("portal:", "service:")):
         return False
     user_obj = load_users().get(current_user)
-    if user_obj is None:
-        return False
-    return user_obj.get("role") == "admin" or current_user == "admin"
+    if user_obj is not None:
+        return user_obj.get("role") == "admin" or current_user == "admin"
+    # Fall through to app_users for registered accounts not in users.json
+    import db as _db
+    app_user = _db.get_user_by_username(current_user)
+    return bool(app_user and app_user.get("role") == "admin")
 
 
 @app.get("/v1/users")
