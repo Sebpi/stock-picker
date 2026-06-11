@@ -1,0 +1,23 @@
+name: Promote user to admin
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: "Username to promote to admin role"
+        required: true
+        type: string
+
+jobs:
+  promote:
+    name: Set role=admin in prod DB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Promote user
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl ssh console -a stock-picker-sp --command \
+            "/bin/sh -c 'sqlite3 /app/data/stockpicker.db \"UPDATE app_users SET role=\\\"admin\\\" WHERE username=lower(\\\"${{ github.event.inputs.username }}\\\")\" && echo Done && sqlite3 /app/data/stockpicker.db \"SELECT username, role, tier FROM app_users WHERE username=lower(\\\"${{ github.event.inputs.username }}\\\")\"'"
