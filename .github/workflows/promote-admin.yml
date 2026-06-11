@@ -18,6 +18,25 @@ jobs:
       - name: Promote user
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          TARGET_USERNAME: ${{ github.event.inputs.username }}
         run: |
+          # Build Python script, base64-encode it to avoid SSH/shell quoting issues.
+          # Base64 output is alphanumeric-safe so it survives all quoting layers.
+          B64=$(python3 - <<'PYEOF'
+import base64, os
+u = os.environ["TARGET_USERNAME"].lower()
+lines = [
+    "import sqlite3",
+    "conn = sqlite3.connect('/app/data/stockpicker.db')",
+    "u = '" + u + "'",
+    "conn.execute(\"UPDATE app_users SET role='admin' WHERE username=lower(?)\", (u,))",
+    "conn.commit()",
+    "row = conn.execute(\"SELECT username,role,tier FROM app_users WHERE username=lower(?)\", (u,)).fetchone()",
+    "print('Result:', row or 'User not found - check spelling')",
+    "conn.close()",
+]
+print(base64.b64encode("\n".join(lines).encode()).decode())
+PYEOF
+          )
           flyctl ssh console -a stock-picker-sp --command \
-            "/bin/sh -c 'sqlite3 /app/data/stockpicker.db \"UPDATE app_users SET role=\\\"admin\\\" WHERE username=lower(\\\"${{ github.event.inputs.username }}\\\")\" && echo Done && sqlite3 /app/data/stockpicker.db \"SELECT username, role, tier FROM app_users WHERE username=lower(\\\"${{ github.event.inputs.username }}\\\")\"'"
+            "python3 -c \"import base64; exec(base64.b64decode('${B64}').decode())\""
