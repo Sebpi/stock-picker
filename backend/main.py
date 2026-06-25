@@ -8335,11 +8335,19 @@ PDF TEXT:
 {truncated}"""
 
     client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        msg = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        logger.error("PDF import Claude API error: %s", e)
+        raise HTTPException(status_code=502, detail="AI service unavailable — please try again in a moment.")
+
+    if not msg.content or not hasattr(msg.content[0], "text"):
+        raise HTTPException(status_code=502, detail="AI returned an empty response — please try again.")
+
     raw = msg.content[0].text.strip()
     if "```" in raw:
         raw = raw.split("```")[1]
@@ -8350,8 +8358,8 @@ PDF TEXT:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.error("PDF import JSON parse error: %s", e)
-        raise HTTPException(status_code=500, detail="Could not parse transactions from this PDF. Ensure it contains readable text.")
+        logger.error("PDF import JSON parse error: %s — raw: %s", e, raw[:200])
+        raise HTTPException(status_code=422, detail="Could not parse transactions from this PDF. Ensure it contains readable text.")
 
     if not parsed:
         return {"imported": 0, "skipped": 0, "errors": [], "preview": [], "message": "No transactions found in this PDF."}
