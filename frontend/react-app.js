@@ -1174,7 +1174,9 @@
           item.sentiment ? h(Pill, { className: sentimentBadge(item.sentiment) }, String(item.sentiment).toUpperCase()) : null,
           item.sentiment_score != null ? h("span", { className: cx("font-mono text-xs", sentimentTone(item.sentiment, item.sentiment_score)) }, "score ", item.sentiment_score >= 0 ? "+" : "", item.sentiment_score) : null,
           item.recommendation ? h("span", { className: cx("font-mono text-xs uppercase", recoTone(item.recommendation)) }, String(item.recommendation).replace("_", " ")) : null,
-          item.target_mean_price != null ? h("span", { className: "font-mono text-xs text-pulse-muted" }, "target $", Number(item.target_mean_price).toFixed(2)) : null
+          item.target_mean_price != null ? h("span", { className: "font-mono text-xs text-pulse-muted" }, "12m target $", Number(item.target_mean_price).toFixed(2),
+            item.price != null && item.price > 0 ? h("span", { className: cx("ml-1", deltaTone(((item.target_mean_price - item.price) / item.price) * 100)) }, "(", fmtPct(((item.target_mean_price - item.price) / item.price) * 100, 1), ")") : null
+          ) : null
         ),
         item.summary ? h("p", { className: "mt-3 text-sm text-pulse-muted" }, item.summary) : null,
         item.news_summary ? h("div", { className: "mt-3" },
