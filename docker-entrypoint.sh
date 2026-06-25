@@ -32,8 +32,34 @@ do
 done
 
 cd /app/backend
-# Drop root for the long-lived server process when possible.
+
+# Pre-flight: verify critical Python imports before starting uvicorn.
+# Errors here appear in Fly logs and explain why the app never binds to the port.
+echo "[entrypoint] Running pre-flight import check..."
 if [ "$(id -u)" = "0" ] && id "$APP_USER" >/dev/null 2>&1 && command -v gosu >/dev/null 2>&1; then
+  gosu "$APP_USER" python3 -c "
+import sys
+try:
+    from cryptography.fernet import Fernet
+    from jose import jwt
+    import bcrypt, fastapi, uvicorn, pypdf
+    print('[preflight] All critical imports OK', flush=True)
+except Exception as e:
+    print(f'[preflight] IMPORT FAILED: {e}', file=sys.stderr, flush=True)
+    sys.exit(1)
+" || { echo "[entrypoint] Pre-flight failed — aborting startup"; exit 1; }
   exec gosu "$APP_USER" uvicorn main:app --host 0.0.0.0 --port "${PORT:-8080}"
 fi
+
+python3 -c "
+import sys
+try:
+    from cryptography.fernet import Fernet
+    from jose import jwt
+    import bcrypt, fastapi, uvicorn, pypdf
+    print('[preflight] All critical imports OK', flush=True)
+except Exception as e:
+    print(f'[preflight] IMPORT FAILED: {e}', file=sys.stderr, flush=True)
+    sys.exit(1)
+" || { echo "[entrypoint] Pre-flight failed — aborting startup"; exit 1; }
 exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8080}"
