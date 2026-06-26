@@ -3579,6 +3579,28 @@ async def users_me(current_user: str = Depends(get_current_user)):
     return {k: v for k, v in app_user.items() if k not in ("password_hash", "mfa_secret")}
 
 
+@app.get("/v1/users/lookup")
+async def user_lookup(identity: str, current_user: str = Depends(get_current_user)):
+    """Look up a user's tier by identity string. Service-key only.
+    Used by Pick-shovels to gate expensive operations by the caller's tier."""
+    if not current_user.startswith("service:"):
+        raise HTTPException(403, "Service key required")
+    import db as _db
+    username = identity
+    if identity.startswith("portal:"):
+        username = identity[len("portal:"):]
+    user = _db.get_user_by_username(username) or _db.get_user_by_email(username)
+    if not user:
+        return {"identity": identity, "tier": "free", "found": False}
+    return {
+        "identity": identity,
+        "tier": user.get("tier", "free"),
+        "username": user.get("username"),
+        "email": user.get("email"),
+        "found": True,
+    }
+
+
 @app.get("/v1/users/me/watchlist")
 async def user_watchlist_get(current_user: str = Depends(get_current_user)):
     import db as _db
