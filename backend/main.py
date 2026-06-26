@@ -8715,6 +8715,7 @@ _v1_runs: dict = {}
 class V1RunRequest(BaseModel):
     tickers: list[str] | None = None
     run_fresh: bool = False
+    context_notes: str | None = None
 
 
 @app.post("/v1/runs")
@@ -8730,6 +8731,7 @@ async def v1_create_run(
 
     tickers = req.tickers if req else None
     run_fresh = req.run_fresh if req else False
+    context_notes = req.context_notes if req else None
     if not tickers:
         tickers = load_watchlist()
     tickers = [_validate_ticker(t) for t in tickers]
@@ -8752,7 +8754,7 @@ async def v1_create_run(
         for ticker in tickers:
             try:
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, lambda t=ticker: orch.run_thesis(t, run_fresh=run_fresh))
+                await loop.run_in_executor(None, lambda t=ticker: orch.run_thesis(t, run_fresh=run_fresh, context_notes=context_notes))
                 _v1_runs[run_id]["completed"].append(ticker)
                 _db.update_thesis_run(
                     run_id,

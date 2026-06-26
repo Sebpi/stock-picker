@@ -80,7 +80,7 @@ class TestAgentAlertSnapshotBuys(unittest.IsolatedAsyncioTestCase):
         if settings:
             _settings.update(settings)
 
-        def _fake_run_thesis(ticker, run_fresh=False):
+        def _fake_run_thesis(ticker, run_fresh=False, context_notes=None):
             t = thesis_map.get(ticker)
             if t is None:
                 raise ValueError(f"No thesis for {ticker}")
@@ -187,7 +187,7 @@ class TestAgentAlertSnapshotSells(unittest.IsolatedAsyncioTestCase):
         if settings:
             _settings.update(settings)
 
-        def _fake_run_thesis(ticker, run_fresh=False):
+        def _fake_run_thesis(ticker, run_fresh=False, context_notes=None):
             t = thesis_map.get(ticker)
             if t is None:
                 raise ValueError(f"No thesis for {ticker}")
@@ -278,7 +278,7 @@ class TestAgentAlertSnapshotFloatRespected(unittest.IsolatedAsyncioTestCase):
 
         thesis_map = {"TSLA": _make_thesis("TSLA", composite=80.0, base_12m=20.0)}
 
-        def _fake_run_thesis(ticker, run_fresh=False):
+        def _fake_run_thesis(ticker, run_fresh=False, context_notes=None):
             return thesis_map[ticker]
 
         async def _snapshot(float_val):

@@ -180,13 +180,13 @@ class OrchestratorAgent:
     Not a BaseAgent subclass — runs all agents then synthesises the thesis.
     """
 
-    def run_thesis(self, ticker: str, run_fresh: bool = False) -> InvestmentThesis:
+    def run_thesis(self, ticker: str, run_fresh: bool = False, context_notes: str | None = None) -> InvestmentThesis:
         import observability
         run_id = str(uuid.uuid4())
         as_of = datetime.now(timezone.utc)
         t0 = _time.monotonic()
         try:
-            return self._run_thesis_inner(ticker, run_fresh, run_id, as_of, t0, observability)
+            return self._run_thesis_inner(ticker, run_fresh, run_id, as_of, t0, observability, context_notes=context_notes)
         except Exception as exc:
             duration = _time.monotonic() - t0
             observability.log_metric("thesis_run_duration_secs", duration,
@@ -196,7 +196,7 @@ class OrchestratorAgent:
 
     def _run_thesis_inner(self, ticker: str, run_fresh: bool,
                           run_id: str, as_of: datetime, t0: float,
-                          observability) -> InvestmentThesis:
+                          observability, *, context_notes: str | None = None) -> InvestmentThesis:
         log: list[DecisionLogEntry] = []
 
         # ---- Step 1: Collect signals ----
@@ -280,7 +280,7 @@ class OrchestratorAgent:
         drivers, risks = self._extract_drivers_risks(signals)
 
         # ---- Step 7: Claude narrative (one call, cached system prompt) ----
-        narrative = self._generate_narrative(ticker, signals, weighted, forecasts, drivers, risks)
+        narrative = self._generate_narrative(ticker, signals, weighted, forecasts, drivers, risks, context_notes=context_notes)
         if narrative.get("_llm"):
             thesis_flags.append(QualityFlag.LLM_UNVERIFIED)
 
@@ -427,6 +427,8 @@ class OrchestratorAgent:
         forecasts: dict[str, HorizonForecast],
         drivers: list[str],
         risks: list[str],
+        *,
+        context_notes: str | None = None,
     ) -> dict[str, str]:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
@@ -454,13 +456,17 @@ class OrchestratorAgent:
                 "Return valid JSON only, no markdown."
             )
 
+            context_block = ""
+            if context_notes:
+                context_block = f"\nSupply-chain context (from Picks & Shovels): {context_notes}\n"
+
             user_prompt = f"""Generate a structured investment thesis for {ticker}.
 
 Agent scores (0-100): {json.dumps(agent_summary)}
 3/6/12m forecasts (%): {json.dumps(forecast_summary)}
 Key drivers: {json.dumps(drivers)}
 Key risks: {json.dumps(risks)}
-
+{context_block}
 Return JSON with exactly these keys:
 {{
   "bull": "2-3 sentence bull case narrative referencing the strongest agents",
