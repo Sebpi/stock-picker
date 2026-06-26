@@ -129,7 +129,7 @@ class MultiAgentPhase1Tests(unittest.TestCase):
         main.app.dependency_overrides[main.get_current_user] = lambda: "unit-test"
 
         class FakeOrchestrator:
-            def run_thesis(self, ticker: str, run_fresh: bool = False):
+            def run_thesis(self, ticker: str, run_fresh: bool = False, context_notes: str | None = None):
                 return None
 
         try:
