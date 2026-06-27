@@ -729,9 +729,28 @@ def save_settings(s: dict):
 
 
 def _get_db_user(username: str) -> Optional[dict]:
-    """Returns the app_users record for this username, or None for the legacy admin."""
+    """Returns the app_users record for this username, or None for the legacy admin.
+    Portal users (portal:<sub>) are auto-provisioned on first access so they
+    get their own empty data instead of seeing the global/admin data."""
     import db as _db
-    return _db.get_user_by_username(username)
+    row = _db.get_user_by_username(username)
+    if row:
+        return row
+    if username.startswith("portal:"):
+        portal_sub = username[len("portal:"):]
+        placeholder_email = f"{portal_sub}@portal.local"
+        unusable_hash = "!portal-sso-no-local-password"
+        try:
+            return _db.create_user(
+                username=username,
+                email=placeholder_email,
+                password_hash=unusable_hash,
+                role="user",
+                tier="free",
+            )
+        except Exception:
+            return _db.get_user_by_username(username)
+    return None
 
 
 def _load_user_settings_merged(user_id: str) -> dict:
@@ -5477,6 +5496,9 @@ async def get_predictions(current_user: str = Depends(get_current_user)):
             confidence_rank,
             p.get("ticker", ""),
         )
+
+    if db_user:
+        predictions = [p for p in predictions if p.get("ticker") in watchlist_set]
 
     sorted_preds = sorted(
         predictions,
