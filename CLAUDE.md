@@ -152,7 +152,7 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 
 ## Known issues
 
-- **Fly deploy crash-loop (since 2026-06-25).** Stock-picker deploys via GitHub Actions CI/CD succeed (image builds, pushes to Fly) but the app returns 502/503 on startup and never passes the post-deploy health check. Affects PRs #85, #86, #87 and onwards. Root cause unknown — check `flyctl logs -a stock-picker-sp` or Fly dashboard Logs & Events. The code changes themselves are not the cause (tests pass, previous deploys with the same codebase worked on June 22). Likely an infrastructure, env var, or resource issue on the Fly machine.
+- ~~**Fly deploy crash-loop (since 2026-06-25).**~~ **Resolved (PR #92).** Root cause: `db.init_db()` ran blocking SQLite operations on the asyncio event-loop thread, preventing uvicorn from binding port 8080. Fixed by dispatching DB init to `run_in_executor`. The Finnhub daemon thread kept the process alive, masking the hang.
 
 ## Things to be careful with
 
