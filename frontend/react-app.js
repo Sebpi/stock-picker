@@ -55,6 +55,24 @@
     else localStorage.removeItem(TOKEN_KEY);
   }
 
+  // SSO hand-off from seb-portal: portal redirects to us with the token in
+  // the URL hash (`#portal_token=...`). The hash is never sent to the server,
+  // so it doesn't appear in access logs. Consume + scrub on first load,
+  // before React mounts, so the bearer token is in place when /api/auth/me runs.
+  (function consumePortalToken() {
+    try {
+      const hash = window.location.hash || "";
+      if (!hash.includes("portal_token=")) return;
+      const params = new URLSearchParams(hash.slice(1));
+      const tok = params.get("portal_token");
+      if (tok) setToken(tok);
+      params.delete("portal_token");
+      const remaining = params.toString();
+      const newHash = remaining ? "#" + remaining : "";
+      window.history.replaceState(null, "", window.location.pathname + window.location.search + newHash);
+    } catch (e) { /* best-effort; fall back to local login on failure */ }
+  })();
+
   async function api(path, opts) {
     const init = Object.assign({ headers: {} }, opts || {});
     init.headers = Object.assign({}, init.headers || {});
