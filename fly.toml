@@ -1,31 +1,37 @@
-app = "stock-picker-sp"
-primary_region = "ams"
+# fly.toml app configuration file generated for stock-picker-vsb8ig on 2026-06-27T08:48:31Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'stock-picker-vsb8ig'
+primary_region = 'ams'
 
 [build]
 
 [env]
-  ALLOWED_HOSTS = "stock-picker-sp.fly.dev,localhost,127.0.0.1"
-  ALLOWED_ORIGINS = "https://stock-picker-sp.fly.dev"
-  APP_URL = "https://stock-picker-sp.fly.dev"
-  DATA_DIR = "/app/data"
-  FRONTEND_DIR = "/app/frontend"
-  REQUIRE_HTTPS = "true"
-  THESIS_AUTO_RUN_ENABLED = "true"
-  THESIS_AUTO_RUN_INTERVAL_MINUTES = "1440"
+  ALLOWED_HOSTS = 'stock-picker-sp.fly.dev,localhost,127.0.0.1'
+  ALLOWED_ORIGINS = 'https://stock-picker-sp.fly.dev'
+  APP_URL = 'https://stock-picker-sp.fly.dev'
+  DATA_DIR = '/app/data'
+  FRONTEND_DIR = '/app/frontend'
+  REQUIRE_HTTPS = 'true'
+  THESIS_AUTO_RUN_ENABLED = 'true'
+  THESIS_AUTO_RUN_INTERVAL_MINUTES = '1440'
+
+[[mounts]]
+  source = 'stock_picker_data'
+  destination = '/app/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
-
-[[mounts]]
-  source = "stock_picker_data"
-  destination = "/app/data"
+  processes = ['app']
 
 [[vm]]
-  memory = "2gb"
-  cpu_kind = "shared"
+  memory = '2gb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 1024
