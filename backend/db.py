@@ -48,8 +48,17 @@ def _safe_json_loads(text: str, default: Any) -> Any:
 
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+    # Explicit timeout so a write-lock held by another connection surfaces as a
+    # bounded "database is locked" error rather than blocking the caller (and,
+    # for the boot-time init_db path, the whole event loop) indefinitely.
+    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES, timeout=30)
     conn.row_factory = sqlite3.Row
+    # Belt-and-braces: busy_timeout bounds lock waits at the SQLite engine level
+    # too (covers waits the Python-level timeout doesn't, e.g. inside a txn).
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+    except sqlite3.OperationalError:
+        pass
     try:
         conn.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError as exc:
@@ -518,8 +527,11 @@ def _backfill_1m_outcomes() -> int:
 
 
 def init_db() -> None:
+    logger.info("[BOOT] init_db: opening connection")
     with get_conn() as conn:
+        logger.info("[BOOT] init_db: connection open, running DDL")
         conn.executescript(DDL)
+        logger.info("[BOOT] init_db: DDL applied, running migrations")
         # Idempotent migration: add is_direction_proxy if missing (existing DBs pre-this commit)
         existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(forecast_outcome)").fetchall()}
         if "is_direction_proxy" not in existing_cols:
@@ -531,7 +543,9 @@ def init_db() -> None:
             conn.execute("ALTER TABLE app_users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
         if "mfa_secret" not in au_cols:
             conn.execute("ALTER TABLE app_users ADD COLUMN mfa_secret TEXT")
+    logger.info("[BOOT] init_db: migrations done, pruning agent history")
     prune_agent_history()
+    logger.info("[BOOT] init_db: prune done, backfilling 1m outcomes")
     n = _backfill_1m_outcomes()
     if n:
         logger.info("Backfilled %d 1m forecast_outcome rows for existing theses", n)
