@@ -1,0 +1,51 @@
+name: Fly logs (manual)
+
+# Manually-triggered: dumps recent Fly logs for stock-picker-sp into the run
+# output so you can diagnose the boot crash-loop without a terminal. The
+# `app_name` input lets the same workflow target the portal or any other Fly
+# app in the org if needed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "Fly app name"
+        required: true
+        default: "stock-picker-sp"
+      duration_sec:
+        description: "How long to stream logs before exiting (seconds)"
+        required: true
+        default: "45"
+
+jobs:
+  dump-logs:
+    name: Dump Fly logs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: flyctl status
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          echo "::group::flyctl status -a ${{ inputs.app_name }}"
+          flyctl status -a "${{ inputs.app_name }}" || true
+          echo "::endgroup::"
+
+      - name: Stream Fly logs
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        # `flyctl logs` is a long-running tail. Cap it with timeout so the job
+        # always exits cleanly with whatever lines were emitted in the window.
+        # Exit code 124 = timeout expired (expected); anything else is a real
+        # flyctl error worth surfacing.
+        run: |
+          set +e
+          timeout --preserve-status "${{ inputs.duration_sec }}" \
+            flyctl logs -a "${{ inputs.app_name }}"
+          rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 143 ]; then
+            echo "flyctl logs exited $rc"
+            exit "$rc"
+          fi
+          exit 0
