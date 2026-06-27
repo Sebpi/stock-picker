@@ -1711,6 +1711,22 @@ def calc_fcf_yield(fcf, market_cap) -> Optional[float]:
     return round((fcf / market_cap) * 100, 2) if fcf and market_cap else None
 
 
+def _sanitize_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    try:
+        if hasattr(obj, "item"):
+            val = float(obj.item())
+            return val if math.isfinite(val) else None
+    except (TypeError, ValueError):
+        pass
+    return obj
+
+
 # ── Quant helpers ──────────────────────────────────────────────────────────────
 
 def compute_rsi(prices, period: int = 14) -> Optional[float]:
@@ -3929,7 +3945,7 @@ async def search_stocks(q: str = ""):
             })
     elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
     logger.info("SEARCH query=%s matched=%s returned=%s duration_ms=%s", q, len(matched), len(results), elapsed_ms)
-    return results
+    return _sanitize_for_json(results)
 
 
 @app.get("/api/screen")
@@ -4029,7 +4045,7 @@ async def screen_stocks(
         if max_rev_growth is not None and (rev_growth is None or rev_growth > max_rev_growth):
             continue
         results.append(row)
-    return results
+    return _sanitize_for_json(results)
 
 
 @app.get("/api/stock/{ticker}")
@@ -4046,7 +4062,7 @@ def get_stock(ticker: str):
         market_cap = info.get("marketCap")
         fcf_yield = calc_fcf_yield(info.get("freeCashflow"), market_cap)
 
-        return {
+        return _sanitize_for_json({
             "ticker": ticker.upper(),
             "name": info.get("shortName", ticker),
             "sector": info.get("sector", "N/A"),
@@ -4067,7 +4083,7 @@ def get_stock(ticker: str):
             "week_52_low": info.get("fiftyTwoWeekLow"),
             "description": info.get("longBusinessSummary", ""),
             "history": history,
-        }
+        })
     except HTTPException:
         raise
     except Exception:
@@ -4136,12 +4152,12 @@ async def get_peer_valuation(ticker: str):
     else:
         comparison["fcf_yield"] = None
 
-    return {
+    return _sanitize_for_json({
         "peers_count": len(peer_data),
         "sector": sector,
         "medians": {k: round(v, 2) if v is not None else None for k, v in medians.items()},
         "comparison": comparison,
-    }
+    })
 
 
 @app.get("/api/watchlist")
