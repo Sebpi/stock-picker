@@ -9446,8 +9446,11 @@ async def get_earnings_report(
         raise HTTPException(status_code=500, detail="Earnings report generation failed")
 
 
-async def _init_multiagent_db():
-    """Initialise the SQLite database for the multi-agent system."""
+def _init_multiagent_db_blocking():
+    """Synchronous DB init body. Runs in a worker thread (see below) so a slow
+    or hanging SQLite call can never block the asyncio event loop — which is
+    what previously prevented uvicorn from binding the port and caused the Fly
+    boot crash-loop (the lifespan awaited this directly on the loop thread)."""
     try:
         import sys, os
         backend_dir = os.path.dirname(__file__)
@@ -9467,3 +9470,16 @@ async def _init_multiagent_db():
             logger.info("[v1] Calibrated agent weights loaded from DB")
     except Exception as exc:
         logger.warning("[v1] Could not load calibrated weights: %s", exc)
+
+
+async def _init_multiagent_db():
+    """Kick off DB initialisation in a background thread and return immediately.
+
+    The lifespan must reach `yield` quickly so uvicorn binds 0.0.0.0:8080 and
+    passes the Fly health check. Running init_db() inline on the event loop
+    blocked the bind whenever a SQLite call was slow/stuck. The DB is normally
+    already initialised in prod (CREATE TABLE IF NOT EXISTS is a near no-op),
+    so finishing this in the background is safe.
+    """
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _init_multiagent_db_blocking)
