@@ -415,8 +415,14 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(h
 
 @asynccontextmanager
 async def lifespan(app):
+    # Coarse boot markers. The Fly crash-loop shows uvicorn never binding
+    # :8080 while the process stays alive, i.e. one of these awaits blocks
+    # before `yield`. These let `flyctl logs` show exactly how far boot got.
+    logger.info("[BOOT] lifespan: calling startup()")
     await startup()
+    logger.info("[BOOT] lifespan: startup() returned; calling _init_multiagent_db()")
     await _init_multiagent_db()
+    logger.info("[BOOT] lifespan: _init_multiagent_db() returned; yielding to uvicorn (port bind imminent)")
     yield
     await shutdown()
 
@@ -3063,14 +3069,17 @@ class UserPortfolioUpsertRequest(BaseModel):
 
 
 async def startup():
+    logger.info("[BOOT] startup: begin")
     _load_lockout_state()
     # Refresh index constituent lists from Wikipedia
     global SP500_TICKERS, NASDAQ100_TICKERS, FTSE100_TICKERS, FTSE250_TICKERS, UNIVERSE
     loop = asyncio.get_event_loop()
+    logger.info("[BOOT] startup: fetching index constituents from Wikipedia")
     sp500   = await loop.run_in_executor(None, _fetch_sp500_from_wiki)
     nasdaq  = await loop.run_in_executor(None, _fetch_nasdaq100_from_wiki)
     ftse100 = await loop.run_in_executor(None, _fetch_ftse100_from_wiki)
     ftse250 = await loop.run_in_executor(None, _fetch_ftse250_from_wiki)
+    logger.info("[BOOT] startup: Wikipedia fetches complete")
     if sp500:
         SP500_TICKERS = sp500
         logger.info(f"S&P 500 tickers refreshed from Wikipedia ({len(sp500)} stocks)")
@@ -3197,12 +3206,16 @@ async def startup():
         max_instances=1,
         coalesce=True,
     )
+    logger.info("[BOOT] startup: starting scheduler")
     scheduler.start()
 
     # Start Finnhub real-time price feed (no-op if FINNHUB_API_KEY unset)
+    logger.info("[BOOT] startup: starting Finnhub price feed")
     import finnhub_prices as _fp
     _fp.start(load_watchlist())
+    logger.info("[BOOT] startup: scheduling universe prewarm")
     asyncio.ensure_future(_prewarm_universe_cache())
+    logger.info("[BOOT] startup: end (returning to lifespan)")
     print("[Monitor] Stock monitor started — checking every 5 minutes during market hours.")
     print("[Predictions] Auto-prediction scheduled every 15 minutes during market hours.")
     if _thesis_enabled:
@@ -9441,6 +9454,7 @@ async def _init_multiagent_db():
         if backend_dir not in sys.path:
             sys.path.insert(0, backend_dir)
         import db as _db
+        logger.info("[BOOT] _init_multiagent_db: calling db.init_db()")
         _db.init_db()
         logger.info("[v1] Multi-agent SQLite DB initialised")
     except Exception as exc:
