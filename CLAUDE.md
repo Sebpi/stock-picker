@@ -93,6 +93,8 @@ Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scopi
   - `GET/POST/DELETE /v1/users/me/portfolio[/{ticker}]` — per-user portfolio (real + paper)
   - `GET/PUT /v1/users/me/settings[/{key}]` — per-user key-value settings
   - `POST/DELETE /v1/users/me/device-tokens[/{token}]` — APNs device tokens (pro/premium only)
+- **Cross-app endpoint** (service key only):
+  - `GET /v1/users/lookup?identity=portal:user@example.com` — returns `{identity, tier, username, email, found}`. Used by Pick-shovels to gate expensive operations by the caller's stock-picker tier. Returns `{tier: "free", found: false}` for unknown users.
 - **Admin endpoints** (require admin role):
   - `GET /v1/users` — list all registered users
   - `PUT /v1/users/{user_id}/tier` — change a user's tier (free/pro/premium)
@@ -147,6 +149,10 @@ flyctl deploy -a stock-picker-sp
 ```
 
 Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` (32+ chars; `python -c "import secrets; print(secrets.token_hex(32))"`), `ANTHROPIC_API_KEY`. Optional: `ANTHROPIC_MODEL`, `THESIS_MODEL`, `PREDICTIONS_MAX_TOKENS`, `ALLOWED_HOSTS`, `ALLOWED_ORIGINS`, `REQUIRE_HTTPS`, `APP_URL`, `ALLOW_NGROK_ORIGINS`, `DATA_DIR`, Twilio (`TWILIO_*`) for WhatsApp, SMTP (`SMTP_*`) for email, `PORTAL_JWT_SECRET` (shared with `seb-portal` for LENS cross-app auth), `EDGAR_USER_AGENT` (SEC EDGAR courtesy header for Form 4 fetches), `ADMIN_BOOTSTRAP_PASSWORD` (sets the first-run admin password instead of generating + writing one to `$DATA_DIR/admin_initial_password.txt`). Multi-user (v3.9.0): `ACCESS_TOKEN_MINUTES` (default 15), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY_PATH` (path to .p8 file). Stripe and APNs are optional — the app degrades gracefully without them.
+
+## Known issues
+
+- **Fly deploy crash-loop (since 2026-06-25).** Stock-picker deploys via GitHub Actions CI/CD succeed (image builds, pushes to Fly) but the app returns 502/503 on startup and never passes the post-deploy health check. Affects PRs #85, #86, #87 and onwards. Root cause unknown — check `flyctl logs -a stock-picker-sp` or Fly dashboard Logs & Events. The code changes themselves are not the cause (tests pass, previous deploys with the same codebase worked on June 22). Likely an infrastructure, env var, or resource issue on the Fly machine.
 
 ## Things to be careful with
 
