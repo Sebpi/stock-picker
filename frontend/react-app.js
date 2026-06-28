@@ -4699,93 +4699,155 @@
     const [name, setName] = useState(initial ? initial.name : "");
     const [desc, setDesc] = useState(initial ? initial.description : "");
     const [etf, setEtf] = useState(initial ? (initial.benchmark_etf || "") : "");
-    const [layers, setLayers] = useState(initial ? initial.layers.map(l => ({ name: l.name, role: l.role, tickerText: Object.entries(l.tickers).map(([t, d]) => `${t}: ${d}`).join("\n") })) : []);
+    const [seeds, setSeeds] = useState("");
+    const [nodes, setNodes] = useState(initial ? (initial.nodes || []) : []);
+    const [edges, setEdges] = useState(initial ? (initial.edges || []) : []);
+    const [generating, setGenerating] = useState(false);
     const [saving, setSaving] = useState(false);
     const [err, setErr] = useState(null);
 
-    const addLayer = () => setLayers(prev => [...prev, { name: "", role: "upstream", tickerText: "" }]);
-    const removeLayer = (i) => setLayers(prev => prev.filter((_, j) => j !== i));
-    const updateLayer = (i, key, val) => setLayers(prev => prev.map((l, j) => j === i ? { ...l, [key]: val } : l));
+    const removeNode = (ticker) => {
+      setNodes(prev => prev.filter(n => n.ticker !== ticker));
+      setEdges(prev => prev.filter(e => e.source !== ticker && e.target !== ticker));
+    };
+    const removeEdge = (i) => setEdges(prev => prev.filter((_, j) => j !== i));
 
-    const parseTickers = (text) => {
-      const tickers = {};
-      text.split("\n").filter(l => l.trim()).forEach(line => {
-        const sep = line.indexOf(":");
-        if (sep > 0) {
-          tickers[line.slice(0, sep).trim().toUpperCase()] = line.slice(sep + 1).trim();
-        } else {
-          tickers[line.trim().toUpperCase()] = "";
-        }
-      });
-      return tickers;
+    const generate = () => {
+      setErr(null);
+      if (!name.trim()) { setErr("Enter a sector name first"); return; }
+      setGenerating(true);
+      const seedList = seeds.split(/[,\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+      api("/v1/sectors/generate", {
+        method: "POST",
+        body: JSON.stringify({ name: name.trim(), description: desc.trim(), seed_tickers: seedList }),
+      })
+        .then(r => {
+          setNodes(r.nodes || []);
+          setEdges(r.edges || []);
+          if (r.benchmark_etf && !etf) setEtf(r.benchmark_etf);
+          if (!id) setId(name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
+          setGenerating(false);
+        })
+        .catch(e => { setErr(e.message || "Generation failed"); setGenerating(false); });
     };
 
     const save = () => {
       setErr(null);
-      if (!id.trim() || !name.trim()) { setErr("ID and Name are required"); return; }
-      const payload = {
-        id: id.trim().toLowerCase().replace(/\s+/g, "-"),
-        name: name.trim(),
-        description: desc.trim(),
-        benchmark_etf: etf.trim() || null,
-        layers: layers.map(l => ({ name: l.name, role: l.role, tickers: parseTickers(l.tickerText) })),
-      };
+      const sectorId = id.trim().toLowerCase().replace(/\s+/g, "-");
+      if (!sectorId || !name.trim()) { setErr("ID and Name are required"); return; }
+      if (!nodes.length) { setErr("Generate or add at least one node"); return; }
       setSaving(true);
-      api("/v1/sectors", { method: "POST", body: JSON.stringify(payload) })
+      api("/v1/sectors", {
+        method: "POST",
+        body: JSON.stringify({
+          id: sectorId, name: name.trim(), description: desc.trim(),
+          benchmark_etf: etf.trim() || null, nodes, edges,
+        }),
+      })
         .then(() => { setSaving(false); onSave(); })
         .catch(e => { setErr(e.message || "Save failed"); setSaving(false); });
     };
 
     const inputCls = "w-full rounded-lg border border-pulse-line bg-pulse-panel px-3 py-2 text-sm text-pulse-ink placeholder:text-pulse-dim focus:outline-none focus:border-pulse-cyan";
+    const roleColor = (ticker) => {
+      const hasIn = edges.some(e => e.target === ticker);
+      const hasOut = edges.some(e => e.source === ticker);
+      if (hasOut && !hasIn) return "text-cyan-400";
+      if (hasIn && !hasOut) return "text-emerald-400";
+      return "text-amber-400";
+    };
+    const roleLabel = (ticker) => {
+      const hasIn = edges.some(e => e.target === ticker);
+      const hasOut = edges.some(e => e.source === ticker);
+      if (hasOut && !hasIn) return "upstream";
+      if (hasIn && !hasOut) return "downstream";
+      return "midstream";
+    };
 
     return h(Card, { className: "p-5 space-y-4" },
       h("h3", { className: "text-lg font-semibold" }, initial ? "Edit Sector" : "New Sector"),
-      err && h("div", { className: "text-red-400 text-xs" }, err),
+      err && h("div", { className: "rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-red-400 text-xs" }, err),
+
       h("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-3" },
         h("div", null,
-          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Sector ID"),
-          h("input", { className: inputCls, value: id, disabled: !!initial, placeholder: "e.g. quantum-computing", onChange: e => setId(e.target.value) }),
-        ),
-        h("div", null,
-          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Display Name"),
+          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Sector Name"),
           h("input", { className: inputCls, value: name, placeholder: "e.g. Quantum Computing", onChange: e => setName(e.target.value) }),
         ),
-        h("div", { className: "sm:col-span-2" },
-          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Description"),
-          h("input", { className: inputCls, value: desc, placeholder: "One-line sector description", onChange: e => setDesc(e.target.value) }),
+        h("div", null,
+          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Description (optional)"),
+          h("input", { className: inputCls, value: desc, placeholder: "One-line description to guide generation", onChange: e => setDesc(e.target.value) }),
         ),
         h("div", null,
-          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Benchmark ETF (optional)"),
-          h("input", { className: inputCls, value: etf, placeholder: "e.g. XBI", onChange: e => setEtf(e.target.value) }),
+          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Seed Tickers (optional)"),
+          h("input", { className: inputCls, value: seeds, placeholder: "e.g. IONQ, RGTI, QBTS", onChange: e => setSeeds(e.target.value) }),
+        ),
+        h("div", { className: "flex items-end" },
+          h("button", {
+            onClick: generate, disabled: generating,
+            className: "w-full px-4 py-2 rounded-lg bg-gradient-to-r from-pulse-cyan to-violet-500 text-white text-sm font-semibold hover:opacity-90 transition-opacity disabled:opacity-50",
+          }, generating ? "Generating supply chain…" : "Generate with AI"),
         ),
       ),
-      h("div", { className: "space-y-3" },
+
+      nodes.length > 0 && h("div", { className: "space-y-3" },
         h("div", { className: "flex items-center justify-between" },
-          h("span", { className: "text-sm font-semibold" }, "Supply-Chain Layers"),
-          h("button", { onClick: addLayer, className: "px-3 py-1 rounded-lg border border-pulse-line text-xs font-mono text-pulse-cyan hover:bg-pulse-cyan/10 transition-colors" }, "+ Add Layer"),
+          h("span", { className: "text-sm font-semibold" }, `Nodes (${nodes.length})`),
+          h("div", { className: "flex items-center gap-3 text-[10px] font-mono" },
+            h("span", { className: "text-cyan-400" }, "● upstream"),
+            h("span", { className: "text-amber-400" }, "● midstream"),
+            h("span", { className: "text-emerald-400" }, "● downstream"),
+          ),
         ),
-        layers.map((layer, i) =>
-          h("div", { key: i, className: "rounded-lg border border-pulse-line bg-pulse-panel/50 p-3 space-y-2" },
-            h("div", { className: "flex items-center gap-2" },
-              h("input", { className: cx(inputCls, "flex-1"), value: layer.name, placeholder: "Layer name (e.g. Foundry)", onChange: e => updateLayer(i, "name", e.target.value) }),
-              h("select", { className: cx(inputCls, "w-36"), value: layer.role, onChange: e => updateLayer(i, "role", e.target.value) },
-                h("option", { value: "upstream" }, "Upstream"),
-                h("option", { value: "midstream" }, "Midstream"),
-                h("option", { value: "downstream" }, "Downstream"),
+        h("div", { className: "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2" },
+          nodes.map(n =>
+            h("div", { key: n.ticker, className: "flex items-center justify-between rounded-lg bg-pulse-panel/50 border border-pulse-line px-2.5 py-1.5 group" },
+              h("div", { className: "min-w-0 flex-1" },
+                h("div", { className: "flex items-center gap-1.5" },
+                  h("span", { className: cx("text-xs font-mono font-bold", roleColor(n.ticker)) }, n.ticker),
+                  h("span", { className: "text-[9px] font-mono text-pulse-dim" }, roleLabel(n.ticker)),
+                ),
+                h("div", { className: "text-[10px] text-pulse-dim truncate" }, n.description),
               ),
-              h("button", { onClick: () => removeLayer(i), className: "px-2 py-1 text-red-400 hover:text-red-300 text-xs font-mono" }, "Remove"),
-            ),
-            h("textarea", {
-              className: cx(inputCls, "h-20 font-mono text-xs"),
-              value: layer.tickerText,
-              placeholder: "TICKER: Description (one per line)\ne.g. NVDA: GPU compute leader\nAMD: CPU/GPU challenger",
-              onChange: e => updateLayer(i, "tickerText", e.target.value),
-            }),
+              h("button", {
+                onClick: () => removeNode(n.ticker),
+                className: "ml-1 text-red-400/50 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition-opacity shrink-0",
+              }, "×"),
+            )
           )
         ),
       ),
+
+      edges.length > 0 && h("div", { className: "space-y-3" },
+        h("span", { className: "text-sm font-semibold" }, `Edges (${edges.length})`),
+        h("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-1.5" },
+          edges.map((e, i) =>
+            h("div", { key: i, className: "flex items-center gap-2 rounded bg-pulse-panel/30 border border-pulse-line/50 px-2.5 py-1 text-xs font-mono group" },
+              h("span", { className: "text-cyan-400 font-bold" }, e.source),
+              h("span", { className: "text-pulse-dim" }, "→"),
+              h("span", { className: "text-emerald-400 font-bold" }, e.target),
+              h("span", { className: "text-pulse-dim truncate flex-1" }, e.label),
+              h("button", {
+                onClick: () => removeEdge(i),
+                className: "text-red-400/50 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity shrink-0",
+              }, "×"),
+            )
+          )
+        ),
+      ),
+
+      nodes.length > 0 && h("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-pulse-line" },
+        h("div", null,
+          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Sector ID"),
+          h("input", { className: inputCls, value: id, disabled: !!initial, placeholder: "auto-generated from name", onChange: e => setId(e.target.value) }),
+        ),
+        h("div", null,
+          h("label", { className: "block text-xs text-pulse-muted mb-1 font-mono" }, "Benchmark ETF"),
+          h("input", { className: inputCls, value: etf, placeholder: "e.g. XBI", onChange: e => setEtf(e.target.value) }),
+        ),
+      ),
+
       h("div", { className: "flex items-center gap-2 pt-2" },
-        h("button", {
+        nodes.length > 0 && h("button", {
           onClick: save, disabled: saving,
           className: "px-4 py-2 rounded-lg bg-pulse-cyan text-black text-sm font-semibold hover:bg-pulse-cyan/80 transition-colors disabled:opacity-50",
         }, saving ? "Saving…" : "Save Sector"),

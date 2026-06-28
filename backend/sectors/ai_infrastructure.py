@@ -1,71 +1,82 @@
-from sectors.schema import SectorDefinition, SupplyChainLayer
+from sectors.schema import SectorDefinition, SectorNode, SectorEdge
 
 SECTOR = SectorDefinition(
     id="ai-infrastructure",
     name="AI Infrastructure",
     description="Picks & shovels for the AI capex cycle — fab equipment, foundries, compute, networking, and hyperscaler buyers",
     benchmark_etf="SMH",
-    layers=[
-        SupplyChainLayer(
-            name="Fab Equipment & Materials",
-            role="upstream",
-            tickers={
-                "ASML": "EUV lithography monopoly",
-                "AMAT": "Deposition & etch systems",
-                "LRCX": "Etch & deposition",
-                "KLAC": "Process control & inspection",
-                "ENTG": "Advanced materials & contamination control",
-            },
-        ),
-        SupplyChainLayer(
-            name="Foundry & Packaging",
-            role="upstream",
-            tickers={
-                "TSM": "Leading-edge fab (3nm/2nm)",
-                "ASX": "Advanced packaging (CoWoS)",
-            },
-        ),
-        SupplyChainLayer(
-            name="Compute Silicon",
-            role="midstream",
-            tickers={
-                "NVDA": "GPU compute (data center)",
-                "AMD": "GPU & CPU (data center + edge)",
-                "INTC": "CPU & foundry services",
-                "AVGO": "Networking ASICs & custom AI accelerators",
-                "MRVL": "Custom silicon & electro-optics",
-            },
-        ),
-        SupplyChainLayer(
-            name="Networking & Interconnect",
-            role="midstream",
-            tickers={
-                "ANET": "Data center switching",
-                "CSCO": "Enterprise & DC networking",
-                "COHR": "Optical transceivers (800G/1.6T)",
-            },
-        ),
-        SupplyChainLayer(
-            name="Infrastructure & Power",
-            role="midstream",
-            tickers={
-                "VRT": "Liquid cooling & power management",
-                "EQIX": "Colocation & interconnection",
-                "DLR": "Data center REIT",
-                "VST": "Power generation (nuclear fleet)",
-                "CEG": "Nuclear clean energy for DC",
-            },
-        ),
-        SupplyChainLayer(
-            name="Hyperscaler Buyers",
-            role="downstream",
-            tickers={
-                "MSFT": "Azure / OpenAI partnership",
-                "GOOGL": "GCP / Gemini / TPU",
-                "AMZN": "AWS / Trainium & Inferentia",
-                "META": "LLaMA infra / open-source AI",
-                "ORCL": "OCI / GPU cloud",
-            },
-        ),
+    nodes=[
+        # Fab Equipment & Materials (upstream)
+        SectorNode("ASML", "EUV lithography monopoly"),
+        SectorNode("AMAT", "Deposition & etch systems"),
+        SectorNode("LRCX", "Etch & deposition"),
+        SectorNode("KLAC", "Process control & inspection"),
+        SectorNode("ENTG", "Advanced materials & contamination control"),
+        # Foundry & Packaging
+        SectorNode("TSM", "Leading-edge fab (3nm/2nm)"),
+        SectorNode("ASX", "Advanced packaging (CoWoS)"),
+        # Compute Silicon
+        SectorNode("NVDA", "GPU compute (data center)"),
+        SectorNode("AMD", "GPU & CPU (data center + edge)"),
+        SectorNode("INTC", "CPU & foundry services"),
+        SectorNode("AVGO", "Networking ASICs & custom AI accelerators"),
+        SectorNode("MRVL", "Custom silicon & electro-optics"),
+        # Networking & Interconnect
+        SectorNode("ANET", "Data center switching"),
+        SectorNode("CSCO", "Enterprise & DC networking"),
+        SectorNode("COHR", "Optical transceivers (800G/1.6T)"),
+        # Infrastructure & Power
+        SectorNode("VRT", "Liquid cooling & power management"),
+        SectorNode("EQIX", "Colocation & interconnection"),
+        SectorNode("DLR", "Data center REIT"),
+        SectorNode("VST", "Power generation (nuclear fleet)"),
+        SectorNode("CEG", "Nuclear clean energy for DC"),
+        # Hyperscaler Buyers (downstream)
+        SectorNode("MSFT", "Azure / OpenAI partnership"),
+        SectorNode("GOOGL", "GCP / Gemini / TPU"),
+        SectorNode("AMZN", "AWS / Trainium & Inferentia"),
+        SectorNode("META", "LLaMA infra / open-source AI"),
+        SectorNode("ORCL", "OCI / GPU cloud"),
+    ],
+    edges=[
+        # Equipment → Foundry
+        SectorEdge("ASML", "TSM", "EUV lithography systems"),
+        SectorEdge("AMAT", "TSM", "Deposition & etch equipment"),
+        SectorEdge("LRCX", "TSM", "Etch & deposition tools"),
+        SectorEdge("KLAC", "TSM", "Process inspection systems"),
+        SectorEdge("ENTG", "TSM", "Specialty materials"),
+        # Foundry → Silicon
+        SectorEdge("TSM", "NVDA", "Leading-edge fab (3nm/2nm)"),
+        SectorEdge("TSM", "AMD", "Foundry services"),
+        SectorEdge("TSM", "AVGO", "Foundry services"),
+        SectorEdge("TSM", "MRVL", "Foundry services"),
+        SectorEdge("ASX", "NVDA", "Advanced packaging (CoWoS)"),
+        SectorEdge("ASX", "AMD", "Advanced packaging"),
+        # Silicon → Hyperscalers
+        SectorEdge("NVDA", "MSFT", "GPU compute for Azure/OpenAI"),
+        SectorEdge("NVDA", "GOOGL", "GPU compute for GCP"),
+        SectorEdge("NVDA", "AMZN", "GPU compute for AWS"),
+        SectorEdge("NVDA", "META", "GPU compute for AI infra"),
+        SectorEdge("NVDA", "ORCL", "GPU compute for OCI"),
+        SectorEdge("AMD", "MSFT", "CPU/GPU for Azure"),
+        SectorEdge("AMD", "AMZN", "CPU/GPU for AWS"),
+        SectorEdge("INTC", "MSFT", "Server CPUs"),
+        SectorEdge("AVGO", "GOOGL", "Custom TPU / networking"),
+        SectorEdge("AVGO", "META", "Custom networking ASICs"),
+        SectorEdge("MRVL", "AMZN", "Custom silicon"),
+        # Networking → Hyperscalers
+        SectorEdge("ANET", "MSFT", "Data center switching"),
+        SectorEdge("ANET", "META", "Data center switching"),
+        SectorEdge("CSCO", "AMZN", "Enterprise networking"),
+        SectorEdge("COHR", "ANET", "Optical transceivers"),
+        # Infra → Hyperscalers (via colo)
+        SectorEdge("VRT", "EQIX", "Liquid cooling systems"),
+        SectorEdge("VRT", "DLR", "Cooling & power mgmt"),
+        SectorEdge("EQIX", "MSFT", "Colocation services"),
+        SectorEdge("EQIX", "AMZN", "Colocation services"),
+        SectorEdge("DLR", "GOOGL", "Data center capacity"),
+        SectorEdge("DLR", "META", "Data center capacity"),
+        SectorEdge("VST", "EQIX", "Power generation"),
+        SectorEdge("CEG", "DLR", "Nuclear power"),
     ],
 )

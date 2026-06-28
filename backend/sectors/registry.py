@@ -3,7 +3,7 @@ import importlib
 import json
 import logging
 import pkgutil
-from sectors.schema import SectorDefinition, SupplyChainLayer
+from sectors.schema import SectorDefinition, SectorNode, SectorEdge
 
 logger = logging.getLogger(__name__)
 _REGISTRY: dict[str, SectorDefinition] = {}
@@ -34,15 +34,20 @@ def _load_custom_sectors() -> None:
             if row["id"] in _BUILTIN_IDS:
                 continue
             layers_data = json.loads(row["layers"]) if isinstance(row["layers"], str) else row["layers"]
-            layers = [
-                SupplyChainLayer(name=l["name"], tickers=l["tickers"], role=l["role"])
-                for l in layers_data
-            ]
+            # Support both graph format (nodes+edges) and legacy layer format
+            if isinstance(layers_data, dict) and "nodes" in layers_data:
+                nodes = [SectorNode(ticker=n["ticker"], description=n["description"]) for n in layers_data["nodes"]]
+                edges = [SectorEdge(source=e["source"], target=e["target"], label=e["label"]) for e in layers_data.get("edges", [])]
+            else:
+                # Legacy layer format — convert to nodes (no edges)
+                nodes = [SectorNode(ticker=t, description=d) for l in layers_data for t, d in l["tickers"].items()]
+                edges = []
             _REGISTRY[row["id"]] = SectorDefinition(
                 id=row["id"],
                 name=row["name"],
                 description=row["description"],
-                layers=layers,
+                nodes=nodes,
+                edges=edges,
                 benchmark_etf=row.get("benchmark_etf"),
             )
     except Exception:
