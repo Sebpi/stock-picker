@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**When making code changes, always update this CLAUDE.md to reflect the current state of the codebase** — new endpoints, env vars, dependencies, config changes, architecture shifts, or anything a future contributor (human or AI) would need to know.
+
 > Lives at `~/code/stock-picker`. Own git repo, remote `Sebpi/stock-picker` on GitHub. Deploys to the Fly app `stock-picker-sp`. Current version: **v3.9.0** (defined in `package.json`). Page title branded as **StockLens**.
 
 ## Architecture
