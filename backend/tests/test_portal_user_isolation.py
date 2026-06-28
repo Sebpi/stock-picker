@@ -30,14 +30,22 @@ def isolated_db(tmp_path, monkeypatch):
     yield db_file
 
 
-def _provision_portal_user(username: str) -> dict:
-    """Mirrors _get_db_user() auto-provisioning logic from main.py."""
+_FAKE_LEGACY_USERS = {}
+
+
+def _provision_portal_user(username: str, legacy_users: dict = None) -> dict:
+    """Mirrors _get_db_user() auto-provisioning logic from main.py.
+    legacy_users simulates the users.json lookup (load_users())."""
+    if legacy_users is None:
+        legacy_users = _FAKE_LEGACY_USERS
     import db
     row = db.get_user_by_username(username)
     if row:
         return row
     if username.startswith("portal:"):
         portal_sub = username[len("portal:"):]
+        if portal_sub in legacy_users:
+            return None
         placeholder_email = f"{portal_sub}@portal.local"
         unusable_hash = "!portal-sso-no-local-password"
         try:
@@ -91,6 +99,25 @@ def test_portal_user_idempotent():
 def test_legacy_admin_returns_none():
     result = _provision_portal_user("admin")
     assert result is None
+
+
+def test_portal_admin_falls_through_to_global_data():
+    legacy = {"admin": {"role": "admin"}}
+    result = _provision_portal_user("portal:admin", legacy_users=legacy)
+    assert result is None
+
+
+def test_portal_known_user_falls_through():
+    legacy = {"subhas01": {"role": "user"}}
+    result = _provision_portal_user("portal:subhas01", legacy_users=legacy)
+    assert result is None
+
+
+def test_portal_unknown_user_gets_provisioned():
+    legacy = {"admin": {"role": "admin"}}
+    result = _provision_portal_user("portal:newuser", legacy_users=legacy)
+    assert result is not None
+    assert result["username"] == "portal:newuser"
 
 
 def test_non_portal_unknown_user_returns_none():
