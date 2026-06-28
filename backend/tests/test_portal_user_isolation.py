@@ -35,17 +35,21 @@ _FAKE_LEGACY_USERS = {}
 
 def _provision_portal_user(username: str, legacy_users: dict = None) -> dict:
     """Mirrors _get_db_user() auto-provisioning logic from main.py.
-    legacy_users simulates the users.json lookup (load_users())."""
+    legacy_users simulates the users.json lookup (load_users()).
+    The users.json check must come BEFORE the DB lookup so that a
+    portal:admin row already in app_users doesn't shadow the global data."""
     if legacy_users is None:
         legacy_users = _FAKE_LEGACY_USERS
+    if username.startswith("portal:"):
+        portal_sub = username[len("portal:"):]
+        if portal_sub in legacy_users:
+            return None
     import db
     row = db.get_user_by_username(username)
     if row:
         return row
     if username.startswith("portal:"):
         portal_sub = username[len("portal:"):]
-        if portal_sub in legacy_users:
-            return None
         placeholder_email = f"{portal_sub}@portal.local"
         unusable_hash = "!portal-sso-no-local-password"
         try:
@@ -103,6 +107,22 @@ def test_legacy_admin_returns_none():
 
 def test_portal_admin_falls_through_to_global_data():
     legacy = {"admin": {"role": "admin"}}
+    result = _provision_portal_user("portal:admin", legacy_users=legacy)
+    assert result is None
+
+
+def test_portal_admin_falls_through_even_if_row_exists():
+    """Regression: a previous deploy may have auto-created a portal:admin row
+    in app_users. The users.json check must come BEFORE the DB lookup."""
+    import db
+    legacy = {"admin": {"role": "admin"}}
+    db.create_user(
+        username="portal:admin",
+        email="admin@portal.local",
+        password_hash="!portal-sso-no-local-password",
+        role="user",
+        tier="free",
+    )
     result = _provision_portal_user("portal:admin", legacy_users=legacy)
     assert result is None
 
