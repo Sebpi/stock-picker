@@ -87,3 +87,38 @@ def test_shared_tickers_across_sectors():
     energy_tickers = energy.all_tickers
     overlap = ai_tickers & energy_tickers
     assert len(overlap) >= 1, "Expected at least one shared ticker (e.g. CEG, VST)"
+
+
+def test_custom_sector_db_roundtrip(tmp_path, monkeypatch):
+    """Custom sectors persist to SQLite and load into the registry."""
+    import json
+    import db as _db
+    monkeypatch.setattr(_db, "DB_PATH", str(tmp_path / "test.db"))
+    _db.init_db()
+
+    layers = json.dumps([{"name": "Chips", "role": "upstream", "tickers": {"QCOM": "Mobile SoC"}}])
+    _db.upsert_custom_sector("test-sector", "Test Sector", "For testing", "XLK", layers)
+
+    rows = _db.list_custom_sectors()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "test-sector"
+    assert rows[0]["name"] == "Test Sector"
+
+    fetched = _db.get_custom_sector("test-sector")
+    assert fetched is not None
+    assert json.loads(fetched["layers"])[0]["tickers"]["QCOM"] == "Mobile SoC"
+
+    _db.upsert_custom_sector("test-sector", "Updated Name", "Updated", None, layers)
+    fetched2 = _db.get_custom_sector("test-sector")
+    assert fetched2["name"] == "Updated Name"
+
+    assert _db.delete_custom_sector("test-sector")
+    assert _db.get_custom_sector("test-sector") is None
+    assert not _db.delete_custom_sector("nonexistent")
+
+
+def test_builtin_flag():
+    from sectors.registry import is_builtin
+    assert is_builtin("ai-infrastructure")
+    assert is_builtin("energy-transition")
+    assert not is_builtin("some-custom-sector")

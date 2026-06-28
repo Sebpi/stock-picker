@@ -9313,6 +9313,18 @@ def v1_sector_scores(request: Request, sector_id: str, current_user: str = Depen
     }
 
 
+class V1SectorLayerInput(BaseModel):
+    name: str
+    role: str
+    tickers: dict[str, str]
+
+class V1SectorCreateRequest(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    benchmark_etf: str | None = None
+    layers: list[V1SectorLayerInput] = []
+
 class V1SectorRunRequest(BaseModel):
     run_fresh: bool = False
 
@@ -9391,6 +9403,66 @@ async def v1_sector_run(
     _db.update_thesis_run(run_id, status="running")
     background_tasks.add_task(_run_all)
     return {"run_id": run_id, "status": "running", "sector_id": sector_id, "tickers": tickers}
+
+
+_SECTOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,48}[a-z0-9]$")
+
+
+@app.post("/v1/sectors")
+@limiter.limit("10/minute")
+def v1_create_sector(
+    request: Request,
+    req: V1SectorCreateRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """Create or update a custom sector definition."""
+    import db as _db
+    from sectors.registry import is_builtin, reload_custom
+
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not _SECTOR_ID_RE.match(req.id):
+        raise HTTPException(status_code=400, detail="Sector ID must be 3-50 lowercase alphanumeric with hyphens")
+    if is_builtin(req.id):
+        raise HTTPException(status_code=409, detail="Cannot overwrite a built-in sector")
+    if not req.name or len(req.name) > 100:
+        raise HTTPException(status_code=400, detail="Name is required (max 100 chars)")
+    for layer in req.layers:
+        if layer.role not in ("upstream", "midstream", "downstream"):
+            raise HTTPException(status_code=400, detail=f"Invalid role '{layer.role}' — must be upstream, midstream, or downstream")
+        for ticker in layer.tickers:
+            t = ticker.upper().strip()
+            if not _TICKER_RE.match(t):
+                raise HTTPException(status_code=400, detail=f"Invalid ticker '{ticker}'")
+
+    layers_json = json.dumps([{"name": l.name, "role": l.role, "tickers": {t.upper(): d for t, d in l.tickers.items()}} for l in req.layers])
+    _db.upsert_custom_sector(req.id, req.name, req.description, req.benchmark_etf, layers_json)
+    reload_custom()
+
+    from sectors.registry import get
+    sector = get(req.id)
+    return sector.to_dict() if sector else {"id": req.id, "status": "created"}
+
+
+@app.delete("/v1/sectors/{sector_id}")
+@limiter.limit("10/minute")
+def v1_delete_sector(
+    request: Request,
+    sector_id: str,
+    current_user: str = Depends(get_current_user),
+):
+    """Delete a custom sector. Built-in sectors cannot be deleted."""
+    import db as _db
+    from sectors.registry import is_builtin, reload_custom
+
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    if is_builtin(sector_id):
+        raise HTTPException(status_code=409, detail="Cannot delete a built-in sector")
+    if not _db.delete_custom_sector(sector_id):
+        raise HTTPException(status_code=404, detail=f"Sector '{sector_id}' not found")
+    reload_custom()
+    return {"deleted": sector_id}
 
 
 @app.get("/v1/learning/summary")
@@ -9704,6 +9776,12 @@ def _init_multiagent_db_blocking():
             logger.info("[v1] Calibrated agent weights loaded from DB")
     except Exception as exc:
         logger.warning("[v1] Could not load calibrated weights: %s", exc)
+    try:
+        from sectors.registry import reload_custom
+        reload_custom()
+        logger.info("[v1] Custom sectors loaded from DB")
+    except Exception as exc:
+        logger.warning("[v1] Could not load custom sectors: %s", exc)
 
 
 async def _init_multiagent_db():

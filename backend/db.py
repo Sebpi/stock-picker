@@ -511,6 +511,16 @@ CREATE TABLE IF NOT EXISTS token_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS custom_sectors (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    benchmark_etf   TEXT,
+    layers          TEXT NOT NULL DEFAULT '[]',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
 """
 
 
@@ -2741,3 +2751,42 @@ def get_all_active_device_tokens(platform: str | None = None) -> list[dict]:
 
 def update_user_stripe(user_id: str, stripe_customer_id: str, tier: str) -> None:
     update_user(user_id, stripe_customer_id=stripe_customer_id, tier=tier)
+
+
+# ── Custom sectors ────────────────────────────────────────────────────────────
+
+def list_custom_sectors() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM custom_sectors ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_custom_sector(sector_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM custom_sectors WHERE id = ?", (sector_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_custom_sector(sector_id: str, name: str, description: str,
+                         benchmark_etf: str | None, layers_json: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        existing = conn.execute("SELECT created_at FROM custom_sectors WHERE id = ?", (sector_id,)).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE custom_sectors SET name=?, description=?, benchmark_etf=?, layers=?, updated_at=?
+                   WHERE id=?""",
+                (name, description, benchmark_etf, layers_json, now, sector_id),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO custom_sectors (id, name, description, benchmark_etf, layers, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (sector_id, name, description, benchmark_etf, layers_json, now, now),
+            )
+
+
+def delete_custom_sector(sector_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM custom_sectors WHERE id = ?", (sector_id,))
+    return cur.rowcount > 0
