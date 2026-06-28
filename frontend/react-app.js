@@ -36,6 +36,7 @@
     ["portfolio", "Portfolio"],
     ["paper", "Paper P&L"],
     ["learning", "Learning"],
+    ["sectors", "Sectors"],
     ["account", "Account"],
     ["help", "Help"],
   ];
@@ -3909,6 +3910,7 @@
       portfolio: h(Portfolio, { openDetail }),
       paper: h(PaperPnL),
       learning: h(Learning),
+      sectors: h(Sectors),
       account: h(Account),
       help: h(Help),
     };
@@ -4685,6 +4687,149 @@
       !data?.system_avg_hit_rate && h("div", { className: "rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-400" },
         "Accuracy data accumulates automatically as thesis forecasts mature. The first 3-month outcomes will be available 91 days after the first thesis was generated. Check back then for live stats."
       )
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Sectors
+  // ──────────────────────────────────────────────────────────────
+
+  function Sectors() {
+    const [sectors, setSectors] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [expanded, setExpanded] = useState(null);
+    const [scores, setScores] = useState({});
+    const [scoresLoading, setScoresLoading] = useState({});
+    const [running, setRunning] = useState({});
+
+    useEffect(() => {
+      api("/v1/sectors")
+        .then(r => { setSectors(r.sectors || []); setLoading(false); })
+        .catch(e => { setError(e.message || "Failed to load sectors"); setLoading(false); });
+    }, []);
+
+    const loadScores = (id) => {
+      if (scores[id]) return;
+      setScoresLoading(prev => ({ ...prev, [id]: true }));
+      api(`/v1/sectors/${id}/scores`)
+        .then(r => {
+          setScores(prev => ({ ...prev, [id]: r }));
+          setScoresLoading(prev => ({ ...prev, [id]: false }));
+        })
+        .catch(() => setScoresLoading(prev => ({ ...prev, [id]: false })));
+    };
+
+    const toggle = (id) => {
+      if (expanded === id) { setExpanded(null); return; }
+      setExpanded(id);
+      loadScores(id);
+    };
+
+    const runSector = (id) => {
+      if (running[id]) return;
+      setRunning(prev => ({ ...prev, [id]: true }));
+      api(`/v1/sectors/${id}/runs`, { method: "POST", body: JSON.stringify({ run_fresh: false }) })
+        .then(() => {
+          setTimeout(() => {
+            setRunning(prev => ({ ...prev, [id]: false }));
+            setScores(prev => { const n = { ...prev }; delete n[id]; return n; });
+            loadScores(id);
+          }, 5000);
+        })
+        .catch(() => setRunning(prev => ({ ...prev, [id]: false })));
+    };
+
+    const roleColor = (role) =>
+      role === "upstream" ? "text-cyan-400" : role === "midstream" ? "text-amber-400" : "text-emerald-400";
+    const roleBg = (role) =>
+      role === "upstream" ? "bg-cyan-500/10 border-cyan-500/20" : role === "midstream" ? "bg-amber-500/10 border-amber-500/20" : "bg-emerald-500/10 border-emerald-500/20";
+    const scoreColor = (s) =>
+      s == null ? "text-pulse-muted" : s >= 70 ? "text-emerald-400" : s >= 50 ? "text-amber-400" : "text-red-400";
+
+    if (loading) return h("div", { className: "flex items-center justify-center py-20 text-pulse-muted text-sm" }, "Loading…");
+    if (error) return h("div", { className: "flex items-center justify-center py-20 text-red-400 text-sm" }, error);
+
+    return h("div", { className: "grid gap-6 pb-10" },
+      h(SectionHead, {
+        title: "Sector Themes",
+        kicker: "Supply-chain",
+        subtitle: "Thematic sector universes with supply-chain layer mapping. Each sector is an independent research universe — tickers can appear in multiple themes.",
+      }),
+
+      !sectors.length
+        ? h("div", { className: "text-center py-10 text-pulse-muted text-sm" }, "No sectors registered.")
+        : sectors.map(sector =>
+          h(Card, { key: sector.id, className: "overflow-hidden" },
+            h("div", {
+              className: "flex items-center justify-between px-5 py-4 cursor-pointer hover:bg-pulse-panel/50 transition-colors",
+              onClick: () => toggle(sector.id),
+            },
+              h("div", { className: "min-w-0" },
+                h("div", { className: "flex items-center gap-3" },
+                  h("h3", { className: "text-lg font-semibold tracking-tight" }, sector.name),
+                  sector.benchmark_etf && h("span", { className: "px-2 py-0.5 rounded-full text-[10px] font-mono bg-pulse-panel border border-pulse-line text-pulse-muted" }, sector.benchmark_etf),
+                  h("span", { className: "px-2 py-0.5 rounded-full text-[10px] font-mono bg-pulse-cyan/10 text-pulse-cyan border border-pulse-cyan/20" }, `${sector.ticker_count} tickers`),
+                ),
+                h("p", { className: "mt-1 text-sm text-pulse-muted max-w-2xl" }, sector.description),
+              ),
+              h("div", { className: "flex items-center gap-2 ml-4 shrink-0" },
+                h("button", {
+                  onClick: (e) => { e.stopPropagation(); runSector(sector.id); },
+                  disabled: running[sector.id],
+                  className: "px-3 py-1.5 rounded-lg border border-pulse-line text-xs font-mono text-pulse-muted hover:text-pulse-ink hover:border-pulse-cyan/40 transition-colors disabled:opacity-50",
+                }, running[sector.id] ? "Running…" : "Run thesis"),
+                h("span", { className: cx("text-pulse-muted transition-transform", expanded === sector.id ? "rotate-180" : "") }, "▼"),
+              ),
+            ),
+
+            expanded === sector.id && h("div", { className: "border-t border-pulse-line px-5 py-4" },
+              scoresLoading[sector.id]
+                ? h("div", { className: "text-center py-6 text-pulse-muted text-sm" }, "Loading scores…")
+                : scores[sector.id]
+                  ? h("div", { className: "space-y-4" },
+                      h("div", { className: "flex items-center gap-4 mb-2" },
+                        h("div", { className: "text-sm text-pulse-muted" },
+                          "Composite: ",
+                          h("span", { className: cx("font-mono font-bold", scoreColor(scores[sector.id].composite_avg)) },
+                            scores[sector.id].composite_avg != null ? scores[sector.id].composite_avg.toFixed(1) : "—"
+                          ),
+                        ),
+                        h("div", { className: "text-sm text-pulse-muted" },
+                          "Scored: ",
+                          h("span", { className: "font-mono" }, `${scores[sector.id].scored_count}/${scores[sector.id].ticker_count}`),
+                        ),
+                      ),
+
+                      scores[sector.id].layers.map(layer =>
+                        h("div", { key: layer.name, className: cx("rounded-lg border p-3", roleBg(layer.role)) },
+                          h("div", { className: "flex items-center justify-between mb-2" },
+                            h("div", { className: "flex items-center gap-2" },
+                              h("span", { className: cx("text-xs font-mono uppercase tracking-wider", roleColor(layer.role)) }, layer.role),
+                              h("span", { className: "text-sm font-semibold" }, layer.name),
+                            ),
+                            layer.avg_score != null && h("span", { className: cx("font-mono text-sm font-bold", scoreColor(layer.avg_score)) }, layer.avg_score.toFixed(1)),
+                          ),
+                          h("div", { className: "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2" },
+                            Object.entries(layer.tickers).map(([ticker, desc]) =>
+                              h("div", { key: ticker, className: "flex items-center justify-between rounded bg-black/20 px-2.5 py-1.5" },
+                                h("div", { className: "min-w-0" },
+                                  h("div", { className: "text-xs font-mono font-bold text-pulse-ink" }, ticker),
+                                  h("div", { className: "text-[10px] text-pulse-dim truncate" }, desc),
+                                ),
+                                h("span", { className: cx("text-xs font-mono font-bold ml-2 shrink-0", scoreColor(layer.scores && layer.scores[ticker])) },
+                                  layer.scores && layer.scores[ticker] != null ? layer.scores[ticker].toFixed(0) : "—"
+                                ),
+                              )
+                            )
+                          ),
+                        )
+                      ),
+                    )
+                  : h("div", { className: "text-center py-6 text-pulse-muted text-sm" }, "No score data available. Run thesis to generate scores."),
+            ),
+          )
+        ),
     );
   }
 
