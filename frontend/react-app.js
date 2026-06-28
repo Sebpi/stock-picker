@@ -8,7 +8,9 @@
     ? `v${APP_VERSION} · ${APP_GIT_SHA}`
     : `v${APP_VERSION}`;
   const PICK_SHOVELS_API = "https://pick-shovels-wistful-morning-252.fly.dev";
+  const PORTAL_URL = "https://seb-portal.fly.dev";
   const TOKEN_KEY = "stocklens_token";
+  const PORTAL_NAV_KEY = "stocklens_portal_nav";
   const THEME_KEY = "stocklens_theme";
   const FLAG_TOOLTIPS = {
     STALE_SOURCE:    "Data source is older than expected — treat signal with caution.",
@@ -66,7 +68,12 @@
       const params = new URLSearchParams(hash.slice(1));
       const tok = params.get("portal_token");
       if (tok) setToken(tok);
+      const nav = params.get("portal_nav");
+      if (nav) {
+        try { localStorage.setItem(PORTAL_NAV_KEY, atob(nav)); } catch (_) {}
+      }
       params.delete("portal_token");
+      params.delete("portal_nav");
       const remaining = params.toString();
       const newHash = remaining ? "#" + remaining : "";
       window.history.replaceState(null, "", window.location.pathname + window.location.search + newHash);
@@ -732,6 +739,101 @@
   }
 
   // ──────────────────────────────────────────────────────────────
+  // App Switcher — dropdown for cross-app navigation
+  // ──────────────────────────────────────────────────────────────
+
+  function AppSwitcher({ logout }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+
+    useEffect(() => {
+      if (!open) return;
+      function close(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+      document.addEventListener("mousedown", close);
+      return () => document.removeEventListener("mousedown", close);
+    }, [open]);
+
+    const navApps = useMemo(() => {
+      try { return JSON.parse(localStorage.getItem(PORTAL_NAV_KEY) || "[]"); }
+      catch { return []; }
+    }, []);
+    const hasPortal = navApps.length > 0;
+    const otherApps = navApps.filter(a => a.id !== "stock-picker");
+    const tok = token();
+
+    function appHref(app) {
+      return tok ? app.url + "#portal_token=" + encodeURIComponent(tok) : app.url;
+    }
+
+    if (!hasPortal) {
+      return h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out");
+    }
+
+    return h("div", { ref, className: "relative ml-auto sm:ml-0" },
+      h("button", {
+        onClick: () => setOpen(!open),
+        title: "Switch app",
+        className: cx(
+          "flex items-center gap-1.5 rounded-lg border px-3 min-h-9 text-xs font-semibold transition",
+          open ? "border-pulse-cyan/50 text-pulse-cyan" : "border-pulse-line text-pulse-ink hover:border-pulse-cyan/50"
+        )
+      },
+        h("svg", { width: 16, height: 16, viewBox: "0 0 16 16", fill: "currentColor", className: "shrink-0" },
+          h("rect", { x: 1, y: 1, width: 5, height: 5, rx: 1 }),
+          h("rect", { x: 10, y: 1, width: 5, height: 5, rx: 1 }),
+          h("rect", { x: 1, y: 10, width: 5, height: 5, rx: 1 }),
+          h("rect", { x: 10, y: 10, width: 5, height: 5, rx: 1 })
+        ),
+        "Apps"
+      ),
+      open ? h("div", {
+        className: "absolute right-0 mt-2 z-50 rounded-xl border border-pulse-line bg-pulse-card shadow-glow",
+        style: { minWidth: "13rem" }
+      },
+        h("div", { className: "px-2 pt-2 pb-1" },
+          h("div", { className: "px-2 text-[10px] font-semibold uppercase tracking-widest text-pulse-dim" }, "Apps")
+        ),
+        otherApps.map(app =>
+          h("a", {
+            key: app.id,
+            href: appHref(app),
+            className: "flex items-center gap-2 px-4 py-2 text-sm text-pulse-muted hover:text-pulse-ink hover:bg-pulse-panel transition rounded-lg mx-1"
+          },
+            h("span", {
+              className: "inline-block h-2 w-2 rounded-full shrink-0",
+              style: { background: app.color }
+            }),
+            app.name
+          )
+        ),
+        h("div", { className: "border-t border-pulse-line mx-2 my-1" }),
+        h("a", {
+          href: PORTAL_URL,
+          className: "flex items-center gap-2 px-4 py-2 text-sm text-pulse-muted hover:text-pulse-ink hover:bg-pulse-panel transition rounded-lg mx-1"
+        },
+          h("svg", { width: 12, height: 12, viewBox: "0 0 16 16", fill: "currentColor", className: "shrink-0 opacity-50" },
+            h("path", { d: "M8 1L1 5.5V14h5v-4h4v4h5V5.5L8 1z" })
+          ),
+          "Dashboard"
+        ),
+        h("button", {
+          onClick: () => {
+            logout();
+            try { localStorage.removeItem(PORTAL_NAV_KEY); } catch (_) {}
+            window.location.href = PORTAL_URL + "/logout";
+          },
+          className: "flex w-full items-center gap-2 px-4 py-2 text-sm text-pulse-muted hover:text-pulse-red hover:bg-pulse-panel transition rounded-lg mx-1 mb-1"
+        },
+          h("svg", { width: 12, height: 12, viewBox: "0 0 16 16", fill: "currentColor", className: "shrink-0 opacity-50" },
+            h("path", { d: "M2 2v12h5v-1.5H3.5v-9H7V2H2zm7.5 2.5L8 6l2.5 2H6v1.5h4.5L8 12l1.5 1.5L14 8l-4.5-5.5z" })
+          ),
+          "Sign out"
+        )
+      ) : null
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────
   // Shell
   // ──────────────────────────────────────────────────────────────
 
@@ -750,7 +852,7 @@
             title: theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
             className: "rounded-lg border border-pulse-line p-2 text-pulse-muted hover:text-pulse-cyan transition"
           }, theme === "dark" ? h(SunIcon) : h(MoonIcon)),
-          h(Button, { onClick: logout, className: "ml-auto sm:ml-0 min-h-9 px-3 text-xs" }, "Sign out")
+          h(AppSwitcher, { logout })
         ),
         h("nav", { className: "scrollbar-none mx-auto flex max-w-7xl gap-1 overflow-x-auto pb-2" },
           TABS.map(([id, label]) => h("button", {
