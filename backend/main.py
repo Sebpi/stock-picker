@@ -732,16 +732,18 @@ def _get_db_user(username: str) -> Optional[dict]:
     """Returns the app_users record for this username, or None for the legacy admin.
     Portal users (portal:<sub>) are auto-provisioned on first access so they
     get their own empty data instead of seeing the global/admin data.
-    Portal admins (portal:<sub> where <sub> exists in users.json) fall through
+    Portal users whose <sub> exists in users.json (e.g. admin) fall through
     to the global JSON files so they keep seeing their existing data."""
+    if username.startswith("portal:"):
+        portal_sub = username[len("portal:"):]
+        if portal_sub in load_users():
+            return None
     import db as _db
     row = _db.get_user_by_username(username)
     if row:
         return row
     if username.startswith("portal:"):
         portal_sub = username[len("portal:"):]
-        if portal_sub in load_users():
-            return None
         placeholder_email = f"{portal_sub}@portal.local"
         unusable_hash = "!portal-sso-no-local-password"
         try:
