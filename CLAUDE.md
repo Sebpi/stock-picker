@@ -2,13 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> Lives at `~/code/stock-picker`. Own git repo, remote `Sebpi/stock-picker` on GitHub. Deploys to the Fly app `stock-picker-sp`. Current version: **v3.9.0** (defined in `package.json`).
+> Lives at `~/code/stock-picker`. Own git repo, remote `Sebpi/stock-picker` on GitHub. Deploys to the Fly app `stock-picker-sp`. Current version: **v3.9.0** (defined in `package.json`). Page title branded as **StockLens**.
 
 ## Architecture
 
 StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-process FastAPI backend that also serves a hand-written React SPA loaded via CDN UMD — there is **no frontend build step**.
 
-### Backend — `backend/main.py` (single ~9k-line FastAPI app)
+### Backend — `backend/main.py` (single ~9,500-line FastAPI app)
 - Python 3.12, FastAPI + uvicorn, JWT auth via `python-jose`, bcrypt password hashing, slowapi rate limiting, APScheduler for background jobs, Anthropic SDK for LLM calls, `yfinance`/`yahooquery` for market data, Twilio + SMTP for alerts, `reportlab`/`pypdf` for PDFs, `pyotp` for TOTP MFA, `stripe` for billing webhooks.
 - Storage is **dual-format on purpose**:
   - SQLite at `$DATA_DIR/stockpicker.db` — multi-agent signals, thesis history, decision log, agent accuracy, calibrated weights, multi-user tables (see `backend/db.py`). Also contains an `insider_transactions` table managed by `backend/insider_transactions.py` (CREATE TABLE IF NOT EXISTS, no migration script needed).
@@ -17,7 +17,7 @@ StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-pr
 - **`SECRET_KEY`** drives JWT signing. If unset in dev the app generates an ephemeral one (**all sessions invalidate on restart**); when `REQUIRE_HTTPS=true` (production, e.g. Fly) the app **fails closed and refuses to start** without a persistent `SECRET_KEY`.
 - Auth surface: bcrypt + JWT (HS256), per-account lockout (5 attempts → 15-min cool-off, persisted to `lockout_state.json`, keyed on the lower-cased username so case variants can't bypass it), password reset via email token (stored hashed + single-use, rate-limited 5/min). Default `admin` user auto-created on first run: set `ADMIN_BOOTSTRAP_PASSWORD` to choose it, otherwise a random one is generated and written to `$DATA_DIR/admin_initial_password.txt` (mode 0600) — **never printed to stdout**. Retrieve it securely, change it, delete the file.
 - **Multi-user auth** (v3.9.0): `app_users` SQLite table with UUID PK, bcrypt hash, role, tier (free/pro/premium), email_verified, TOTP MFA. Short-lived access tokens (`_ACCESS_TOKEN_MINUTES=15`) + 30-day rotating refresh tokens. Existing `users.json` admin login unchanged — new system is additive.
-- **Portal JWT integration (LENS shared-session):** `get_current_user` and `auth_middleware` both accept JWTs minted by `seb-portal /api/auth/jwt` when `PORTAL_JWT_SECRET` is set. Only tokens with `iss="seb-portal"` pass through; portal-routed identity is returned as `"portal:<sub>"` so audit logs can distinguish it from local logins. Portal users don't need a `users.json` entry.
+- **Portal JWT integration (SSO shared-session):** `get_current_user` and `auth_middleware` both accept JWTs minted by `seb-portal` (via `/sso/:appId` hand-off or `/api/auth/jwt`) when `PORTAL_JWT_SECRET` is set. Only tokens with `iss="seb-portal"` pass through; portal-routed identity is returned as `"portal:<sub>"` so audit logs can distinguish it from local logins. Portal users don't need a `users.json` entry — they are **auto-provisioned** in the `app_users` SQLite table on first access, with per-user watchlists, portfolios, and settings isolated from the admin's shared data.
 - Three middleware stacks on top of FastAPI: trusted-host (`ALLOWED_HOSTS`), CORS (`ALLOWED_ORIGINS`), and an HTTPS-redirect / origin-check pair gated by `REQUIRE_HTTPS`.
 - Ticker validation is centralised: `_validate_ticker()` enforces `^[A-Z0-9.\-]{1,10}$` — call this on every user-supplied ticker. `load_watchlist()` also validates tickers on read and logs a warning for any it skips.
 - A startup hook clears any `*_PROXY` env var pointing at a dead local port (port 9), to survive macOS leftover proxy envs.
@@ -43,6 +43,7 @@ StockPicker is an AI-driven equity research / portfolio / alerts tool. Single-pr
   - `ANTHROPIC_MODEL` (default `claude-haiku-4-5-20251001`) for routine predictions/screens.
   - `THESIS_MODEL` (default `claude-sonnet-4-6`) for the thesis narrative — higher quality, higher cost.
 - `PREDICTIONS_MAX_TOKENS` (default 8192) must be large enough for **all watchlist stocks in one response** — roughly 100 tokens per stock. Bump it before adding many tickers.
+- **`context_notes` parameter** — thesis runs accept an optional `context_notes: str` from Pick & Shovels, which the orchestrator includes in the Claude narrative generation as a supply-chain context block. This lets the thematic research engine enrich equity theses with its own findings.
 
 ### Learning system — `backend/agent_accuracy.py` + `backend/evaluation.py`
 The learning system measures how well each agent's directional calls translated into real returns, then automatically adjusts `HORIZON_WEIGHTS` over time.
@@ -98,13 +99,17 @@ Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scopi
 - **Admin endpoints** (require admin role):
   - `GET /v1/users` — list all registered users
   - `PUT /v1/users/{user_id}/tier` — change a user's tier (free/pro/premium)
+  - `POST /v1/users/{user_id}/revoke-sessions` — revoke all refresh tokens for a user
+  - `POST /v1/users/{user_id}/reset-password` — admin-initiated password reset
 - **Stripe webhook:** `POST /api/billing/stripe/webhook` — handles `subscription.created/updated/deleted`, updates user tier.
 - **APNs push:** `_send_apns_push()` via HTTP/2 + ES256 JWT; `_broadcast_earnings_push()` used by earnings scheduler. Requires `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY_PATH` env vars. The provider JWT is minted by `_apns_provider_jwt()` with an `iat`/`exp` (~50-min validity) and cached in `_apns_token_cache` — don't re-mint per push (Apple rejects tokens refreshed more than once per 20 min).
-- **Tests:** `backend/tests/test_multiuser.py` — 22 tests covering all DB helpers, using per-test in-memory SQLite via `monkeypatch`.
+- **Tests:** `backend/tests/test_multiuser.py` — 22 tests covering all DB helpers, using per-test in-memory SQLite via `monkeypatch`. `backend/tests/test_portal_user_isolation.py` — tests portal SSO user auto-provisioning and per-user data isolation (watchlists, portfolios, alerts).
 
 ### Frontend — `frontend/`
-- `index.html` + `react-app.js` (~4400 lines) is the entire active app. The SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
+- `index.html` + `react-app.js` (~4,960 lines) is the entire active app. The SPA uses **React 18 UMD from unpkg** and a **pre-built local Tailwind CSS** (`frontend/tailwind.css`) — no bundler, but Tailwind must be rebuilt when new utility classes are added.
 - `frontend/react-app.js` contains a `FLAG_TOOLTIPS` constant covering all `QualityFlag` enum values. Quality flags are rendered as amber pills in the thesis detail view when present.
+- **Portal SSO hand-off**: On page load, the SPA checks the URL hash for `#portal_token=...&portal_nav=...`. If present, it stores the JWT as the bearer token, caches the `portal_nav` app list in `localStorage` (key `stocklens_portal_nav`), and scrubs the hash from the URL. This bypasses the login form entirely for portal-authenticated users.
+- **App-switcher dropdown** (`AppSwitcher` component): Replaces the "Sign out" pill for portal SSO users. Shows other portal apps (from `portal_nav`) and passes the existing portal JWT via URL hash for seamless cross-app navigation. Falls back to the plain "Sign out" button for non-portal users.
 - **Login/Register flow** (v3.9.0): The `Login` component supports four modes: `login`, `register`, `forgot`, `reset`. Auto-verifies email on page load when `?verify_token=` is in the URL. Registration calls `POST /api/auth/register` and requires a 12-char minimum password.
 - **Account tab** (v3.9.0): Shows profile info (username, email, tier, email verification, MFA status), TOTP MFA setup/disable, and a "Sign out all devices" button. When signed in as `admin`, also shows a users table with all registered accounts and an inline tier dropdown.
 - **Rebuilding Tailwind CSS:** run `./node_modules/.bin/tailwindcss -i tailwind.input.css -o frontend/tailwind.css --minify` from the repo root whenever you add new Tailwind classes to `react-app.js` or `index.html`. After regenerating: recompute the SRI hash (`python3 -c "import hashlib,base64,sys; d=open('frontend/tailwind.css','rb').read(); print('sha256-'+base64.b64encode(hashlib.sha256(d).digest()).decode())"`) and update the `integrity=` attribute in `index.html`. The config lives in `tailwind.config.js` at the repo root.
@@ -115,8 +120,9 @@ Added in v3.9.0. Three-layer security: Auth (JWT+MFA) → Service (user_id scopi
 ### Deploy / runtime
 - `Dockerfile` is single-stage Python 3.12; no frontend build runs. `docker-entrypoint.sh` symlinks every JSON state file and the SQLite DB from `backend/` into `$DATA_DIR` (the Fly volume), copying seed values once if the volume is empty. Don't open these files via the symlink target during local dev if the volume isn't mounted — keep them where they are in `backend/` for local runs.
 - **Runs as non-root.** The image creates an unprivileged `appuser` (uid 10001) and installs `gosu`. `docker-entrypoint.sh` starts as root only to `chown` the mounted volume + create the symlinks, then `exec gosu appuser uvicorn …` so the long-lived server process is non-root. If you add steps that need root, do them before the `gosu` hand-off.
-- `fly.toml` mounts `stock_picker_data` at `/app/data`, sets `REQUIRE_HTTPS=true`, runs always-on (`auto_stop_machines = "off"`).
+- `fly.toml` mounts `stock_picker_data` at `/app/data`, sets `REQUIRE_HTTPS=true`, runs always-on (`auto_stop_machines = "off"`). VM: **2 GB** shared-CPU (upgraded from 1 GB to prevent OOM crashes).
 - **Deploys are automated via GitHub Actions, not the manual `flyctl` command.** `.github/workflows/fly-deploy.yml` runs on every push to `main`: `test-and-quality` (pytest + Bandit `-ll` + `pip-audit` + `npm audit --audit-level=high` + `node --check`) → **deploy to Fly** (gated on tests, uses the `FLY_API_TOKEN` repo secret) → post-deploy smoke (`/api/health`, `/`, `/legacy`, `tests/e2e/smoke.mjs`) → OWASP ZAP baseline. The `flyctl deploy` below is the manual fallback. **`pip-audit` is a hard gate** — pin every dependency (incl. `cryptography`) to a version with no known advisory or the deploy fails before it ships. **The deploy will refuse to boot if `SECRET_KEY` is unset in Fly secrets** (fail-closed when `REQUIRE_HTTPS=true`), which surfaces as the smoke job failing on `/api/health`.
+- **Additional workflows:** `fly-logs.yml` (manual-trigger: dumps Fly logs into the GitHub Actions run output for remote debugging), `promote-admin.yml`, `weekly-pipeline.yml`.
 
 ## Commands
 
@@ -152,7 +158,7 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 
 ## Known issues
 
-- ~~**Fly deploy crash-loop (since 2026-06-25).**~~ **Resolved (PR #92).** Root cause: `db.init_db()` ran blocking SQLite operations on the asyncio event-loop thread, preventing uvicorn from binding port 8080. Fixed by dispatching DB init to `run_in_executor`. The Finnhub daemon thread kept the process alive, masking the hang.
+- ~~**Fly deploy crash-loop (since 2026-06-25).**~~ **Resolved (PR #92).** Root cause: `db.init_db()` ran blocking SQLite operations on the asyncio event-loop thread, preventing uvicorn from binding port 8080. Fixed by dispatching DB init to `run_in_executor`. The Finnhub daemon thread kept the process alive, masking the hang. As part of the fix, `db.py` now sets a **30-second connection timeout** on `sqlite3.connect()`, enables **WAL journal mode**, and sets `PRAGMA busy_timeout=30000` — all to prevent write-lock contention from blocking the event loop.
 
 ## Things to be careful with
 
@@ -176,4 +182,5 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 - **MFA secrets are encrypted at rest.** `app_users.mfa_secret` is Fernet-encrypted (key derived from `SECRET_KEY` via SHA-256) with an `enc:v1:` prefix; `_encrypt_secret`/`_decrypt_secret` in `main.py` wrap every read/write. Legacy un-prefixed plaintext seeds still decrypt transparently for backward compatibility, so a re-enroll is not required. MFA verify/disable are rate-limited (5/min) and throttled per-user (5 failures/10 min → 15-min lockout).
 - **`auth_middleware` backstops every `/api/` and `/v1/` route** (except the `_AUTH_PUBLIC` set). It mirrors `get_current_user` exactly — service key, local JWT, then portal JWT — so it is never stricter than the per-route dependency. Don't let the two drift.
 - **Admin status is resolved by `_is_admin_user()`**, not an inline check. Portal/service identities are never admin; a local user is admin via `users.json` `role=="admin"` or by being the bootstrap `admin`. `/v1/users/me` returns `role:"user"` for unknown/portal identities (no default-admin).
+- **Portal admin fallthrough order matters.** `users.json` is checked **before** the `app_users` DB (PR #96). This prevents a portal-provisioned `app_users` row from shadowing the `users.json` admin entry. Don't reorder this check.
 - **Backtest harness lives in `backend/backtest_phase4.py`, NOT main.py.** Reachable via `/api/recommendations/backtest?lookback_days=90&sensitivity=true&refit_curve=true`. The harness reads `predictions.json` + yfinance prices and replays the Phase 1-3 BUY/SELL rules — it does **not** call the multi-agent orchestrator (too expensive over hundreds of dates). When you change a rule in `_build_recommendations`, mirror it in `backtest_phase4._simulate_exit` / the sizing block, or backtest results will silently drift from reality. The sensitivity sweep uses `_prefetch_market_data` to fetch SPY/VIX/tickers once and pass a `_market_cache` to each config — don't bypass this or the sweep will hit yfinance rate limits at 36× concurrency.
