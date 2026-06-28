@@ -731,13 +731,17 @@ def save_settings(s: dict):
 def _get_db_user(username: str) -> Optional[dict]:
     """Returns the app_users record for this username, or None for the legacy admin.
     Portal users (portal:<sub>) are auto-provisioned on first access so they
-    get their own empty data instead of seeing the global/admin data."""
+    get their own empty data instead of seeing the global/admin data.
+    Portal admins (portal:<sub> where <sub> exists in users.json) fall through
+    to the global JSON files so they keep seeing their existing data."""
     import db as _db
     row = _db.get_user_by_username(username)
     if row:
         return row
     if username.startswith("portal:"):
         portal_sub = username[len("portal:"):]
+        if portal_sub in load_users():
+            return None
         placeholder_email = f"{portal_sub}@portal.local"
         unusable_hash = "!portal-sso-no-local-password"
         try:
@@ -4203,7 +4207,7 @@ async def get_watchlist(names_only: bool = False, current_user: str = Depends(ge
             "price": round(price, 2) if price else None,
             "change_pct": round(change_pct, 2) if change_pct else None,
         })
-    return results
+    return _sanitize_for_json(results)
 
 
 @app.get("/api/sentiment")
