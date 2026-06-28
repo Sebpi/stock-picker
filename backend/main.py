@@ -4323,6 +4323,18 @@ def recommend(req: RecommendRequest):
         )
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         logger.info("RECOMMEND query=%s model=%s duration_ms=%s", req.query, ANTHROPIC_MODEL, elapsed_ms)
+        try:
+            from db import record_token_usage
+            record_token_usage(
+                endpoint="recommend",
+                model=ANTHROPIC_MODEL,
+                input_tokens=getattr(getattr(message, 'usage', None), 'input_tokens', 0) or 0,
+                output_tokens=getattr(getattr(message, 'usage', None), 'output_tokens', 0) or 0,
+                cache_read_tokens=getattr(getattr(message, 'usage', None), 'cache_read_input_tokens', 0) or 0,
+                cache_create_tokens=getattr(getattr(message, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+            )
+        except Exception:
+            pass
         return {"response": message.content[0].text}
     except anthropic.AuthenticationError:
         raise HTTPException(status_code=500, detail="Anthropic API key is invalid or expired. Check ANTHROPIC_API_KEY in your .env file.")
@@ -4772,6 +4784,18 @@ Be data-driven and concise. Cite the live package as the source. Flag any data t
         )
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         logger.info("STOCK_RESEARCH query=%s model=%s duration_ms=%s", req.query, ANTHROPIC_MODEL, elapsed_ms)
+        try:
+            from db import record_token_usage
+            record_token_usage(
+                endpoint="stock_research",
+                model=ANTHROPIC_MODEL,
+                input_tokens=getattr(getattr(message, 'usage', None), 'input_tokens', 0) or 0,
+                output_tokens=getattr(getattr(message, 'usage', None), 'output_tokens', 0) or 0,
+                cache_read_tokens=getattr(getattr(message, 'usage', None), 'cache_read_input_tokens', 0) or 0,
+                cache_create_tokens=getattr(getattr(message, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+            )
+        except Exception:
+            pass
         return {"response": message.content[0].text}
     except anthropic.AuthenticationError:
         raise HTTPException(status_code=500, detail="Anthropic API key is invalid or expired. Check ANTHROPIC_API_KEY in your .env file.")
@@ -5986,6 +6010,18 @@ Rules:
             )
             raw = msg.content[0].text.strip()
             elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+            try:
+                from db import record_token_usage
+                record_token_usage(
+                    endpoint="predictions",
+                    model=ANTHROPIC_MODEL,
+                    input_tokens=getattr(getattr(msg, 'usage', None), 'input_tokens', 0) or 0,
+                    output_tokens=getattr(getattr(msg, 'usage', None), 'output_tokens', 0) or 0,
+                    cache_read_tokens=getattr(getattr(msg, 'usage', None), 'cache_read_input_tokens', 0) or 0,
+                    cache_create_tokens=getattr(getattr(msg, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+                )
+            except Exception:
+                pass
             logger.info("PREDICTIONS model=%s stocks=%s duration_ms=%s research=%s", ANTHROPIC_MODEL, len(stocks_data), elapsed_ms, PREDICTIONS_INCLUDE_STOCK_RESEARCH)
             claude_preds = _extract_json_array(raw)
             if claude_preds is not None:
@@ -8424,6 +8460,19 @@ PDF TEXT:
         logger.error("PDF import Claude API error: %s", e)
         raise HTTPException(status_code=502, detail="AI service unavailable — please try again in a moment.")
 
+    try:
+        from db import record_token_usage
+        record_token_usage(
+            endpoint="pdf_import",
+            model=ANTHROPIC_MODEL,
+            input_tokens=getattr(getattr(msg, 'usage', None), 'input_tokens', 0) or 0,
+            output_tokens=getattr(getattr(msg, 'usage', None), 'output_tokens', 0) or 0,
+            cache_read_tokens=getattr(getattr(msg, 'usage', None), 'cache_read_input_tokens', 0) or 0,
+            cache_create_tokens=getattr(getattr(msg, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+        )
+    except Exception:
+        pass
+
     if not msg.content or not hasattr(msg.content[0], "text"):
         raise HTTPException(status_code=502, detail="AI returned an empty response — please try again.")
 
@@ -9488,6 +9537,12 @@ async def get_earnings_report(
     except Exception as exc:
         logger.exception("[earnings_report] %s failed: %s", symbol, exc)
         raise HTTPException(status_code=500, detail="Earnings report generation failed")
+
+
+@app.get("/v1/token-usage/summary")
+def token_usage_summary(days: int = 30, current_user: str = Depends(get_current_user)):
+    from db import get_token_usage_summary
+    return get_token_usage_summary(min(days, 365))
 
 
 def _init_multiagent_db_blocking():

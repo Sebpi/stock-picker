@@ -484,6 +484,19 @@ Return JSON with exactly these keys:
                 }],
                 messages=[{"role": "user", "content": user_prompt}],
             )
+            try:
+                from db import record_token_usage
+                record_token_usage(
+                    endpoint="thesis_narrative",
+                    model=ANTHROPIC_MODEL_THESIS,
+                    input_tokens=getattr(getattr(response, 'usage', None), 'input_tokens', 0) or 0,
+                    output_tokens=getattr(getattr(response, 'usage', None), 'output_tokens', 0) or 0,
+                    cache_read_tokens=getattr(getattr(response, 'usage', None), 'cache_read_input_tokens', 0) or 0,
+                    cache_create_tokens=getattr(getattr(response, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+                    ticker=ticker,
+                )
+            except Exception:
+                pass
             text = response.content[0].text.strip()
             # Strip markdown if present
             text = text.replace("```json", "").replace("```", "").strip()
