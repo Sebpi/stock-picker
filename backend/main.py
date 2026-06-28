@@ -9258,6 +9258,141 @@ async def v1_evaluate(
     return {"ok": True, "message": "Evaluation job started in background"}
 
 
+# ── Sector registry (Picks & Shovels integration) ──────────────────────
+
+
+@app.get("/v1/sectors")
+@limiter.limit("30/minute")
+def v1_list_sectors(request: Request, current_user: str = Depends(get_current_user)):
+    """List all available sector definitions."""
+    from sectors.registry import all_sectors
+    return {"sectors": [s.to_dict() for s in all_sectors()]}
+
+
+@app.get("/v1/sectors/{sector_id}")
+@limiter.limit("30/minute")
+def v1_get_sector(request: Request, sector_id: str, current_user: str = Depends(get_current_user)):
+    """Return a single sector definition with supply-chain layers."""
+    from sectors.registry import get
+    sector = get(sector_id)
+    if not sector:
+        raise HTTPException(status_code=404, detail=f"Sector '{sector_id}' not found")
+    return sector.to_dict()
+
+
+@app.get("/v1/sectors/{sector_id}/scores")
+@limiter.limit("20/minute")
+def v1_sector_scores(request: Request, sector_id: str, current_user: str = Depends(get_current_user)):
+    """Return latest thesis scores for every ticker in a sector, grouped by layer."""
+    import db as _db
+    from sectors.registry import get
+    sector = get(sector_id)
+    if not sector:
+        raise HTTPException(status_code=404, detail=f"Sector '{sector_id}' not found")
+    scores = _db.get_latest_scores(list(sector.all_tickers))
+    layers_out = []
+    for layer in sector.layers:
+        layer_scores = {t: scores.get(t) for t in layer.tickers if scores.get(t) is not None}
+        avg = sum(layer_scores.values()) / len(layer_scores) if layer_scores else None
+        layers_out.append({
+            "name": layer.name,
+            "role": layer.role,
+            "tickers": layer.tickers,
+            "scores": layer_scores,
+            "avg_score": round(avg, 1) if avg is not None else None,
+        })
+    all_scores_vals = [v for v in scores.values() if v is not None]
+    return {
+        "sector_id": sector_id,
+        "sector_name": sector.name,
+        "benchmark_etf": sector.benchmark_etf,
+        "composite_avg": round(sum(all_scores_vals) / len(all_scores_vals), 1) if all_scores_vals else None,
+        "ticker_count": len(sector.all_tickers),
+        "scored_count": len(all_scores_vals),
+        "layers": layers_out,
+    }
+
+
+class V1SectorRunRequest(BaseModel):
+    run_fresh: bool = False
+
+
+@app.post("/v1/sectors/{sector_id}/runs")
+@limiter.limit("2/minute")
+async def v1_sector_run(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    sector_id: str,
+    req: V1SectorRunRequest | None = Body(default=None),
+    current_user: str = Depends(get_current_user),
+):
+    """Trigger thesis generation for all tickers in a sector with supply-chain context."""
+    import db as _db
+    from sectors.registry import get
+    sector = get(sector_id)
+    if not sector:
+        raise HTTPException(status_code=404, detail=f"Sector '{sector_id}' not found")
+
+    tickers = sorted(sector.all_tickers)
+    run_fresh = req.run_fresh if req else False
+    run_id = str(uuid.uuid4())
+    _v1_runs[run_id] = {
+        "run_id": run_id,
+        "status": "queued",
+        "tickers": tickers,
+        "sector_id": sector_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed": [],
+        "failed": [],
+    }
+    _db.create_thesis_run(run_id, tickers, run_fresh, current_user)
+
+    async def _run_all():
+        orch = _get_orchestrator()
+        for ticker in tickers:
+            try:
+                context = sector.build_context_notes(ticker)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda t=ticker, c=context: orch.run_thesis(t, run_fresh=run_fresh, context_notes=c),
+                )
+                _v1_runs[run_id]["completed"].append(ticker)
+                _db.update_thesis_run(
+                    run_id,
+                    status="running",
+                    completed=_v1_runs[run_id]["completed"],
+                    failed=_v1_runs[run_id]["failed"],
+                )
+            except Exception as exc:
+                logger.error("[v1/sectors/%s] %s failed: %s", sector_id, ticker, exc)
+                _v1_runs[run_id]["failed"].append(ticker)
+                _db.update_thesis_run(
+                    run_id,
+                    status="running",
+                    completed=_v1_runs[run_id]["completed"],
+                    failed=_v1_runs[run_id]["failed"],
+                )
+        final_status = "completed"
+        if _v1_runs[run_id]["failed"] and _v1_runs[run_id]["completed"]:
+            final_status = "partial"
+        elif _v1_runs[run_id]["failed"] and not _v1_runs[run_id]["completed"]:
+            final_status = "failed"
+        _v1_runs[run_id]["status"] = final_status
+        _v1_runs[run_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _db.update_thesis_run(
+            run_id,
+            status=final_status,
+            completed=_v1_runs[run_id]["completed"],
+            failed=_v1_runs[run_id]["failed"],
+        )
+
+    _v1_runs[run_id]["status"] = "running"
+    _db.update_thesis_run(run_id, status="running")
+    background_tasks.add_task(_run_all)
+    return {"run_id": run_id, "status": "running", "sector_id": sector_id, "tickers": tickers}
+
+
 @app.get("/v1/learning/summary")
 @limiter.limit("30/minute")
 def v1_learning_summary(
