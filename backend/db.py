@@ -536,50 +536,64 @@ def record_token_usage(
         )
 
 
-def get_token_usage_summary(days: int = 30) -> dict:
+def get_token_usage_summary(days: int = 30, user_identity: str | None = None) -> dict:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    user_filter = " AND user_identity = ?" if user_identity else ""
+    params: tuple = (cutoff, user_identity) if user_identity else (cutoff,)
     with get_conn() as conn:
         totals = conn.execute(
-            """SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            f"""SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
                       COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
                       COALESCE(SUM(cache_create_tokens), 0) AS cache_create_tokens,
                       COUNT(*) AS api_calls
-               FROM token_usage WHERE timestamp >= ?""",
-            (cutoff,),
+               FROM token_usage WHERE timestamp >= ?{user_filter}""",
+            params,
         ).fetchone()
 
         by_model = conn.execute(
-            """SELECT model,
+            f"""SELECT model,
                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
                       COUNT(*) AS api_calls
-               FROM token_usage WHERE timestamp >= ?
+               FROM token_usage WHERE timestamp >= ?{user_filter}
                GROUP BY model ORDER BY api_calls DESC""",
-            (cutoff,),
+            params,
         ).fetchall()
 
         by_endpoint = conn.execute(
-            """SELECT endpoint,
+            f"""SELECT endpoint,
                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
                       COUNT(*) AS api_calls
-               FROM token_usage WHERE timestamp >= ?
+               FROM token_usage WHERE timestamp >= ?{user_filter}
                GROUP BY endpoint ORDER BY api_calls DESC""",
-            (cutoff,),
+            params,
         ).fetchall()
 
         daily = conn.execute(
-            """SELECT DATE(timestamp) AS day,
+            f"""SELECT DATE(timestamp) AS day,
                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
                       COUNT(*) AS api_calls
-               FROM token_usage WHERE timestamp >= ?
+               FROM token_usage WHERE timestamp >= ?{user_filter}
                GROUP BY DATE(timestamp) ORDER BY day DESC LIMIT 30""",
-            (cutoff,),
+            params,
         ).fetchall()
 
-    return {
+        by_user_rows = []
+        if not user_identity:
+            by_user_rows = conn.execute(
+                """SELECT COALESCE(user_identity, 'unknown') AS user_identity,
+                          COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                          COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                          COUNT(*) AS api_calls
+                   FROM token_usage WHERE timestamp >= ?
+                   GROUP BY user_identity ORDER BY api_calls DESC""",
+                (cutoff,),
+            ).fetchall()
+
+    result = {
         "period_days": days,
         "totals": {
             "input_tokens": totals["input_tokens"],
@@ -593,6 +607,9 @@ def get_token_usage_summary(days: int = 30) -> dict:
         "by_endpoint": [dict(r) for r in by_endpoint],
         "daily": [dict(r) for r in daily],
     }
+    if not user_identity:
+        result["by_user"] = [dict(r) for r in by_user_rows]
+    return result
 
 
 def _backfill_1m_outcomes() -> int:

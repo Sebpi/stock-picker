@@ -4304,7 +4304,7 @@ class TradeRequest(BaseModel):
     date: Optional[str] = None
 
 @app.post("/api/recommend")
-def recommend(req: RecommendRequest):
+def recommend(req: RecommendRequest, current_user: str = Depends(get_current_user)):
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in .env")
@@ -4332,6 +4332,7 @@ def recommend(req: RecommendRequest):
                 output_tokens=getattr(getattr(message, 'usage', None), 'output_tokens', 0) or 0,
                 cache_read_tokens=getattr(getattr(message, 'usage', None), 'cache_read_input_tokens', 0) or 0,
                 cache_create_tokens=getattr(getattr(message, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+                user_identity=current_user,
             )
         except Exception:
             pass
@@ -4659,7 +4660,7 @@ def _build_live_research_context(ticker_symbol: str) -> tuple[str, bool]:
     return "\n".join(lines), has_live_data
 
 
-def _stock_research_impl(req: RecommendRequest):
+def _stock_research_impl(req: RecommendRequest, user_identity: str | None = None):
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in .env")
@@ -4793,6 +4794,7 @@ Be data-driven and concise. Cite the live package as the source. Flag any data t
                 output_tokens=getattr(getattr(message, 'usage', None), 'output_tokens', 0) or 0,
                 cache_read_tokens=getattr(getattr(message, 'usage', None), 'cache_read_input_tokens', 0) or 0,
                 cache_create_tokens=getattr(getattr(message, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+                user_identity=user_identity,
             )
         except Exception:
             pass
@@ -4809,8 +4811,8 @@ Be data-driven and concise. Cite the live package as the source. Flag any data t
 
 @app.post("/api/stock-research")
 @limiter.limit("8/hour")
-def stock_research(req: RecommendRequest, request: Request):
-    return _stock_research_impl(req)
+def stock_research(req: RecommendRequest, request: Request, current_user: str = Depends(get_current_user)):
+    return _stock_research_impl(req, user_identity=current_user)
 
 
 # ── Predictions endpoints ─────────────────────────────────────────────────────
@@ -6019,6 +6021,7 @@ Rules:
                     output_tokens=getattr(getattr(msg, 'usage', None), 'output_tokens', 0) or 0,
                     cache_read_tokens=getattr(getattr(msg, 'usage', None), 'cache_read_input_tokens', 0) or 0,
                     cache_create_tokens=getattr(getattr(msg, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+                    user_identity="system",
                 )
             except Exception:
                 pass
@@ -8469,6 +8472,7 @@ PDF TEXT:
             output_tokens=getattr(getattr(msg, 'usage', None), 'output_tokens', 0) or 0,
             cache_read_tokens=getattr(getattr(msg, 'usage', None), 'cache_read_input_tokens', 0) or 0,
             cache_create_tokens=getattr(getattr(msg, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+            user_identity=current_user,
         )
     except Exception:
         pass
@@ -9540,9 +9544,14 @@ async def get_earnings_report(
 
 
 @app.get("/v1/token-usage/summary")
-def token_usage_summary(days: int = 30, current_user: str = Depends(get_current_user)):
+def token_usage_summary(days: int = 30, user: str | None = None, current_user: str = Depends(get_current_user)):
     from db import get_token_usage_summary
-    return get_token_usage_summary(min(days, 365))
+    filter_user = None
+    if user and _is_admin_user(current_user):
+        filter_user = user
+    elif not _is_admin_user(current_user):
+        filter_user = current_user
+    return get_token_usage_summary(min(days, 365), user_identity=filter_user)
 
 
 def _init_multiagent_db_blocking():

@@ -494,6 +494,7 @@ Return JSON with exactly these keys:
                     cache_read_tokens=getattr(getattr(response, 'usage', None), 'cache_read_input_tokens', 0) or 0,
                     cache_create_tokens=getattr(getattr(response, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
                     ticker=ticker,
+                    user_identity="system",
                 )
             except Exception:
                 pass

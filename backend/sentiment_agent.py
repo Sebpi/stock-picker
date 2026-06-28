@@ -418,6 +418,7 @@ def analyse_with_claude(prompt: str) -> Optional[dict]:
                 output_tokens=getattr(getattr(response, 'usage', None), 'output_tokens', 0) or 0,
                 cache_read_tokens=getattr(getattr(response, 'usage', None), 'cache_read_input_tokens', 0) or 0,
                 cache_create_tokens=getattr(getattr(response, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+                user_identity="system",
             )
         except Exception:
             pass
