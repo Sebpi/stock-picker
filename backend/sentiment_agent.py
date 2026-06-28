@@ -409,6 +409,18 @@ def analyse_with_claude(prompt: str) -> Optional[dict]:
             system="You are a professional equity analyst. Respond with valid JSON only.",
             messages=[{"role": "user", "content": prompt}],
         )
+        try:
+            from db import record_token_usage
+            record_token_usage(
+                endpoint="sentiment_analysis",
+                model=CLAUDE_MODEL,
+                input_tokens=getattr(getattr(response, 'usage', None), 'input_tokens', 0) or 0,
+                output_tokens=getattr(getattr(response, 'usage', None), 'output_tokens', 0) or 0,
+                cache_read_tokens=getattr(getattr(response, 'usage', None), 'cache_read_input_tokens', 0) or 0,
+                cache_create_tokens=getattr(getattr(response, 'usage', None), 'cache_creation_input_tokens', 0) or 0,
+            )
+        except Exception:
+            pass
         raw = response.content[0].text.strip()
         # Strip markdown fences if Claude wraps the JSON anyway
         raw = re.sub(r"^```json\s*", "", raw)

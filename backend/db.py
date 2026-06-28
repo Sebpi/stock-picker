@@ -496,7 +496,103 @@ CREATE TABLE IF NOT EXISTS user_alerts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_alerts_user ON user_alerts(user_id, timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS token_usage (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT NOT NULL,
+    endpoint        TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_create_tokens INTEGER NOT NULL DEFAULT 0,
+    ticker          TEXT,
+    user_identity   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(timestamp DESC);
 """
+
+
+def record_token_usage(
+    endpoint: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_create_tokens: int = 0,
+    ticker: str | None = None,
+    user_identity: str | None = None,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO token_usage
+               (timestamp, endpoint, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_create_tokens, ticker, user_identity)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.now(timezone.utc).isoformat(), endpoint, model,
+             input_tokens, output_tokens, cache_read_tokens, cache_create_tokens,
+             ticker, user_identity),
+        )
+
+
+def get_token_usage_summary(days: int = 30) -> dict:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with get_conn() as conn:
+        totals = conn.execute(
+            """SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                      COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                      COALESCE(SUM(cache_create_tokens), 0) AS cache_create_tokens,
+                      COUNT(*) AS api_calls
+               FROM token_usage WHERE timestamp >= ?""",
+            (cutoff,),
+        ).fetchone()
+
+        by_model = conn.execute(
+            """SELECT model,
+                      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                      COUNT(*) AS api_calls
+               FROM token_usage WHERE timestamp >= ?
+               GROUP BY model ORDER BY api_calls DESC""",
+            (cutoff,),
+        ).fetchall()
+
+        by_endpoint = conn.execute(
+            """SELECT endpoint,
+                      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                      COUNT(*) AS api_calls
+               FROM token_usage WHERE timestamp >= ?
+               GROUP BY endpoint ORDER BY api_calls DESC""",
+            (cutoff,),
+        ).fetchall()
+
+        daily = conn.execute(
+            """SELECT DATE(timestamp) AS day,
+                      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                      COUNT(*) AS api_calls
+               FROM token_usage WHERE timestamp >= ?
+               GROUP BY DATE(timestamp) ORDER BY day DESC LIMIT 30""",
+            (cutoff,),
+        ).fetchall()
+
+    return {
+        "period_days": days,
+        "totals": {
+            "input_tokens": totals["input_tokens"],
+            "output_tokens": totals["output_tokens"],
+            "cache_read_tokens": totals["cache_read_tokens"],
+            "cache_create_tokens": totals["cache_create_tokens"],
+            "total_tokens": totals["input_tokens"] + totals["output_tokens"],
+            "api_calls": totals["api_calls"],
+        },
+        "by_model": [dict(r) for r in by_model],
+        "by_endpoint": [dict(r) for r in by_endpoint],
+        "daily": [dict(r) for r in daily],
+    }
 
 
 def _backfill_1m_outcomes() -> int:
