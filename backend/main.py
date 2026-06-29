@@ -9544,7 +9544,7 @@ async def v1_generate_sector(
         raise HTTPException(status_code=502, detail="LLM returned invalid JSON")
     except Exception as exc:
         logger.error("[v1/sectors/generate] LLM call failed: %s", exc)
-        raise HTTPException(status_code=502, detail="LLM generation failed")
+        raise HTTPException(status_code=502, detail=f"LLM generation failed: {exc}")
 
     nodes = result.get("nodes", [])
     edges = result.get("edges", [])
