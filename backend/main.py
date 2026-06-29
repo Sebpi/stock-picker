@@ -9313,6 +9313,28 @@ def v1_sector_scores(request: Request, sector_id: str, current_user: str = Depen
     }
 
 
+class V1SectorNodeInput(BaseModel):
+    ticker: str
+    description: str = ""
+
+class V1SectorEdgeInput(BaseModel):
+    source: str
+    target: str
+    label: str = ""
+
+class V1SectorCreateRequest(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    benchmark_etf: str | None = None
+    nodes: list[V1SectorNodeInput] = []
+    edges: list[V1SectorEdgeInput] = []
+
+class V1SectorGenerateRequest(BaseModel):
+    name: str
+    description: str = ""
+    seed_tickers: list[str] = []
+
 class V1SectorRunRequest(BaseModel):
     run_fresh: bool = False
 
@@ -9391,6 +9413,152 @@ async def v1_sector_run(
     _db.update_thesis_run(run_id, status="running")
     background_tasks.add_task(_run_all)
     return {"run_id": run_id, "status": "running", "sector_id": sector_id, "tickers": tickers}
+
+
+_SECTOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,48}[a-z0-9]$")
+
+
+@app.post("/v1/sectors")
+@limiter.limit("10/minute")
+def v1_create_sector(
+    request: Request,
+    req: V1SectorCreateRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """Create or update a custom sector definition."""
+    import db as _db
+    from sectors.registry import is_builtin, reload_custom
+
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not _SECTOR_ID_RE.match(req.id):
+        raise HTTPException(status_code=400, detail="Sector ID must be 3-50 lowercase alphanumeric with hyphens")
+    if is_builtin(req.id):
+        raise HTTPException(status_code=409, detail="Cannot overwrite a built-in sector")
+    if not req.name or len(req.name) > 100:
+        raise HTTPException(status_code=400, detail="Name is required (max 100 chars)")
+    node_tickers = set()
+    for node in req.nodes:
+        t = node.ticker.upper().strip()
+        if not _TICKER_RE.match(t):
+            raise HTTPException(status_code=400, detail=f"Invalid ticker '{node.ticker}'")
+        node_tickers.add(t)
+    for edge in req.edges:
+        s, tgt = edge.source.upper().strip(), edge.target.upper().strip()
+        if s not in node_tickers or tgt not in node_tickers:
+            raise HTTPException(status_code=400, detail=f"Edge references unknown ticker: {s} → {tgt}")
+
+    graph_json = json.dumps({
+        "nodes": [{"ticker": n.ticker.upper().strip(), "description": n.description} for n in req.nodes],
+        "edges": [{"source": e.source.upper().strip(), "target": e.target.upper().strip(), "label": e.label} for e in req.edges],
+    })
+    _db.upsert_custom_sector(req.id, req.name, req.description, req.benchmark_etf, graph_json)
+    reload_custom()
+
+    from sectors.registry import get
+    sector = get(req.id)
+    return sector.to_dict() if sector else {"id": req.id, "status": "created"}
+
+
+@app.delete("/v1/sectors/{sector_id}")
+@limiter.limit("10/minute")
+def v1_delete_sector(
+    request: Request,
+    sector_id: str,
+    current_user: str = Depends(get_current_user),
+):
+    """Delete a custom sector. Built-in sectors cannot be deleted."""
+    import db as _db
+    from sectors.registry import is_builtin, reload_custom
+
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    if is_builtin(sector_id):
+        raise HTTPException(status_code=409, detail="Cannot delete a built-in sector")
+    if not _db.delete_custom_sector(sector_id):
+        raise HTTPException(status_code=404, detail=f"Sector '{sector_id}' not found")
+    reload_custom()
+    return {"deleted": sector_id}
+
+
+_SECTOR_GENERATE_PROMPT = """You are a supply-chain analyst. Given a sector theme, identify the key publicly traded companies and map their supply-chain relationships.
+
+Sector: {name}
+Description: {description}
+{seed_section}
+Return a JSON object with:
+- "nodes": array of {{"ticker": "SYMBOL", "description": "one-line role"}} — 15-25 US-listed tickers
+- "edges": array of {{"source": "SUPPLIER_TICKER", "target": "BUYER_TICKER", "label": "what flows between them"}} — direct supply-chain relationships only
+- "benchmark_etf": the most relevant sector ETF ticker (or null)
+
+Rules:
+- Only include real, currently traded US tickers (NYSE/NASDAQ)
+- Edges must be directional: source supplies/sells to target
+- Focus on the picks-and-shovels (enablers) not just the end consumers
+- Include companies across the full value chain: raw materials → components → platforms → end buyers
+- Every node must have at least one edge (no orphans)
+- Prefer well-known, liquid names (>$1B market cap)
+
+Return ONLY the JSON object, no markdown fences or explanation."""
+
+
+@app.post("/v1/sectors/generate")
+@limiter.limit("5/minute")
+async def v1_generate_sector(
+    request: Request,
+    req: V1SectorGenerateRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """Use LLM to generate a supply-chain graph for a sector theme."""
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not req.name or len(req.name) > 100:
+        raise HTTPException(status_code=400, detail="Name is required (max 100 chars)")
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    seed_section = ""
+    if req.seed_tickers:
+        seed_section = f"Seed tickers to include (add more as needed): {', '.join(t.upper() for t in req.seed_tickers[:10])}\n"
+
+    prompt = _SECTOR_GENERATE_PROMPT.format(
+        name=req.name,
+        description=req.description or f"Supply-chain analysis for {req.name}",
+        seed_section=seed_section,
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        message = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="LLM returned invalid JSON")
+    except Exception as exc:
+        logger.error("[v1/sectors/generate] LLM call failed: %s", exc)
+        raise HTTPException(status_code=502, detail="LLM generation failed")
+
+    nodes = result.get("nodes", [])
+    edges = result.get("edges", [])
+    valid_tickers = {n["ticker"].upper().strip() for n in nodes if _TICKER_RE.match(n.get("ticker", "").upper().strip())}
+    nodes = [n for n in nodes if n["ticker"].upper().strip() in valid_tickers]
+    edges = [e for e in edges if e["source"].upper().strip() in valid_tickers and e["target"].upper().strip() in valid_tickers]
+
+    return {
+        "name": req.name,
+        "description": req.description,
+        "benchmark_etf": result.get("benchmark_etf"),
+        "nodes": nodes,
+        "edges": edges,
+    }
 
 
 @app.get("/v1/learning/summary")
@@ -9704,6 +9872,12 @@ def _init_multiagent_db_blocking():
             logger.info("[v1] Calibrated agent weights loaded from DB")
     except Exception as exc:
         logger.warning("[v1] Could not load calibrated weights: %s", exc)
+    try:
+        from sectors.registry import reload_custom
+        reload_custom()
+        logger.info("[v1] Custom sectors loaded from DB")
+    except Exception as exc:
+        logger.warning("[v1] Could not load custom sectors: %s", exc)
 
 
 async def _init_multiagent_db():
