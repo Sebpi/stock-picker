@@ -60,6 +60,30 @@ The learning system measures how well each agent's directional calls translated 
   - `POST /v1/learning/weights/reset` — restore factory defaults and clear calibration history
 - **Factory defaults** are snapshotted at import time in `_DEFAULT_WEIGHTS = copy.deepcopy(HORIZON_WEIGHTS)` so reset is always available.
 
+### Sector system — `backend/sectors/`
+The Pick & Shovels thematic supply-chain research layer. Sectors model the supply chain as a directed graph: `SectorNode` (ticker + one-line description) and `SectorEdge` (source → target + label describing what flows between them). Upstream/midstream/downstream roles are inferred from graph topology — not manually assigned.
+
+- **Schema** (`sectors/schema.py`): `SectorDefinition` dataclass with `nodes`, `edges`, `benchmark_etf`. Key methods:
+  - `ticker_role(ticker)` — infers "upstream" (outgoing edges only), "midstream" (both), "downstream" (incoming only) from edge topology
+  - `build_context_notes(ticker)` — returns supply-chain context string with specific suppliers/customers for the 21-agent orchestrator
+  - `layers` property — backward-compat grouping of nodes by inferred role, so existing scores and thesis endpoints work unchanged
+  - `to_dict()` — serialises nodes, edges, AND backward-compat layers
+- **Built-in sectors** (`sectors/ai_infrastructure.py`, `sectors/energy_transition.py`, `sectors/cybersecurity.py`): Python files auto-discovered by the registry. Each exports a `SECTOR` instance. Read-only in the UI.
+- **Registry** (`sectors/registry.py`): Auto-discovers built-in `.py` sector modules AND loads custom sectors from the `custom_sectors` SQLite table. `_BUILTIN_IDS` tracks which came from Python files. Key functions: `get(id)`, `all_sectors()`, `all_sector_ids()`, `is_builtin(id)`, `reload_custom()`.
+- **Custom sectors** — stored in `custom_sectors` SQLite table (`db.py`). The `layers` column stores JSON in graph format `{"nodes": [...], "edges": [...]}`. CRUD helpers: `list_custom_sectors()`, `get_custom_sector()`, `upsert_custom_sector()`, `delete_custom_sector()`.
+- **LLM-assisted generation** — `POST /v1/sectors/generate` (5/min, admin-only) sends a sector name + description to Claude (`ANTHROPIC_MODEL`), returns a proposed supply-chain graph (15–25 nodes with edges). The prompt asks for US-listed tickers across the full value chain with no orphan nodes. Response is validated: markdown fences stripped, tickers checked against `_TICKER_RE`, edges filtered to only reference valid nodes.
+- **API endpoints** (all require auth, create/update/delete are admin-only):
+  - `GET /v1/sectors` — list all sectors (built-in + custom)
+  - `GET /v1/sectors/{id}` — single sector detail
+  - `POST /v1/sectors` — create custom sector (graph format: nodes + edges)
+  - `PUT /v1/sectors/{id}` — update custom sector (can't overwrite built-ins)
+  - `DELETE /v1/sectors/{id}` — delete custom sector (can't delete built-ins)
+  - `POST /v1/sectors/generate` — LLM-generated supply-chain graph
+  - `GET /v1/sectors/{id}/scores` — latest thesis scores for sector tickers
+  - `POST /v1/sectors/{id}/runs` — run thesis for all sector tickers
+- **Frontend**: Sectors tab with sector cards (expand/collapse, scores display, Run thesis). `SectorForm` component for creating/editing with "Generate with AI" button, color-coded node roles (cyan=upstream, amber=midstream, green=downstream), edge visualization, and cascade-delete on node removal.
+- **Sector ID validation**: `_SECTOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,48}[a-z0-9]$")` — lowercase alphanumeric with hyphens, 3–50 chars.
+
 ### SEC EDGAR insider transactions — `backend/insider_transactions.py`
 - Fetches Form 4 filings via SEC EDGAR for any ticker. Rate-limited to 0.12s between requests (under SEC's 10 req/s cap). Requires `EDGAR_USER_AGENT` env var (defaults to a courtesy string if unset).
 - Key functions: `refresh_ticker` (walk last 40 filings, idempotent INSERT OR IGNORE), `summarize_ticker` (30/60-day rollup: net $ flow, purchase/sale counts, unique-insider count, `cluster_buying` flag ≥3 insiders making P transactions), `list_transactions`.
@@ -177,3 +201,7 @@ Required `backend/.env` keys (template at `backend/.env.example`): `SECRET_KEY` 
 - **`auth_middleware` backstops every `/api/` and `/v1/` route** (except the `_AUTH_PUBLIC` set). It mirrors `get_current_user` exactly — service key, local JWT, then portal JWT — so it is never stricter than the per-route dependency. Don't let the two drift.
 - **Admin status is resolved by `_is_admin_user()`**, not an inline check. Portal/service identities are never admin; a local user is admin via `users.json` `role=="admin"` or by being the bootstrap `admin`. `/v1/users/me` returns `role:"user"` for unknown/portal identities (no default-admin).
 - **Backtest harness lives in `backend/backtest_phase4.py`, NOT main.py.** Reachable via `/api/recommendations/backtest?lookback_days=90&sensitivity=true&refit_curve=true`. The harness reads `predictions.json` + yfinance prices and replays the Phase 1-3 BUY/SELL rules — it does **not** call the multi-agent orchestrator (too expensive over hundreds of dates). When you change a rule in `_build_recommendations`, mirror it in `backtest_phase4._simulate_exit` / the sizing block, or backtest results will silently drift from reality. The sensitivity sweep uses `_prefetch_market_data` to fetch SPY/VIX/tickers once and pass a `_market_cache` to each config — don't bypass this or the sweep will hit yfinance rate limits at 36× concurrency.
+- **Built-in sectors are Python files, custom sectors are in SQLite.** Don't add a built-in sector ID that collides with a custom sector — `_load_custom_sectors()` silently skips customs that match a `_BUILTIN_IDS` entry. Adding a new built-in sector means creating a new `.py` file in `backend/sectors/` that exports `SECTOR: SectorDefinition` — the registry auto-discovers it.
+- **Sector graph topology drives role inference.** `ticker_role()` and the backward-compat `layers` property both derive from edges. If a sector has no edges (e.g. a legacy custom sector imported with nodes only), every node defaults to "midstream". This is correct behavior — don't add edges just to get upstream/downstream labels unless the relationships are real.
+- **`POST /v1/sectors/generate` uses `ANTHROPIC_MODEL`** (default Haiku), not the thesis model. It requires `ANTHROPIC_API_KEY` to be set. The LLM response is validated but not perfect — the frontend lets users review and edit before saving. The `_SECTOR_GENERATE_PROMPT` in `main.py` controls what the LLM returns.
+- **Frontend `isCustom()` check uses a hardcoded list** of built-in sector IDs (`["ai-infrastructure", "energy-transition", "cybersecurity"]`). If you add a new built-in sector `.py` file, update this list in `react-app.js` or the UI will show edit/delete buttons for it.
