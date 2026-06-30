@@ -3891,7 +3891,10 @@
     }
 
     useEffect(() => { check(); }, []);
-    if (!ready) return h("div", { className: "flex min-h-screen items-center justify-center text-pulse-muted" }, "Loading StockLens...");
+    if (!ready) return h("div", { className: "flex min-h-screen flex-col items-center justify-center gap-2 text-pulse-muted" },
+      h("div", null, "Loading StockLens..."),
+      h("div", { className: "text-[11px] text-pulse-dim font-mono" }, VERSION_LABEL),
+    );
     if (!token()) return h(Login, { onLogin: check });
 
     const openDetail = (ticker) => setDetail(ticker);
